@@ -27,7 +27,7 @@ const LOGIN_POLL_PATH: &str = "/acct/lp/lgn/sq/v1";
 const TALK_PATH: &str = "/S4";
 const HISTORY_PAGE: i32 = 30;
 const HISTORY_TARGET: usize = 40;
-const POLL_HOLD: Duration = Duration::from_secs(185);
+const POLL_HOLD: Duration = Duration::from_secs(12);
 const POLL_PROBE: Duration = Duration::from_secs(25);
 const FALLBACK_EVERY: Duration = Duration::from_secs(25);
 
@@ -53,8 +53,9 @@ struct OpCursor {
 }
 
 enum InboxNotice {
-    Message { id: String, message: BTreeMap<i16, Value>, incoming: bool },
+    Message { id: String, message: BTreeMap<i16, Value>, incoming: bool, when: i64 },
     Read { id: String },
+    Receipt { id: String },
     Refresh { id: String },
 }
 
@@ -108,6 +109,10 @@ struct Session {
     e2ee_public_key: String,
     #[serde(rename = "e2eeKeyId", default)]
     e2ee_key_id: Option<i64>,
+    #[serde(rename = "e2eeSenderKeyId", default)]
+    e2ee_sender_key_id: Option<i64>,
+    #[serde(rename = "e2eeLocalKeyIds", default, skip_serializing_if = "Vec::is_empty")]
+    e2ee_local_key_ids: Vec<i64>,
     #[serde(rename = "e2eeKeys", default, skip_serializing_if = "Vec::is_empty")]
     e2ee_keys: Vec<StoredKey>,
 }
@@ -129,6 +134,8 @@ impl Default for Session {
             e2ee_private_key: String::new(),
             e2ee_public_key: String::new(),
             e2ee_key_id: None,
+            e2ee_sender_key_id: None,
+            e2ee_local_key_ids: Vec::new(),
             e2ee_keys: Vec::new(),
         }
     }
@@ -176,11 +183,17 @@ pub fn signed_in() -> bool {
 }
 
 fn save_session(session: &Session) -> Result<PathBuf, LineError> {
+    let mut session = session.clone();
+    if let Ok(text) = std::fs::read_to_string(config_path()) {
+        if let Ok(disk) = serde_json::from_str::<Session>(&text) {
+            merge_e2ee(&mut session, &disk);
+        }
+    }
     let path = config_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|err| line(err.to_string()))?;
     }
-    let payload = serde_json::to_string_pretty(session).map_err(|err| line(err.to_string()))? + "\n";
+    let payload = serde_json::to_string_pretty(&session).map_err(|err| line(err.to_string()))? + "\n";
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
@@ -191,6 +204,27 @@ fn save_session(session: &Session) -> Result<PathBuf, LineError> {
     file.write_all(payload.as_bytes()).map_err(|err| line(err.to_string()))?;
     let _ = std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600));
     Ok(path)
+}
+
+fn merge_e2ee(session: &mut Session, disk: &Session) {
+    if session.e2ee_sender_key_id.is_none() {
+        session.e2ee_sender_key_id = disk.e2ee_sender_key_id;
+    }
+    if session.e2ee_private_key.is_empty() {
+        session.e2ee_private_key = disk.e2ee_private_key.clone();
+        session.e2ee_public_key = disk.e2ee_public_key.clone();
+        session.e2ee_key_id = disk.e2ee_key_id;
+    }
+    for id in &disk.e2ee_local_key_ids {
+        if !session.e2ee_local_key_ids.contains(id) {
+            session.e2ee_local_key_ids.push(*id);
+        }
+    }
+    for key in &disk.e2ee_keys {
+        if !session.e2ee_keys.iter().any(|have| have.private_key == key.private_key) {
+            session.e2ee_keys.push(key.clone());
+        }
+    }
 }
 
 fn line(message: impl Into<String>) -> LineError {
@@ -668,6 +702,8 @@ impl Client {
             senders.extend(event_mids(message).into_iter().filter(|mid| mid != &self.session.mid));
         }
         let cards = self.contact_cards(&senders);
+        let me = self.session.mid.clone();
+        let marks = self.read_marks(mid);
         let mut messages = Vec::new();
         for message in &collected {
             let (text, sealed) = self.visible_text(message, &cards);
@@ -675,12 +711,17 @@ impl Client {
                 continue;
             }
             let sender = text_field(message, 1);
-            let mine = !self.session.mid.is_empty() && sender == self.session.mid;
+            let mine = !me.is_empty() && sender == me;
+            let ident = text_field(message, 4);
+            let (status, readers) = if mine { delivery_state(&ident, &me, &marks) } else { (String::new(), 0) };
             let (sticker, fallback) = sticker_pair(Some(message));
             let kind = content_kind(int_field(message, 15));
-            let media_id = if kind == "image" || kind == "video" { text_field(message, 4) } else { String::new() };
+            let media_id = if kind == "image" || kind == "video" { ident.clone() } else { String::new() };
             messages.push(json!({
+                "id": ident,
                 "mine": mine,
+                "status": status,
+                "readers": readers,
                 "name": if mine { "" } else { cards.get(&sender).map(|card| card.0.as_str()).unwrap_or("") },
                 "picture": if mine { "" } else { cards.get(&sender).map(|card| card.1.as_str()).unwrap_or("") },
                 "text": text,
@@ -943,7 +984,7 @@ impl Client {
         match self.send_text(to, message) {
             Ok(sent) => sent,
             Err(err) => {
-                if err.code == Some(82) && to.starts_with('u') {
+                if to.starts_with('u') && (err.code == Some(82) || invalid_sender_key(&err)) {
                     match self.send_sealed_text(to, message) {
                         Ok(sent) => sent,
                         Err(sealed) => send_failure(to, &sealed),
@@ -955,7 +996,7 @@ impl Client {
         }
     }
 
-    pub fn poll_inbox(&mut self, known: &HashMap<String, i64>) -> Result<Json, LineError> {
+    pub fn poll_inbox(&mut self, known: &mut HashMap<String, i64>) -> Result<Json, LineError> {
         self.require_token()?;
         let boxes = self.message_box_rows()?;
         let mut unreads = Vec::new();
@@ -968,15 +1009,18 @@ impl Client {
                     total += count;
                 }
             }
-            let previous = known.get(mid);
-            if previous.is_none() || when > previous.unwrap_or(&0) {
+            let previous = known.get(mid).copied();
+            if previous.is_none() || *when > previous.unwrap_or(0) {
                 changed.push((mid.clone(), *unread, *when));
+            } else {
+                known.insert(mid.clone(), *when);
             }
         }
         let mut pending = Vec::new();
         let mut senders = Vec::new();
         let mut failures = Vec::new();
         for (mid, unread, delivered) in changed.into_iter().take(40) {
+            known.insert(mid.clone(), delivered);
             let (message, mut when) = self.latest_message(&mid, "inbox", &mut failures);
             if when == 0 {
                 when = delivered;
@@ -1059,6 +1103,7 @@ impl Client {
         let mut last_health = Instant::now();
         let mut fallback_rev = cursor.local;
         let mut fallback_at = Instant::now().checked_sub(FALLBACK_EVERY).unwrap_or_else(Instant::now);
+        let mut box_times = HashMap::new();
         loop {
             if self.cancelled() {
                 return;
@@ -1084,7 +1129,7 @@ impl Client {
                         route = Some(found);
                         skip = None;
                         if let Some(value) = first.as_ref() {
-                            if self.consume_poll(&mut cursor, value, &mut emit) {
+                            if self.consume_poll(&mut cursor, value, &mut box_times, &mut emit) {
                                 proven = true;
                             }
                             if sync_has_more(value) {
@@ -1109,8 +1154,11 @@ impl Client {
             match self.poll_call(current, &cursor, 50, POLL_HOLD) {
                 Ok(Some(value)) => {
                     let empty = operation_list(&value).is_empty();
-                    if self.consume_poll(&mut cursor, &value, &mut emit) {
+                    if self.consume_poll(&mut cursor, &value, &mut box_times, &mut emit) {
                         proven = true;
+                    }
+                    if self.emit_box_changes(&mut box_times, &mut emit) {
+                        return;
                     }
                     if sync_has_more(&value) {
                         continue;
@@ -1130,6 +1178,9 @@ impl Client {
                 }
                 Err(CallFail::TimedOut(_)) => {
                     quiet_rounds = 0;
+                    if self.emit_box_changes(&mut box_times, &mut emit) {
+                        return;
+                    }
                 }
                 Err(CallFail::Line(err)) => {
                     if session_dead(&err) || self.cancelled() {
@@ -1208,7 +1259,7 @@ impl Client {
         self.call(route.method, &fields, route.path, timeout, &extra, None)
     }
 
-    fn consume_poll<F: FnMut(Json)>(&mut self, cursor: &mut OpCursor, value: &Value, emit: &mut F) -> bool {
+    fn consume_poll<F: FnMut(Json)>(&mut self, cursor: &mut OpCursor, value: &Value, box_times: &mut HashMap<String, i64>, emit: &mut F) -> bool {
         let ops = operation_list(value);
         let delivered = !ops.is_empty();
         for op in &ops {
@@ -1218,11 +1269,27 @@ impl Client {
             emit(payload);
         }
         if needs_full_sync(value) {
-            if let Ok(payload) = self.poll_inbox(&HashMap::new()) {
+            if let Ok(payload) = self.poll_inbox(box_times) {
                 emit(payload);
             }
         }
         delivered
+    }
+
+    fn emit_box_changes<F: FnMut(Json)>(&mut self, box_times: &mut HashMap<String, i64>, emit: &mut F) -> bool {
+        if self.cancelled() {
+            return true;
+        }
+        match self.poll_inbox(box_times) {
+            Ok(payload) => {
+                let pending = payload.get("updates").and_then(|value| value.as_array()).is_some_and(|rows| !rows.is_empty());
+                if pending {
+                    emit(payload);
+                }
+                false
+            }
+            Err(err) => session_dead(&err),
+        }
     }
 
     fn cursor_stale(&mut self, cursor: &OpCursor, proven: bool, last_health: &mut Instant) -> bool {
@@ -1250,7 +1317,7 @@ impl Client {
             return false;
         }
         *fallback_rev = server;
-        if let Ok(payload) = self.poll_inbox(&HashMap::new()) {
+        if let Ok(payload) = self.poll_inbox(&mut HashMap::new()) {
             emit(payload);
         }
         false
@@ -1268,12 +1335,18 @@ impl Client {
                         continue;
                     }
                     let incoming = int_field(op, 3) == Some(26) && text_field(message, 1) != me;
-                    notices.push(InboxNotice::Message { id, message: message.clone(), incoming });
+                    let when = message_time(message).max(int_field(op, 2).unwrap_or(0));
+                    notices.push(InboxNotice::Message { id, message: message.clone(), incoming, when });
                 }
                 40 => {
                     let id = text_field(op, 10);
                     if looks_like_mid(&id) {
                         notices.push(InboxNotice::Read { id });
+                    }
+                }
+                55 => {
+                    if let Some(id) = op_mid(op) {
+                        notices.push(InboxNotice::Receipt { id });
                     }
                 }
                 58 | 59 => {
@@ -1320,6 +1393,17 @@ impl Client {
                         "read": true,
                     }));
                 }
+                InboxNotice::Receipt { id } => {
+                    let marks = self.read_marks(&id);
+                    updates.push(json!({
+                        "id": id,
+                        "lastMessage": "",
+                        "time": 0,
+                        "sealed": false,
+                        "keepPreview": true,
+                        "readMarks": read_mark_json(&marks, &me),
+                    }));
+                }
                 InboxNotice::Refresh { id } => {
                     let (message, when) = self.latest_message(&id, "inbox", &mut failures);
                     let Some(message) = message else {
@@ -1336,8 +1420,9 @@ impl Client {
                     };
                     updates.push(self.message_update(&id, &message, when, false, &cards));
                 }
-                InboxNotice::Message { id, message, incoming } => {
-                    let when = message_time(&message);
+                InboxNotice::Message { id, message, incoming, when } => {
+                    let message = self.full_message(&id, message, &cards);
+                    let when = message_time(&message).max(when);
                     updates.push(self.message_update(&id, &message, when, incoming, &cards));
                 }
             }
@@ -1351,6 +1436,31 @@ impl Client {
             "unreads": [],
             "updates": updates,
         }))
+    }
+
+    fn full_message(
+        &mut self,
+        chat: &str,
+        message: BTreeMap<i16, Value>,
+        cards: &HashMap<String, (String, String)>,
+    ) -> BTreeMap<i16, Value> {
+        let (text, _) = self.visible_text(&message, cards);
+        if !sealed_label(&text) {
+            return message;
+        }
+        let ident = text_field(&message, 4);
+        let Ok(page) = self.message_page("getRecentMessagesV2", &[(2, bin(chat)), (3, Field::I32(20))]) else {
+            return message;
+        };
+        if !ident.is_empty() {
+            if let Some(found) = page.iter().find(|item| text_field(item, 4) == ident) {
+                let (opened, _) = self.visible_text(found, cards);
+                if !sealed_label(&opened) {
+                    return found.clone();
+                }
+            }
+        }
+        message
     }
 
     fn message_update(
@@ -1384,6 +1494,31 @@ impl Client {
             "incoming": incoming,
             "keepPreview": chat_update,
         });
+        if !chat_update {
+            let (text, sealed_body) = self.visible_text(message, cards);
+            if !text.is_empty() {
+                let ident = text_field(message, 4);
+                let mine = !self.session.mid.is_empty() && sender_id == self.session.mid;
+                let kind = content_kind(int_field(message, 15));
+                let media_id = if kind == "image" || kind == "video" { ident.clone() } else { String::new() };
+                item["thread"] = json!({
+                    "id": ident,
+                    "mine": mine,
+                    "name": if mine { "" } else { cards.get(&sender_id).map(|card| card.0.as_str()).unwrap_or("") },
+                    "picture": if mine { "" } else { cards.get(&sender_id).map(|card| card.1.as_str()).unwrap_or("") },
+                    "text": text,
+                    "sealed": sealed_body,
+                    "time": when,
+                    "sticker": sticker,
+                    "stickerFallback": fallback,
+                    "kind": kind,
+                    "gid": if media_id.is_empty() { String::new() } else { meta_value(message, "GID") },
+                    "seq": meta_value(message, "GSEQ").parse::<i64>().unwrap_or(0),
+                    "mediaId": media_id,
+                    "animated": !media_id.is_empty() && message_animated(message),
+                });
+            }
+        }
         if id.starts_with('u') {
             let card = cards.get(id);
             item["name"] = json!(card.map(|item| item.0.clone()).filter(|name| !name.is_empty()).unwrap_or_else(|| "Direct chat".into()));
@@ -1754,7 +1889,6 @@ impl Client {
         if !to.starts_with('u') || self.session.mid.is_empty() {
             return Err(line_code("letter sealing is not available for this chat", Some(82), "E2EE_RETRY_ENCRYPT"));
         }
-        let (private, sender_key_id) = self.send_key()?;
         let negotiated = self
             .talk("negotiateE2EEPublicKey", &[(2, bin(to))])?
             .ok_or_else(|| line_code("letter sealing key is missing", Some(82), "E2EE_RETRY_ENCRYPT"))?;
@@ -1773,20 +1907,35 @@ impl Client {
         if receiver_public.len() != 32 {
             return Err(line_code("letter sealing key is missing", Some(82), "E2EE_RETRY_ENCRYPT"));
         }
-        let chunks = seal_text(
-            &private,
-            sender_key_id,
-            &receiver_public,
-            receiver_key_id,
-            &self.session.mid.clone(),
-            to,
-            message,
-            spec_version,
-        )
-        .map_err(|err| line_code(err, Some(82), "E2EE_RETRY_ENCRYPT"))?;
+        let Some((private, sender_key_id)) = self.sender_key() else {
+            return Err(line_code(
+                "this window has no letter-sealing key",
+                Some(82),
+                "letter sealing key is missing",
+            ));
+        };
+        let chunks = self.seal_for(to, message, &private, sender_key_id, &receiver_public, receiver_key_id, spec_version)?;
+        self.post_sealed(to, message, &chunks, spec_version)
+    }
+
+    fn seal_for(
+        &self,
+        to: &str,
+        message: &str,
+        private: &[u8],
+        sender_key_id: i64,
+        receiver_public: &[u8],
+        receiver_key_id: i64,
+        spec_version: i64,
+    ) -> Result<Vec<Vec<u8>>, LineError> {
+        seal_text(private, sender_key_id, receiver_public, receiver_key_id, &self.session.mid, to, message, spec_version)
+            .map_err(|err| line_code(err, Some(82), "E2EE_RETRY_ENCRYPT"))
+    }
+
+    fn post_sealed(&mut self, to: &str, message: &str, chunks: &[Vec<u8>], spec_version: i64) -> Result<Json, LineError> {
         let seq = self.next_seq();
         let success = self
-            .talk("sendMessage", &sealed_fields(to, &chunks, spec_version, seq))?
+            .talk("sendMessage", &sealed_fields(to, chunks, spec_version, seq))?
             .ok_or_else(|| line("empty send response"))?;
         let fields = as_struct(&success)?;
         let when = message_time(fields);
@@ -1801,37 +1950,9 @@ impl Client {
         }))
     }
 
-    fn send_key(&mut self) -> Result<(Vec<u8>, i64), LineError> {
-        if let Some(key) = self.secret_keys().into_iter().next() {
-            return Ok(key);
-        }
-        let secret = x25519_dalek::StaticSecret::random_from_rng(rand::thread_rng());
-        let public = x25519_dalek::PublicKey::from(&secret);
-        let registered = self
-            .talk(
-                "registerE2EEPublicKey",
-                &[(
-                    2,
-                    Field::Struct(vec![
-                        (1, Field::I32(1)),
-                        (2, Field::I32(0)),
-                        (4, bin(public.as_bytes().as_slice())),
-                        (5, Field::I64(0)),
-                    ]),
-                )],
-            )?
-            .unwrap_or(Value::Struct(BTreeMap::new()));
-        self.listed = None;
-        let mut key_id = as_struct(&registered).ok().and_then(|fields| int_field(fields, 2)).filter(|id| *id != 0);
-        if key_id.is_none() {
-            key_id = self.listed_keys().iter().find(|(_, data)| data == public.as_bytes()).map(|(id, _)| *id);
-        }
-        let Some(key_id) = key_id else {
-            return Err(line_code("letter sealing key was not registered", Some(82), "invalid sender key"));
-        };
-        self.store_secret(secret.as_bytes(), public.as_bytes(), Some(key_id));
-        save_session(&self.session)?;
-        Ok((secret.as_bytes().to_vec(), key_id))
+    // LINE's encryption overview: the registered key id is the latest public key, and older ones are rejected as an invalid sender key.
+    fn sender_key(&mut self) -> Option<(Vec<u8>, i64)> {
+        self.secret_keys().into_iter().max_by_key(|(_, id)| *id)
     }
 
     fn secret_keys(&mut self) -> Vec<(Vec<u8>, i64)> {
@@ -1958,6 +2079,32 @@ impl Client {
         }
         let name = self.sealed_payload(message)?.get("fileName")?.as_str()?.trim().to_string();
         if name.is_empty() { None } else { Some(name) }
+    }
+
+    fn read_marks(&mut self, chat: &str) -> Vec<(String, i64)> {
+        let Ok(Some(value)) = self.talk("getMessageReadRange", &[(2, Field::List(thrift::BINARY, vec![bin(chat)]))]) else {
+            return Vec::new();
+        };
+        let Value::List(rows) = value else { return Vec::new() };
+        let mut marks = Vec::new();
+        for row in rows {
+            let Value::Struct(fields) = row else { continue };
+            let Some(Value::Map(pairs)) = fields.get(&2) else { continue };
+            for (key, value) in pairs {
+                let Value::Bytes(raw) = key else { continue };
+                let who = String::from_utf8_lossy(raw).into_owned();
+                let Value::List(ranges) = value else { continue };
+                let mut end = 0i64;
+                for range in ranges {
+                    let Value::Struct(item) = range else { continue };
+                    end = end.max(int_field(item, 2).unwrap_or(0));
+                }
+                if end > 0 && !who.is_empty() {
+                    marks.push((who, end));
+                }
+            }
+        }
+        marks
     }
 
     fn peer_public(&mut self, mid: &str, key_id: i64) -> Option<Vec<u8>> {
@@ -2630,6 +2777,33 @@ fn sticker_pair(message: Option<&BTreeMap<i16, Value>>) -> (String, String) {
     }
 }
 
+fn delivery_state(message_id: &str, me: &str, marks: &[(String, i64)]) -> (String, i64) {
+    let Ok(id) = message_id.parse::<i64>() else { return (String::new(), 0) };
+    if id <= 0 {
+        return (String::new(), 0);
+    }
+    let readers = marks.iter().filter(|(who, end)| who != me && *end >= id).count() as i64;
+    if readers > 0 { ("read".into(), readers) } else { ("sent".into(), 0) }
+}
+
+fn read_mark_json(marks: &[(String, i64)], me: &str) -> Json {
+    Json::Array(
+        marks
+            .iter()
+            .filter(|(who, _)| who != me)
+            .map(|(_, end)| json!({ "end": end.to_string() }))
+            .collect(),
+    )
+}
+
+fn op_mid(op: &BTreeMap<i16, Value>) -> Option<String> {
+    [10, 11, 12].into_iter().map(|id| text_field(op, id)).find(|value| looks_like_mid(value))
+}
+
+fn invalid_sender_key(err: &LineError) -> bool {
+    format!("{} {}", err.reason, err.message).to_ascii_lowercase().contains("invalid sender key")
+}
+
 fn needs_fresh_preview(preview: &str, activity: i64, prior_time: i64) -> bool {
     preview.is_empty() || activity > prior_time || preview.eq_ignore_ascii_case("letter-sealed message")
 }
@@ -2828,6 +3002,10 @@ fn invite_line(args: &[String], sender: &str) -> String {
     }
 }
 
+fn sealed_label(text: &str) -> bool {
+    text.is_empty() || text.to_ascii_lowercase().starts_with("letter-sealed")
+}
+
 fn message_preview(message: &BTreeMap<i16, Value>) -> (String, bool) {
     let mut keys = Vec::new();
     if let Some(Value::Map(pairs)) = message.get(&18) {
@@ -2999,6 +3177,40 @@ fn meta_int(pairs: &[(Value, Value)], name: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_saved_sender_key_survives_an_older_session_write() {
+        let mut current = Session::default();
+        current.access_token = "new".into();
+        let mut disk = Session::default();
+        disk.access_token = "old".into();
+        disk.e2ee_sender_key_id = Some(9);
+        disk.e2ee_private_key = "phone".into();
+        disk.e2ee_keys.push(StoredKey { key_id: 9, private_key: "desk".into(), public_key: "pub".into() });
+        merge_e2ee(&mut current, &disk);
+        assert_eq!(current.access_token, "new");
+        assert_eq!(current.e2ee_sender_key_id, Some(9));
+        assert_eq!(current.e2ee_private_key, "phone");
+        assert_eq!(current.e2ee_keys.len(), 1);
+        current.e2ee_sender_key_id = Some(10);
+        merge_e2ee(&mut current, &disk);
+        assert_eq!(current.e2ee_sender_key_id, Some(10));
+    }
+
+    #[test]
+    fn delivery_state_follows_the_other_reader() {
+        let marks = vec![("ume".to_string(), 10), ("ufriend".to_string(), 20)];
+        assert_eq!(delivery_state("15", "ume", &marks), ("read".into(), 1));
+        assert_eq!(delivery_state("21", "ume", &marks), ("sent".into(), 0));
+        assert_eq!(delivery_state("5", "ume", &marks), ("read".into(), 1));
+    }
+
+    #[test]
+    fn invalid_sender_key_is_recognized() {
+        let err = line_code("sendMessage failed: invalid sender key", Some(5), "invalid sender key");
+        assert!(invalid_sender_key(&err));
+        assert!(!invalid_sender_key(&line("empty send response")));
+    }
 
     #[test]
     fn letter_sealed_preview_is_fetched_again() {

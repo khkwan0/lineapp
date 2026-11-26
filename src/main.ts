@@ -26,12 +26,15 @@ type ChatRow = {
 };
 
 type HistoryMessage = {
+  id?: string;
   mine: boolean;
   name: string;
   picture?: string;
   text: string;
   sealed: boolean;
   time: number;
+  status?: string;
+  readers?: number;
   sticker?: string;
   stickerFallback?: string;
   kind?: string;
@@ -52,9 +55,12 @@ type SendResult = {
   ok: boolean;
   text?: string;
   time?: number;
+  messageId?: string;
   code?: number | null;
   error?: string;
 };
+
+type ReadMark = { end: string };
 
 type HistoryPayload = {
   id: string;
@@ -108,6 +114,7 @@ let filter = "all";
 let selected = 0;
 let openId = "";
 let historyToken = 0;
+let paintedHistory = "";
 let signedIn = false;
 const mediaUrls = new Map<string, string>();
 const animatedMedia = new Set<string>();
@@ -128,6 +135,8 @@ type PollUpdate = {
   read?: boolean;
   refresh?: boolean;
   keepPreview?: boolean;
+  readMarks?: ReadMark[];
+  thread?: HistoryMessage;
   name?: string;
   picture?: string;
   kind?: string;
@@ -389,6 +398,7 @@ function showThread(chat: ChatRow | undefined): void {
     return;
   }
   openId = chat.id;
+  paintedHistory = "";
   closeGallery();
   sendError.hidden = true;
   const token = ++historyToken;
@@ -405,10 +415,21 @@ function showThread(chat: ChatRow | undefined): void {
   });
 }
 
+function historyStamp(payload: HistoryPayload): string {
+  return payload.messages
+    .map((message) => [message.id || "", message.text, message.status || "", String(message.readers || 0), String(message.time)].join("\u001f"))
+    .join("\u001e");
+}
+
 function renderHistory(payload: HistoryPayload): void {
   if (payload.id !== openId) {
     return;
   }
+  const stamp = historyStamp(payload);
+  if (stamp === paintedHistory && !threadBody.querySelector(".thread-note")) {
+    return;
+  }
+  paintedHistory = stamp;
   threadBody.replaceChildren();
   if (payload.messages.length === 0) {
     const note = document.createElement("p");
@@ -607,21 +628,90 @@ function messageBubble(message: BubbleMessage): HTMLElement {
   } else {
     appendMessageText(bubble, message.text);
   }
-  if (message.time) {
-    const when = document.createElement("div");
-    when.className = "when";
-    when.textContent = clock(message.time);
-    bubble.append(when);
-  }
   const row = document.createElement("div");
   row.className = message.mine ? "msg mine" : "msg";
+  if (message.id) {
+    row.dataset.id = message.id;
+  }
+  const meta = messageMeta(message);
   const mark = senderMark(message);
   if (message.mine) {
+    if (meta) {
+      row.append(meta);
+    }
     row.append(bubble, mark);
   } else {
     row.append(mark, bubble);
+    if (meta) {
+      row.append(meta);
+    }
   }
   return row;
+}
+
+function messageMeta(message: BubbleMessage): HTMLElement | null {
+  const time = message.time ? clock(message.time) : "";
+  const read = message.mine && message.status === "read";
+  if (!time && !read) {
+    return null;
+  }
+  const meta = document.createElement("div");
+  meta.className = "msg-meta";
+  if (read) {
+    meta.append(receiptNode(message.readers || 0));
+  }
+  if (time) {
+    const stamp = document.createElement("span");
+    stamp.className = "msg-time";
+    stamp.textContent = time;
+    meta.append(stamp);
+  }
+  return meta;
+}
+
+function receiptNode(readers: number): HTMLElement {
+  const mark = document.createElement("span");
+  mark.className = "receipt";
+  mark.textContent = readers > 1 ? `Read ${readers}` : "Read";
+  return mark;
+}
+
+function markReached(end: string, messageId: string): boolean {
+  try {
+    return BigInt(end) >= BigInt(messageId);
+  } catch {
+    return false;
+  }
+}
+
+function applyReadMarks(chatId: string, marks: ReadMark[]): void {
+  if (chatId !== openId || marks.length === 0) {
+    return;
+  }
+  threadBody.querySelectorAll<HTMLElement>(".msg.mine[data-id]").forEach((row) => {
+    const id = row.dataset.id || "";
+    const readers = marks.filter((mark) => markReached(mark.end, id)).length;
+    let meta = row.querySelector(".msg-meta");
+    if (!meta) {
+      const bubble = row.querySelector(".bubble");
+      if (!bubble) {
+        return;
+      }
+      meta = document.createElement("div");
+      meta.className = "msg-meta";
+      row.insertBefore(meta, bubble);
+    }
+    meta.querySelector(".receipt")?.remove();
+    if (readers > 0) {
+      const time = meta.querySelector(".msg-time");
+      const mark = receiptNode(readers);
+      if (time) {
+        meta.insertBefore(mark, time);
+      } else {
+        meta.append(mark);
+      }
+    }
+  });
 }
 
 function senderPicture(message: BubbleMessage): string {
@@ -1117,10 +1207,12 @@ function onSent(payload: SendResult): void {
     const note = threadBody.querySelector(".thread-note");
     note?.remove();
     threadBody.append(messageBubble({
+      id: payload.messageId,
       mine: true,
       name: "",
       text: payload.text,
       sealed: false,
+      status: "sent",
       time: payload.time || Date.now(),
     }));
     threadBody.scrollTop = threadBody.scrollHeight;
@@ -1252,6 +1344,19 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+function appendLiveMessage(update: PollUpdate): void {
+  const message = update.thread;
+  if (!message?.text || update.id !== openId) {
+    return;
+  }
+  if (message.id && threadBody.querySelector(`.msg[data-id="${CSS.escape(message.id)}"]`)) {
+    return;
+  }
+  threadBody.querySelector(".thread-note")?.remove();
+  threadBody.append(messageBubble(message));
+  threadBody.scrollTop = threadBody.scrollHeight;
+}
+
 function applyPoll(payload: PollPayload): void {
   if (!signedIn) {
     return;
@@ -1291,6 +1396,9 @@ function applyPoll(payload: PollPayload): void {
       }
       continue;
     }
+    if (update.readMarks?.length) {
+      applyReadMarks(update.id, update.readMarks);
+    }
     if (update.read) {
       chat.unread = 0;
     } else if (update.incoming) {
@@ -1301,9 +1409,12 @@ function applyPoll(payload: PollPayload): void {
     } else if (typeof update.unread === "number") {
       chat.unread = update.unread;
     }
+    const readable = Boolean(update.lastMessage) && !update.keepPreview && !updateLabel(update.lastMessage);
+    const newer = update.time > chat.time;
     const fill = Boolean(update.refresh && update.lastMessage && !update.keepPreview);
-    if (update.time > chat.time || fill) {
+    if (newer || fill || (readable && update.lastMessage !== chat.lastMessage)) {
       const keepTyped = !fill
+        && !readable
         && update.sealed
         && Boolean(chat.lastMessage)
         && !chat.lastMessage.startsWith("Letter-sealed")
@@ -1317,16 +1428,15 @@ function applyPoll(payload: PollPayload): void {
         chat.sealed = update.sealed;
         chat.sticker = update.sticker || "";
         chat.stickerFallback = update.stickerFallback || "";
-        if (chat.id === openId && update.time > openTime) {
-          openAdvanced = true;
-        }
-      } else if (update.keepPreview && chat.id === openId && update.time > openTime) {
-        openAdvanced = true;
       }
-      if (update.time > chat.time) {
+      if (newer) {
         chat.time = update.time;
       }
+      if (chat.id === openId && (newer || readable) && update.time >= openTime) {
+        openAdvanced = true;
+      }
     }
+    appendLiveMessage(update);
   }
   rows.sort((left, right) => right.time - left.time);
   const index = visibleRows().findIndex((row) => row.id === selectedId);

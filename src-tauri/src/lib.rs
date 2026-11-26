@@ -121,12 +121,25 @@ async fn load_chats(app: AppHandle, state: State<'_, LoginState>) -> Result<(), 
 #[tauri::command]
 async fn load_history(app: AppHandle, id: String) -> Result<(), String> {
     chat_id(&id)?;
-    let value = tauri::async_runtime::spawn_blocking(move || line::Client::new().chat_history(&id).map_err(|err| err.to_string()))
+    let cached = store::cached_history(&id);
+    if let Some(payload) = &cached {
+        let bytes = serde_json::to_vec(payload).map_err(|err| format!("could not read saved messages: {err}"))?;
+        deliver(&app, "__lineHistoryBuf", "__lineHistory", &bytes);
+    }
+    let chat = id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || line::Client::new().chat_history(&chat).map_err(|err| err.to_string()))
         .await
-        .map_err(|err| format!("could not load messages: {err}"))??;
-    let payload = serde_json::to_vec(&value).map_err(|err| format!("could not read messages: {err}"))?;
-    deliver(&app, "__lineHistoryBuf", "__lineHistory", &payload);
-    Ok(())
+        .map_err(|err| format!("could not load messages: {err}"))?;
+    match result {
+        Ok(value) => {
+            let _ = store::save_history(&value);
+            let payload = serde_json::to_vec(&value).map_err(|err| format!("could not read messages: {err}"))?;
+            deliver(&app, "__lineHistoryBuf", "__lineHistory", &payload);
+            Ok(())
+        }
+        Err(_) if cached.is_some() => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 fn chat_id(id: &str) -> Result<(), String> {
@@ -155,9 +168,11 @@ async fn send_message(app: AppHandle, id: String, text: String) -> Result<(), St
     if body.is_empty() || body.len() > 5000 {
         return Err("enter a message first".to_string());
     }
+    let chat = id.clone();
     let value = tauri::async_runtime::spawn_blocking(move || line::Client::new().send_for_window(&id, &body))
         .await
         .map_err(|err| format!("could not send: {err}"))?;
+    let _ = store::save_outgoing(&chat, &value);
     let payload = serde_json::to_vec(&value).map_err(|err| format!("could not read the send result: {err}"))?;
     deliver(&app, "__lineSentBuf", "__lineSent", &payload);
     Ok(())

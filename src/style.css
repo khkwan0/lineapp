@@ -486,7 +486,7 @@ input {
 }
 
 .bubble {
-  max-width: min(460px, calc(100% - 44px));
+  max-width: min(460px, calc(100% - 112px));
   background: #fff;
   border-radius: 12px;
   padding: 8px 12px;
@@ -539,11 +539,23 @@ input {
   cursor: pointer;
 }
 
-.bubble .when {
-  margin-top: 4px;
+.msg-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex: none;
+  gap: 1px;
+  margin-bottom: 1px;
   font-size: 11px;
-  color: #8b919a;
+  line-height: 1.25;
+  color: #a8adb4;
   text-align: right;
+  white-space: nowrap;
+}
+
+.msg:not(.mine) .msg-meta {
+  align-items: flex-start;
+  text-align: left;
 }
 
 .bubble img.sticker {
