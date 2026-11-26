@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+lineapp.local.json
+*.local.json
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+public/chats.json
