@@ -35,11 +35,12 @@ To compile:
 - A C toolchain and `pkg-config`. On Debian or Ubuntu install `build-essential`, `pkg-config`, `libwebkit2gtk-4.1-dev`, `libdbus-1-dev`, and `libayatana-appindicator3-dev`. WebKitGTK 4.1 brings GTK 3 with it. The packager looks up `ayatana-appindicator3-0.1` through pkg-config. The runtime library `libayatana-appindicator3-1` does not ship that file; the `-dev` package does. SQLite is bundled, so there is no separate SQLite package.
 - An AppImage package also needs `file` and `patchelf` on the build machine. The first AppImage build downloads `linuxdeploy` and `appimagetool`.
 
-To run a development build, the `.deb`, or the AppImage:
+To run a development build or the `.deb`:
 
-- WebKitGTK 4.1 and GTK 3. On Debian or Ubuntu that runtime package is `libwebkit2gtk-4.1-0`. The AppImage does not bundle WebKit or GTK. The `.deb` installs them through apt.
+- WebKitGTK 4.1 and GTK 3. On Debian or Ubuntu that runtime package is `libwebkit2gtk-4.1-0`. The `.deb` installs it through apt.
 - `libayatana-appindicator3-1` or `libappindicator3-1` for the tray icon.
-- `libfuse2` to launch the AppImage.
+
+The AppImage carries WebKitGTK 4.1, GTK 3, their modules and schemas, the WebKit helper processes, and the tray library. It still uses the host C library, libstdc++, the GPU libraries (`libGL`, `libEGL`, `libdrm`), X11 or Wayland, and fontconfig. AppImage leaves those out: a bundled GPU driver only works on the build machine, and the format cannot carry glibc. Mounting the image needs `libfuse2`. `APPIMAGE_EXTRACT_AND_RUN=1` skips FUSE and unpacks it instead. The image runs where glibc and libstdc++ are at least as new as on the machine that built it.
 
 ## Desktop window
 
@@ -64,7 +65,7 @@ Pass one target to build only that package. The packages are written to:
 - `src-tauri/target/release/bundle/deb/line_0.1.0_amd64.deb`
 - `src-tauri/target/release/bundle/appimage/LINE_0.1.0_amd64.AppImage`
 
-`productName` is `LINE`, so the Debian package name is `line`. Installing it next to the official LINE package will collide. The first AppImage build downloads `linuxdeploy` and `appimagetool`. Running the AppImage needs FUSE.
+`productName` is `LINE`, so the Debian package name is `line`. Installing it next to the official LINE package will collide. The first AppImage build downloads `linuxdeploy` and `appimagetool`. `linuxdeploy` copies the libraries the binary links, including WebKit and GTK, and its GTK plugin copies the modules and schemas. Mounting the finished image needs FUSE.
 
 The session is stored in `lineapp.local.json` (mode 0600) under the app config
 directory: `$XDG_CONFIG_HOME/dev.lineapp.desktop`, or
