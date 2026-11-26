@@ -1,4 +1,5 @@
 mod e2ee;
+mod h2gate;
 mod legy;
 mod line;
 mod store;
@@ -156,11 +157,26 @@ fn user_mid(id: &str) -> Result<(), String> {
     Err("that profile cannot be opened".into())
 }
 
+fn group_mid(id: &str) -> Result<(), String> {
+    if (2..=64).contains(&id.len()) && id.starts_with('c') && id.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return Ok(());
+    }
+    Err("that group cannot be opened".into())
+}
+
 fn profile_script(payload: &serde_json::Value) -> String {
+    boot_script("__profile", "__applyProfile", payload)
+}
+
+fn members_script(payload: &serde_json::Value) -> String {
+    boot_script("__members", "__applyMembers", payload)
+}
+
+fn boot_script(slot: &str, apply: &str, payload: &serde_json::Value) -> String {
     let bytes = serde_json::to_vec(payload).unwrap_or_else(|_| b"{}".to_vec());
     let encoded = base64_encode(&bytes);
     format!(
-        "window.__profile = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob('{encoded}'), function (c) {{ return c.charCodeAt(0); }}))); if (typeof window.__applyProfile === 'function') window.__applyProfile(window.__profile);"
+        "window.{slot} = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob('{encoded}'), function (c) {{ return c.charCodeAt(0); }}))); if (typeof window.{apply} === 'function') window.{apply}(window.{slot});"
     )
 }
 
@@ -206,6 +222,7 @@ async fn open_profile(app: AppHandle, id: String, name: String, picture: String,
             .build()
             .map_err(|err| format!("could not open the profile: {err}"))?;
         let _ = window.set_focus();
+        enable_capture(&window);
     }
     let app_refresh = app.clone();
     let refresh_label = label.clone();
@@ -261,13 +278,118 @@ async fn favorite_profile(id: String, favorite: bool) -> Result<(), String> {
         .map_err(|err| format!("could not update this friend: {err}"))?
 }
 
+fn sync_group(app: &AppHandle, id: &str, name: &str, members: Option<i64>) {
+    let Some(window) = app.get_webview_window("main") else { return };
+    let _ = window.eval(profile_script_call(
+        "__patchChat",
+        &serde_json::json!({ "id": id, "name": name, "members": members }),
+    ));
+}
+
 #[tauri::command]
-async fn open_friend_chat(app: AppHandle, id: String) -> Result<(), String> {
+async fn open_members(app: AppHandle, id: String, name: String, picture: String) -> Result<(), String> {
+    group_mid(&id)?;
+    let initial = serde_json::json!({
+        "id": id,
+        "name": name.trim(),
+        "picture": picture.trim(),
+        "autoJoin": true,
+        "members": [],
+    });
+    if let Some(window) = app.get_webview_window("members") {
+        let _ = window.eval(members_script(&initial));
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+    let window = tauri::WebviewWindowBuilder::new(&app, "members", tauri::WebviewUrl::App("members.html".into()))
+        .title("Members")
+        .inner_size(380.0, 680.0)
+        .min_inner_size(320.0, 520.0)
+        .resizable(true)
+        .center()
+        .initialization_script(members_script(&initial))
+        .build()
+        .map_err(|err| format!("could not open the members: {err}"))?;
+    let _ = window.set_focus();
+    enable_capture(&window);
+    Ok(())
+}
+
+#[tauri::command]
+async fn group_roster(app: AppHandle, id: String) -> Result<serde_json::Value, String> {
+    group_mid(&id)?;
+    let chat = id.clone();
+    let roster = tauri::async_runtime::spawn_blocking(move || line::Client::new().group_roster(&chat).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not load the members: {err}"))??;
+    let name = roster.get("name").and_then(|value| value.as_str()).unwrap_or("");
+    let members = roster.get("members").and_then(|value| value.as_array()).map(|items| items.len() as i64);
+    sync_group(&app, &id, name, members);
+    Ok(roster)
+}
+
+#[tauri::command]
+async fn rename_group(app: AppHandle, id: String, name: String) -> Result<(), String> {
+    group_mid(&id)?;
+    let trimmed = name.trim().to_string();
+    let chat = id.clone();
+    let label = trimmed.clone();
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().rename_group(&chat, &label).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not rename this group: {err}"))??;
+    sync_group(&app, &id, &trimmed, None);
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_group_auto_join(id: String, enabled: bool) -> Result<(), String> {
+    group_mid(&id)?;
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().set_group_auto_join(&id, enabled).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not update this group: {err}"))?
+}
+
+#[tauri::command]
+async fn invite_into_group(id: String, targets: Vec<String>) -> Result<(), String> {
+    group_mid(&id)?;
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().invite_into_group(&id, &targets).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not invite those friends: {err}"))?
+}
+
+#[tauri::command]
+async fn remove_group_member(id: String, member: String) -> Result<(), String> {
+    group_mid(&id)?;
+    user_mid(&member)?;
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().remove_group_member(&id, &member).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not remove that member: {err}"))?
+}
+
+#[tauri::command]
+async fn group_invite_candidates(id: String) -> Result<serde_json::Value, String> {
+    group_mid(&id)?;
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().group_invite_candidates(&id).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not load friends: {err}"))?
+}
+
+#[tauri::command]
+async fn open_friend_chat(app: AppHandle, id: String, name: Option<String>, picture: Option<String>) -> Result<(), String> {
     user_mid(&id)?;
     let Some(window) = app.get_webview_window("main") else {
         return Err("the chat window is not open".into());
     };
-    let _ = window.eval(format!("if (typeof window.__openChat === 'function') window.__openChat('{id}')"));
+    let _ = window.eval(profile_script_call(
+        "__openChat",
+        &serde_json::json!({
+            "id": id,
+            "name": name.unwrap_or_default().trim(),
+            "picture": picture.unwrap_or_default().trim(),
+        }),
+    ));
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
@@ -347,7 +469,7 @@ async fn send_reaction(id: String, message_id: String, emoji: String) -> Result<
 }
 
 #[tauri::command]
-async fn send_message(app: AppHandle, id: String, text: String, related_id: Option<String>) -> Result<(), String> {
+async fn send_message(app: AppHandle, id: String, text: String, related_id: Option<String>, local_id: Option<String>) -> Result<(), String> {
     chat_id(&id)?;
     let body = text.trim().to_string();
     if body.is_empty() || body.len() > 5000 {
@@ -357,10 +479,16 @@ async fn send_message(app: AppHandle, id: String, text: String, related_id: Opti
     if !related.is_empty() && (related.len() > 24 || !related.chars().all(|ch| ch.is_ascii_digit())) {
         return Err("that message cannot be replied to".to_string());
     }
+    let local_id = local_send_id(local_id.unwrap_or_default().trim());
     let chat = id.clone();
-    let value = tauri::async_runtime::spawn_blocking(move || line::Client::new().send_for_window(&id, &body, &related))
+    let mut value = tauri::async_runtime::spawn_blocking(move || line::Client::new().send_for_window(&id, &body, &related))
         .await
         .map_err(|err| format!("could not send: {err}"))?;
+    if !local_id.is_empty() {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("localId".to_string(), serde_json::Value::String(local_id));
+        }
+    }
     let _ = store::save_outgoing(&chat, &value);
     let payload = serde_json::to_vec(&value).map_err(|err| format!("could not read the send result: {err}"))?;
     deliver(&app, "__lineSentBuf", "__lineSent", &payload);
@@ -398,6 +526,16 @@ async fn report_message(id: String, message_id: String, sender: String, reason: 
     .map_err(|err| format!("could not send the report: {err}"))?
 }
 
+fn local_send_id(raw: &str) -> String {
+    let Some(rest) = raw.strip_prefix("local-") else {
+        return String::new();
+    };
+    if rest.is_empty() || rest.len() > 32 || !rest.chars().all(|ch| ch.is_ascii_digit() || ch == '-') {
+        return String::new();
+    }
+    raw.to_string()
+}
+
 fn unsend_reason(err: &line::LineError) -> String {
     let reason = err.reason.to_ascii_uppercase();
     if err.code == Some(71) || reason.contains("NOT_DESTRUCTIBLE") {
@@ -416,6 +554,9 @@ async fn logout(app: AppHandle, state: State<'_, LoginState>) -> Result<(), Stri
     tauri::async_runtime::spawn_blocking(line::clear_session)
         .await
         .map_err(|err| format!("could not log out: {err}"))?;
+    if let Some(window) = app.get_webview_window("members") {
+        let _ = window.close();
+    }
     show_tray_badge(&app, 0);
     Ok(())
 }
@@ -429,6 +570,217 @@ fn quit(app: AppHandle) {
 #[serde(rename_all = "camelCase")]
 struct Settings {
     minimize_to_tray: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ListedDevice {
+    name: String,
+    detail: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaDevices {
+    outputs: Vec<ListedDevice>,
+    inputs: Vec<ListedDevice>,
+    cameras: Vec<ListedDevice>,
+    audio_error: String,
+}
+
+struct PulseNode {
+    name: String,
+    description: String,
+    state: String,
+}
+
+fn parse_pulse(text: &str, header: &str) -> Vec<PulseNode> {
+    let mut nodes = Vec::new();
+    let mut current: Option<PulseNode> = None;
+    for line in text.lines() {
+        if line.starts_with(header) {
+            if let Some(node) = current.take() {
+                nodes.push(node);
+            }
+            current = Some(PulseNode { name: String::new(), description: String::new(), state: String::new() });
+            continue;
+        }
+        let Some(node) = current.as_mut() else {
+            continue;
+        };
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("Name: ") {
+            node.name = value.to_string();
+        } else if let Some(value) = line.strip_prefix("Description: ") {
+            node.description = value.to_string();
+        } else if let Some(value) = line.strip_prefix("State: ") {
+            node.state = value.to_string();
+        }
+    }
+    if let Some(node) = current {
+        nodes.push(node);
+    }
+    nodes
+}
+
+fn pulse_text(kind: &str) -> Result<String, String> {
+    let output = std::process::Command::new("pactl")
+        .args(["list", kind])
+        .output()
+        .map_err(|err| format!("could not list audio devices: {err}"))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        let err = err.trim();
+        return Err(if err.is_empty() { "could not list audio devices".into() } else { err.to_string() });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn pactl_line(args: &[&str]) -> String {
+    let Ok(output) = std::process::Command::new("pactl").args(args).output() else {
+        return String::new();
+    };
+    if !output.status.success() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn device_detail(state: &str, default: bool) -> String {
+    let mut parts = Vec::new();
+    if default {
+        parts.push("Default");
+    }
+    if state == "RUNNING" {
+        parts.push("In use");
+    }
+    parts.join(" · ")
+}
+
+fn listed_from_pulse(nodes: Vec<PulseNode>, default_name: &str, skip_monitors: bool) -> Vec<ListedDevice> {
+    let mut devices: Vec<(bool, bool, ListedDevice)> = nodes
+        .into_iter()
+        .filter(|node| !node.description.is_empty() && !(skip_monitors && node.name.ends_with(".monitor")))
+        .map(|node| {
+            let default = !default_name.is_empty() && node.name == default_name;
+            let running = node.state == "RUNNING";
+            let device = ListedDevice { name: node.description, detail: device_detail(&node.state, default) };
+            (default, running, device)
+        })
+        .collect();
+    devices.sort_by(|left, right| right.0.cmp(&left.0).then(right.1.cmp(&left.1)).then(left.2.name.cmp(&right.2.name)));
+    devices.into_iter().map(|(_, _, device)| device).collect()
+}
+
+fn capture_flags(capabilities: u32, device_caps: u32) -> bool {
+    const CAP_VIDEO_CAPTURE: u32 = 0x0000_0001;
+    const CAP_VIDEO_CAPTURE_MPLANE: u32 = 0x0000_1000;
+    const CAP_DEVICE_CAPS: u32 = 0x8000_0000;
+    let flags = if capabilities & CAP_DEVICE_CAPS != 0 && device_caps != 0 { device_caps } else { capabilities };
+    flags & (CAP_VIDEO_CAPTURE | CAP_VIDEO_CAPTURE_MPLANE) != 0
+}
+
+fn list_cameras() -> Vec<ListedDevice> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/video4linux") else {
+        return Vec::new();
+    };
+    let mut cameras = Vec::new();
+    for entry in entries.flatten() {
+        let node = entry.file_name();
+        let node = node.to_string_lossy();
+        if !node.starts_with("video") {
+            continue;
+        }
+        let path = format!("/dev/{node}");
+        match probe_camera(&path) {
+            Some(false) => continue,
+            Some(true) | None => {}
+        }
+        let name = std::fs::read_to_string(entry.path().join("name")).unwrap_or_default();
+        let name = name.trim();
+        cameras.push(ListedDevice {
+            name: if name.is_empty() { path.clone() } else { name.to_string() },
+            detail: path,
+        });
+    }
+    cameras.sort_by(|left, right| left.name.cmp(&right.name).then(left.detail.cmp(&right.detail)));
+    cameras
+}
+
+fn probe_camera(path: &str) -> Option<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        const VIDIOC_QUERYCAP: std::os::raw::c_ulong = 0x8068_5600;
+        #[repr(C)]
+        struct V4l2Capability {
+            driver: [u8; 16],
+            card: [u8; 32],
+            bus_info: [u8; 32],
+            version: u32,
+            capabilities: u32,
+            device_caps: u32,
+            reserved: [u32; 3],
+        }
+        let file = std::fs::File::open(path).ok()?;
+        let mut caps = V4l2Capability {
+            driver: [0; 16],
+            card: [0; 32],
+            bus_info: [0; 32],
+            version: 0,
+            capabilities: 0,
+            device_caps: 0,
+            reserved: [0; 3],
+        };
+        let rc = unsafe { ioctl(file.as_raw_fd(), VIDIOC_QUERYCAP, &mut caps) };
+        if rc < 0 {
+            return None;
+        }
+        return Some(capture_flags(caps.capabilities, caps.device_caps));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn ioctl(fd: i32, request: std::os::raw::c_ulong, ...) -> i32;
+}
+
+#[tauri::command]
+fn list_media_devices() -> MediaDevices {
+    let audio = (|| -> Result<(Vec<ListedDevice>, Vec<ListedDevice>), String> {
+        let sinks = parse_pulse(&pulse_text("sinks")?, "Sink #");
+        let sources = parse_pulse(&pulse_text("sources")?, "Source #");
+        let default_sink = pactl_line(&["get-default-sink"]);
+        let default_source = pactl_line(&["get-default-source"]);
+        Ok((listed_from_pulse(sinks, &default_sink, false), listed_from_pulse(sources, &default_source, true)))
+    })();
+    match audio {
+        Ok((outputs, inputs)) => MediaDevices { outputs, inputs, cameras: list_cameras(), audio_error: String::new() },
+        Err(audio_error) => MediaDevices { outputs: Vec::new(), inputs: Vec::new(), cameras: list_cameras(), audio_error },
+    }
+}
+
+fn enable_capture(window: &tauri::WebviewWindow) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = window.with_webview(|webview| {
+            use webkit2gtk::{SettingsExt, WebViewExt};
+            if let Some(settings) = webview.inner().settings() {
+                settings.set_enable_media(true);
+                settings.set_enable_media_stream(true);
+                settings.set_enable_mediasource(true);
+                settings.set_enable_webaudio(true);
+            }
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = window;
+    }
 }
 
 #[tauri::command]
@@ -685,7 +1037,11 @@ pub fn run() {
     tauri::Builder::default()
         .manage(LoginState { cancel: Mutex::new(None), inbox: Mutex::new(None) })
         .manage(AppPrefs { minimize_to_tray: AtomicBool::new(minimize_to_tray), tray_badge: AtomicU32::new(0) })
-        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, send_message, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_tray_badge, open_profile, block_profile, add_profile, open_fraud_help, rename_profile, favorite_profile, open_friend_chat])
+        .on_permission_request(|_window, kind| match kind {
+            tauri::webview::PermissionKind::Microphone | tauri::webview::PermissionKind::Camera => tauri::webview::PermissionResponse::Allow,
+            _ => tauri::webview::PermissionResponse::Default,
+        })
+        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, send_message, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_tray_badge, list_media_devices, open_profile, block_profile, add_profile, open_fraud_help, rename_profile, favorite_profile, open_friend_chat, open_members, group_roster, rename_group, set_group_auto_join, invite_into_group, remove_group_member, group_invite_candidates])
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;
@@ -698,6 +1054,9 @@ pub fn run() {
             }
         })
         .setup(move |app| {
+            if let Some(window) = app.get_webview_window("main") {
+                enable_capture(&window);
+            }
             if minimize_to_tray {
                 if let Err(err) = ensure_tray(app.handle()) {
                     eprintln!("lineapp: {err}");
@@ -724,7 +1083,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::badge_image;
+    use super::{badge_image, capture_flags, local_send_id, parse_pulse};
 
     #[test]
     fn unread_badge_sits_on_the_icon() {
@@ -737,5 +1096,63 @@ mod tests {
         assert_eq!(badge_image(120).get_pixel(8, 56), plain.get_pixel(8, 56));
         let red = one.pixels().any(|pixel| pixel[0] > 180 && pixel[1] < 80 && pixel[2] < 80);
         assert!(red);
+    }
+
+    #[test]
+    fn pulse_listing_keeps_speakers_and_skips_monitors() {
+        let sinks = "\
+Sink #61
+	State: SUSPENDED
+	Name: alsa_output.speakers
+	Description: USB Audio Speakers
+Sink #465
+	State: RUNNING
+	Name: bluez_output.headphones
+	Description: h.ear go (SRS-HG1)
+";
+        let sources = "\
+Source #65
+	State: SUSPENDED
+	Name: alsa_input.mic
+	Description: USB Audio Microphone
+Source #61
+	State: SUSPENDED
+	Name: alsa_output.speakers.monitor
+	Description: Monitor of USB Audio Speakers
+";
+        let outputs = super::listed_from_pulse(parse_pulse(sinks, "Sink #"), "bluez_output.headphones", false);
+        let inputs = super::listed_from_pulse(parse_pulse(sources, "Source #"), "alsa_input.mic", true);
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].name, "h.ear go (SRS-HG1)");
+        assert_eq!(outputs[0].detail, "Default · In use");
+        assert_eq!(outputs[1].name, "USB Audio Speakers");
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].name, "USB Audio Microphone");
+        assert_eq!(inputs[0].detail, "Default");
+    }
+
+    #[test]
+    fn metadata_video_nodes_are_not_cameras() {
+        assert!(capture_flags(0x8000_0000 | 0x0000_0001, 0x0000_0001));
+        assert!(!capture_flags(0x8000_0000 | 0x0000_0001, 0x0000_0200));
+        assert!(capture_flags(0x0000_1000, 0));
+    }
+
+    #[test]
+    fn connected_webcam_is_listed_once() {
+        if !std::path::Path::new("/dev/video0").exists() {
+            return;
+        }
+        let cameras = super::list_cameras();
+        assert!(cameras.iter().any(|camera| camera.detail == "/dev/video0"), "{cameras:?}");
+        assert!(cameras.iter().all(|camera| camera.detail != "/dev/video1"), "{cameras:?}");
+    }
+
+    #[test]
+    fn local_send_ids_round_trip_only_for_pending_bubbles() {
+        assert_eq!(local_send_id("local-1710000000000-2"), "local-1710000000000-2");
+        assert_eq!(local_send_id("local-"), "");
+        assert_eq!(local_send_id("5993848201234567890"), "");
+        assert_eq!(local_send_id("local-1-2 extra"), "");
     }
 }

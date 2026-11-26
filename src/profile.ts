@@ -309,7 +309,7 @@ chat.addEventListener("click", () => {
   if (!card.id) {
     return;
   }
-  void invoke("open_friend_chat", { id: card.id }).catch((error: unknown) => {
+  void invoke("open_friend_chat", { id: card.id, name: card.name, picture: card.picture }).catch((error: unknown) => {
     say(error instanceof Error ? error.message : String(error), true);
   });
 });

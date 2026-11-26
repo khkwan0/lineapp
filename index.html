@@ -95,6 +95,7 @@
         <p id="sheet-body"></p>
         <div id="sheet-list" hidden></div>
         <div id="sheet-about" hidden>
+          <p class="beta-banner"><strong>BETA</strong> This app is an unfinished beta. Expect bugs, missing features, and sudden changes. Do not treat it as a finished LINE client.</p>
           <dl>
             <div>
               <dt>Build</dt>
@@ -107,6 +108,7 @@
           </dl>
         </div>
         <form id="sheet-settings" hidden>
+          <p class="settings-notice">Audio and visual settings are not currently useful. This app has no way to use the official LINE VoIP or RTC.</p>
           <label class="setting">
             <input id="minimize-to-tray" type="checkbox" checked />
             <span>
@@ -114,6 +116,19 @@
               <small>Closing the window leaves LINE in the tray. Right-click that icon to open it again, or use Quit to exit.</small>
             </span>
           </label>
+          <section class="device-group">
+            <h3>Speakers</h3>
+            <ul id="devices-output"></ul>
+          </section>
+          <section class="device-group">
+            <h3>Microphones</h3>
+            <ul id="devices-input"></ul>
+          </section>
+          <section class="device-group">
+            <h3>Cameras</h3>
+            <ul id="devices-camera"></ul>
+          </section>
+          <p id="devices-note" class="devices-note" hidden></p>
         </form>
         <button id="sheet-close" type="button">Close</button>
       </div>

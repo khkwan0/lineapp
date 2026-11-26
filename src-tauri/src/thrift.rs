@@ -17,6 +17,7 @@ pub const I64: u8 = 6;
 pub const DOUBLE: u8 = 7;
 pub const BINARY: u8 = 8;
 pub const LIST: u8 = 9;
+pub const SET: u8 = 10;
 pub const MAP: u8 = 11;
 pub const STRUCT: u8 = 12;
 
@@ -42,6 +43,7 @@ pub enum Field {
     Bin(Vec<u8>),
     Struct(Vec<(i16, Field)>),
     List(u8, Vec<Field>),
+    Set(u8, Vec<Field>),
     MapBin(Vec<(Vec<u8>, Vec<u8>)>),
 }
 
@@ -104,6 +106,7 @@ fn wire_type(value: &Field) -> u8 {
         Field::Bin(_) => BINARY,
         Field::Struct(_) => STRUCT,
         Field::List(_, _) => LIST,
+        Field::Set(_, _) => SET,
         Field::MapBin(_) => MAP,
     }
 }
@@ -119,7 +122,7 @@ fn write_value(buf: &mut Vec<u8>, value: &Field) {
             buf.extend_from_slice(raw);
         }
         Field::Struct(fields) => buf.extend(write_struct(fields)),
-        Field::List(elem, items) => {
+        Field::List(elem, items) | Field::Set(elem, items) => {
             let size = items.len();
             if size <= 14 {
                 buf.push(((size as u8) << 4) | elem);
@@ -245,7 +248,7 @@ impl<'a> Reader<'a> {
                 Ok(Value::Bytes(self.raw(n)?.to_vec()))
             }
             STRUCT => Ok(Value::Struct(self.read_struct()?)),
-            LIST | 10 => {
+            LIST | SET => {
                 let header = self.u8()?;
                 let mut size = (header >> 4) as usize;
                 let elem = header & 0x0f;
@@ -378,5 +381,17 @@ mod tests {
         let err = read_message(&failed).unwrap();
         let Value::Struct(body) = err.fields.get(&1).unwrap() else { panic!("struct") };
         assert_eq!(body.get(&1), Some(&Value::Int(82)));
+    }
+
+    #[test]
+    fn a_set_round_trips_as_a_list() {
+        let frame = write_call(
+            "inviteIntoChat",
+            &[(1, Field::Struct(vec![(3, Field::Set(BINARY, vec![bin("ua"), bin("ub")]))]))],
+        );
+        let message = read_message(&frame).unwrap();
+        let Value::Struct(fields) = message.fields.get(&1).unwrap() else { panic!("struct") };
+        let Value::List(items) = fields.get(&3).unwrap() else { panic!("set") };
+        assert_eq!(items, &vec![Value::Bytes(b"ua".to_vec()), Value::Bytes(b"ub".to_vec())]);
     }
 }

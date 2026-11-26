@@ -1,5 +1,7 @@
 # lineapp
 
+**BETA.** This app is an unfinished beta. It is incomplete, it breaks, and it changes without warning. Do not rely on it as a stable LINE client.
+
 A small desktop client for the protocol the LINE desktop app speaks: Thrift
 TCompact POSTed to `legy-jp.line-apps.com`. This is not the public Bot /
 Messaging API.

@@ -1,6 +1,6 @@
 //! Talk, QR login, chats, history, send, and letter sealing.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -2560,6 +2560,293 @@ impl Client {
         }
         cards
     }
+
+    pub fn group_roster(&mut self, mid: &str) -> Result<Json, LineError> {
+        self.require_token()?;
+        if !group_mid_ok(mid) {
+            return Err(line("that group cannot be opened"));
+        }
+        let chat = self.one_chat(mid, true, false)?;
+        let facts = roster_facts(&chat)?;
+        let ids: Vec<String> = facts.members.iter().map(|(id, _)| id.clone()).collect();
+        let cards = self.people_cards(&ids);
+        let saved = crate::store::cached_rows();
+        let mine = self.session.mid.clone();
+        // LINE group chats have no admin role. A personal member may remove
+        // anyone else. Official Accounts cannot, and you cannot remove yourself.
+        let can_remove = !mine.is_empty() && facts.members.iter().any(|(id, _)| id == &mine);
+        let members: Vec<Json> = facts
+            .members
+            .iter()
+            .map(|(id, _)| {
+                let card = cards.get(id);
+                let fallback = saved.get(id).map(|row| row.name.as_str()).unwrap_or("");
+                json!({
+                    "id": id,
+                    "name": person_name(card, fallback, "Member"),
+                    "picture": person_picture(card, saved.get(id).map(|row| row.picture.as_str()).unwrap_or("")),
+                    "friend": card.and_then(|item| item.get("friend")).and_then(|value| value.as_bool()).unwrap_or(false),
+                    "mine": *id == mine,
+                })
+            })
+            .collect();
+        Ok(json!({
+            "id": mid,
+            "name": facts.name,
+            "picture": facts.picture,
+            "autoJoin": facts.auto_join,
+            "canRemove": can_remove,
+            "members": members,
+        }))
+    }
+
+    pub fn remove_group_member(&mut self, group: &str, member: &str) -> Result<(), LineError> {
+        self.require_token()?;
+        if !group_mid_ok(group) || !user_mid_ok(member) {
+            return Err(line("that member cannot be removed"));
+        }
+        if !self.session.mid.is_empty() && member == self.session.mid {
+            return Err(line("you cannot remove yourself"));
+        }
+        let chat = self.one_chat(group, true, false)?;
+        let facts = roster_facts(&chat)?;
+        let mine = self.session.mid.clone();
+        if mine.is_empty() || !facts.members.iter().any(|(id, _)| id == &mine) {
+            return Err(line("you cannot remove members from this group"));
+        }
+        if !facts.members.iter().any(|(id, _)| id == member) {
+            return Err(line("that person is not in the group"));
+        }
+        let seq = self.next_seq();
+        self.talk(
+            "deleteOtherFromChat",
+            &[(
+                1,
+                Field::Struct(vec![
+                    (1, Field::I32(seq)),
+                    (2, bin(group)),
+                    (3, Field::Set(thrift::BINARY, vec![bin(member)])),
+                ]),
+            )],
+        )?;
+        Ok(())
+    }
+
+    pub fn rename_group(&mut self, mid: &str, name: &str) -> Result<(), LineError> {
+        self.require_token()?;
+        if !group_mid_ok(mid) {
+            return Err(line("that group cannot be opened"));
+        }
+        let name = name.trim();
+        if name.is_empty() || name.chars().any(|ch| ch.is_control()) {
+            return Err(line("that name cannot be used"));
+        }
+        if name.chars().count() > 50 {
+            return Err(line("that name is too long"));
+        }
+        let seq = self.next_seq();
+        self.talk(
+            "updateChat",
+            &[(
+                1,
+                Field::Struct(vec![
+                    (1, Field::I32(seq)),
+                    (
+                        2,
+                        Field::Struct(vec![(1, Field::I32(0)), (2, bin(mid)), (6, bin(name))]),
+                    ),
+                    (3, Field::I32(1)),
+                ]),
+            )],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_group_auto_join(&mut self, mid: &str, enabled: bool) -> Result<(), LineError> {
+        self.require_token()?;
+        if !group_mid_ok(mid) {
+            return Err(line("that group cannot be opened"));
+        }
+        let seq = self.next_seq();
+        self.talk(
+            "updateChat",
+            &[(
+                1,
+                Field::Struct(vec![
+                    (1, Field::I32(seq)),
+                    (
+                        2,
+                        Field::Struct(vec![
+                            (1, Field::I32(0)),
+                            (2, bin(mid)),
+                            (
+                                8,
+                                Field::Struct(vec![(1, Field::Struct(vec![(2, Field::Bool(!enabled))]))]),
+                            ),
+                        ]),
+                    ),
+                    (3, Field::I32(4)),
+                ]),
+            )],
+        )?;
+        Ok(())
+    }
+
+    pub fn invite_into_group(&mut self, mid: &str, targets: &[String]) -> Result<(), LineError> {
+        self.require_token()?;
+        if !group_mid_ok(mid) {
+            return Err(line("that group cannot be opened"));
+        }
+        if targets.is_empty() {
+            return Err(line("choose someone to invite"));
+        }
+        if targets.len() > 30 {
+            return Err(line("invite fewer people at once"));
+        }
+        if targets.iter().any(|target| !user_mid_ok(target)) {
+            return Err(line("that person cannot be invited"));
+        }
+        let seq = self.next_seq();
+        let items: Vec<Field> = targets.iter().map(bin).collect();
+        self.talk(
+            "inviteIntoChat",
+            &[(
+                1,
+                Field::Struct(vec![
+                    (1, Field::I32(seq)),
+                    (2, bin(mid)),
+                    (3, Field::Set(thrift::BINARY, items)),
+                ]),
+            )],
+        )?;
+        Ok(())
+    }
+
+    pub fn group_invite_candidates(&mut self, mid: &str) -> Result<Json, LineError> {
+        self.require_token()?;
+        if !group_mid_ok(mid) {
+            return Err(line("that group cannot be opened"));
+        }
+        let chat = self.one_chat(mid, true, false)?;
+        let facts = roster_facts(&chat)?;
+        let mut skip: HashSet<String> = facts.members.iter().map(|(id, _)| id.clone()).collect();
+        if !self.session.mid.is_empty() {
+            skip.insert(self.session.mid.clone());
+        }
+        let mut ids = self.friend_ids();
+        ids.retain(|id| user_mid_ok(id) && !skip.contains(id));
+        ids.truncate(400);
+        let cards = self.people_cards(&ids);
+        let saved = crate::store::cached_rows();
+        let mut people: Vec<Json> = ids
+            .iter()
+            .filter_map(|id| {
+                let card = cards.get(id);
+                let fallback = saved.get(id).map(|row| row.name.as_str()).unwrap_or("");
+                let name = person_name(card, fallback, "");
+                if name.is_empty() {
+                    return None;
+                }
+                Some(json!({
+                    "id": id,
+                    "name": name,
+                    "picture": person_picture(card, saved.get(id).map(|row| row.picture.as_str()).unwrap_or("")),
+                }))
+            })
+            .collect();
+        people.sort_by(|left, right| {
+            let left_name = left.get("name").and_then(|value| value.as_str()).unwrap_or("");
+            let right_name = right.get("name").and_then(|value| value.as_str()).unwrap_or("");
+            left_name.to_lowercase().cmp(&right_name.to_lowercase())
+        });
+        Ok(Json::Array(people))
+    }
+
+    fn one_chat(&mut self, mid: &str, with_members: bool, with_invitees: bool) -> Result<BTreeMap<i16, Value>, LineError> {
+        let value = self
+            .talk(
+                "getChats",
+                &[(
+                    1,
+                    Field::Struct(vec![
+                        (1, Field::List(thrift::BINARY, vec![bin(mid)])),
+                        (2, Field::Bool(with_members)),
+                        (3, Field::Bool(with_invitees)),
+                    ]),
+                )],
+            )?
+            .ok_or_else(|| line("that group could not be loaded"))?;
+        let response = as_struct(&value)?;
+        let Some(Value::List(chats)) = response.get(&1) else {
+            return Err(line("that group could not be loaded"));
+        };
+        let mut only = None;
+        for chat in chats {
+            let Value::Struct(fields) = chat else { continue };
+            if text_field(fields, 2) == mid {
+                return Ok(fields.clone());
+            }
+            if only.is_none() {
+                only = Some(fields.clone());
+            }
+        }
+        only.ok_or_else(|| line("that group could not be loaded"))
+    }
+
+    fn people_cards(&mut self, mids: &[String]) -> HashMap<String, Json> {
+        let mut unique = Vec::new();
+        for mid in mids {
+            if user_mid_ok(mid) && !unique.contains(mid) {
+                unique.push(mid.clone());
+            }
+        }
+        let mut cards = HashMap::new();
+        for batch in unique.chunks(50) {
+            let items: Vec<Field> = batch.iter().cloned().map(bin).collect();
+            let Ok(Some(Value::List(people))) = self.talk("getContacts", &[(2, Field::List(thrift::BINARY, items))]) else {
+                continue;
+            };
+            for person in people {
+                let Value::Struct(person) = person else { continue };
+                let mid = text_field(&person, 1);
+                if mid.is_empty() {
+                    continue;
+                }
+                // getContacts returns a Contact. Field 20 is the display name only on getProfile.
+                let mut card = person_card(&person, false);
+                card["id"] = json!(mid);
+                cards.insert(mid, card);
+            }
+        }
+        let mine = self.session.mid.clone();
+        let unnamed = cards.get(&mine).and_then(|card| card.get("name")).and_then(|value| value.as_str()).is_none_or(|name| name.trim().is_empty());
+        if user_mid_ok(&mine) && unique.iter().any(|id| id == &mine) && unnamed {
+            if let Ok(Some(value)) = self.talk("getProfile", &[]) {
+                if let Ok(fields) = as_struct(&value) {
+                    let mut card = person_card(fields, true);
+                    card["id"] = json!(mine.clone());
+                    cards.insert(mine, card);
+                }
+            }
+        }
+        cards
+    }
+
+    fn friend_ids(&mut self) -> Vec<String> {
+        let looked = self
+            .call("getAllContactIds", &[], TALK_PATH, Duration::from_secs(8), &[], None)
+            .ok()
+            .flatten();
+        let ids = collect_mids(looked.as_ref());
+        if !ids.is_empty() {
+            return ids;
+        }
+        crate::store::cached_rows()
+            .into_iter()
+            .filter(|(id, chat)| chat.kind == "friend" && user_mid_ok(id))
+            .map(|(id, _)| id)
+            .collect()
+    }
 }
 
 fn sort_chat_rows(rows: &mut [Json]) {
@@ -3045,33 +3332,17 @@ fn https(
     headers: &[(&str, String)],
     timeout: Duration,
 ) -> Result<(u16, Vec<u8>, HashMap<String, String>), CallFail> {
-    let agent = ureq::AgentBuilder::new().timeout(timeout).build();
-    let url = format!("https://{host}{path}");
-    let mut request = agent.post(&url);
-    for (key, value) in headers {
-        request = request.set(key, value);
-    }
-    let response = match request.send_bytes(body) {
+    let headers = headers.iter().map(|(key, value)| ((*key).to_string(), value.clone())).collect::<Vec<_>>();
+    let (status, mut payload, header_map) = match crate::h2gate::post(host, path, body, &headers, timeout) {
         Ok(response) => response,
-        Err(ureq::Error::Status(_code, response)) => response,
-        Err(err) => {
-            let message = err.to_string();
-            if message.to_lowercase().contains("timed") || message.to_lowercase().contains("timeout") {
-                return Err(CallFail::TimedOut(format!("timeout talking to {host}{path}")));
+        Err(message) => {
+            let lower = message.to_lowercase();
+            if lower.contains("timed") || lower.contains("timeout") {
+                return Err(CallFail::TimedOut(message));
             }
-            return Err(CallFail::Line(line(format!("{host}{path}: {message}"))));
+            return Err(CallFail::Line(line(message)));
         }
     };
-    let status = response.status();
-    let mut header_map = HashMap::new();
-    for name in response.headers_names() {
-        if let Some(value) = response.header(&name) {
-            header_map.insert(name.to_ascii_lowercase(), value.to_string());
-        }
-    }
-    let mut payload = Vec::new();
-    let mut reader = response.into_reader();
-    reader.read_to_end(&mut payload).map_err(|err| CallFail::Line(line(err.to_string())))?;
     let encoding = header_map.get("content-encoding").cloned().unwrap_or_default();
     if encoding.to_lowercase().contains("gzip") || payload.starts_with(&[0x1f, 0x8b]) {
         let mut decoder = GzDecoder::new(payload.as_slice());
@@ -3335,10 +3606,106 @@ fn picture_url(path: &str) -> String {
 }
 
 fn member_count(chat: &BTreeMap<i16, Value>) -> Option<i64> {
+    let members = group_people(&group_extra(chat).unwrap_or_default(), 4);
+    if members.is_empty() { None } else { Some(members.len() as i64) }
+}
+
+fn group_mid_ok(mid: &str) -> bool {
+    (2..=64).contains(&mid.len()) && mid.starts_with('c') && mid.chars().all(|ch| ch.is_ascii_alphanumeric())
+}
+
+fn user_mid_ok(mid: &str) -> bool {
+    (2..=64).contains(&mid.len()) && mid.starts_with('u') && mid.chars().all(|ch| ch.is_ascii_alphanumeric())
+}
+
+struct RosterFacts {
+    name: String,
+    picture: String,
+    auto_join: bool,
+    members: Vec<(String, i64)>,
+}
+
+fn group_extra(chat: &BTreeMap<i16, Value>) -> Option<BTreeMap<i16, Value>> {
     let Value::Struct(extra) = chat.get(&8)? else { return None };
     let Value::Struct(group) = extra.get(&1)? else { return None };
-    let Value::Map(members) = group.get(&4)? else { return None };
-    if members.is_empty() { None } else { Some(members.len() as i64) }
+    Some(group.clone())
+}
+
+fn group_people(group: &BTreeMap<i16, Value>, field: i16) -> Vec<(String, i64)> {
+    let Some(Value::Map(pairs)) = group.get(&field) else { return Vec::new() };
+    let mut people = Vec::new();
+    for (key, value) in pairs {
+        let Value::Bytes(raw) = key else { continue };
+        let id = String::from_utf8_lossy(raw).trim().to_string();
+        if id.is_empty() || id.len() > 64 || !id.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+            continue;
+        }
+        let joined = match value {
+            Value::Int(number) => *number,
+            _ => 0,
+        };
+        people.push((id, joined));
+    }
+    people.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+    people
+}
+
+fn roster_facts(chat: &BTreeMap<i16, Value>) -> Result<RosterFacts, LineError> {
+    let raw = text_field(chat, 6);
+    let name = if raw.trim().is_empty() { "Unnamed group".into() } else { raw.trim().to_string() };
+    let group = group_extra(chat).unwrap_or_default();
+    Ok(RosterFacts {
+        name,
+        picture: picture_url(&text_field(chat, 7)),
+        auto_join: !bool_field(&group, 2),
+        members: group_people(&group, 4),
+    })
+}
+
+fn person_name(card: Option<&Json>, fallback: &str, empty: &str) -> String {
+    let named = card
+        .and_then(|item| item.get("name"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(name) = named {
+        return name.to_string();
+    }
+    let fallback = fallback.trim();
+    if fallback.is_empty() { empty.to_string() } else { fallback.to_string() }
+}
+
+fn person_picture(card: Option<&Json>, fallback: &str) -> String {
+    let picture = card
+        .and_then(|item| item.get("picture"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    picture.unwrap_or(fallback).to_string()
+}
+
+fn collect_mids(value: Option<&Value>) -> Vec<String> {
+    let mut ids = Vec::new();
+    match value {
+        Some(Value::List(_)) => ids.extend(id_list(value)),
+        Some(Value::Struct(fields)) => {
+            for field in fields.values() {
+                ids.extend(id_list(Some(field)));
+            }
+        }
+        Some(Value::Map(pairs)) => {
+            for (key, _) in pairs {
+                if let Value::Bytes(raw) = key {
+                    ids.push(String::from_utf8_lossy(raw).into_owned());
+                }
+            }
+        }
+        _ => {}
+    }
+    ids.retain(|id| user_mid_ok(id));
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
 fn chat_kind(mid: &str) -> &'static str {
@@ -4223,6 +4590,55 @@ mod tests {
         assert_eq!(next_wait(Duration::from_secs(30), 0), Duration::ZERO);
         assert!(!session_dead(&line("timeout talking to legy")));
         assert!(session_dead(&line_code("sync /P4 failed: logged out", Some(119), "logged out")));
+    }
+
+    #[test]
+    fn group_roster_reads_members_in_join_order_and_auto_join() {
+        let mut group = BTreeMap::new();
+        group.insert(2, Value::Bool(true));
+        group.insert(
+            4,
+            Value::Map(vec![
+                (Value::Bytes(b"uaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_vec()), Value::Int(20)),
+                (Value::Bytes(b"ubbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_vec()), Value::Int(10)),
+            ]),
+        );
+        let mut extra = BTreeMap::new();
+        extra.insert(1, Value::Struct(group));
+        let mut chat = BTreeMap::new();
+        chat.insert(6, Value::Bytes(b"Weekend".to_vec()));
+        chat.insert(7, Value::Bytes(b"/p".to_vec()));
+        chat.insert(8, Value::Struct(extra));
+        let facts = roster_facts(&chat).unwrap();
+        assert_eq!(facts.name, "Weekend");
+        assert_eq!(facts.picture, "https://profile.line-scdn.net/p");
+        assert!(!facts.auto_join);
+        assert_eq!(
+            facts.members,
+            vec![
+                ("ubbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(), 10),
+                ("uaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(), 20),
+            ]
+        );
+        assert_eq!(member_count(&chat), Some(2));
+
+        let mut bare = BTreeMap::new();
+        bare.insert(6, Value::Bytes(b"  Plain  ".to_vec()));
+        let plain = roster_facts(&bare).unwrap();
+        assert_eq!(plain.name, "Plain");
+        assert!(plain.auto_join);
+        assert!(plain.members.is_empty());
+        assert_eq!(member_count(&bare), None);
+    }
+
+    #[test]
+    fn your_contact_uses_the_contact_display_name() {
+        let mut fields = BTreeMap::new();
+        fields.insert(22, Value::Bytes(b"Kenneth".to_vec()));
+        fields.insert(24, Value::Bytes(b"/picture".to_vec()));
+        let card = person_card(&fields, false);
+        assert_eq!(card.get("name").and_then(|value| value.as_str()), Some("Kenneth"));
+        assert!(card.get("picture").and_then(|value| value.as_str()).unwrap_or("").contains("/picture"));
     }
 
 }

@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Members</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body class="members">
+    <header id="members-head">
+      <div id="members-photo">
+        <span class="avatar-fallback" aria-hidden="true">?</span>
+        <span id="members-camera" aria-hidden="true">
+          <svg viewBox="0 0 24 24">
+            <path
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              d="M8 8.2h1.2l1-1.6h3.6l1 1.6H16a2 2 0 0 1 2 2v5.2a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2v-5.2a2 2 0 0 1 2-2z"
+            />
+            <circle cx="12" cy="12.4" r="2.2" fill="none" stroke="currentColor" stroke-width="1.8" />
+          </svg>
+        </span>
+      </div>
+      <div id="members-name-row">
+        <h1 id="members-name"></h1>
+        <button id="members-rename" type="button" aria-label="Edit group name">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M13.8 4.8 19.2 10.2 8.4 21H3v-5.4L13.8 4.8z"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+        <input id="members-name-input" type="text" maxlength="50" hidden />
+      </div>
+    </header>
+    <div id="members-main">
+      <label id="members-search">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="11" cy="11" r="6.2" fill="none" stroke="currentColor" stroke-width="1.8" />
+          <path d="M15.6 15.6 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+        </svg>
+        <input id="members-query" type="search" placeholder="Search by display name" autocomplete="off" />
+      </label>
+      <button id="invite-open" type="button">
+        <span class="invite-badge" aria-hidden="true">
+          <svg viewBox="0 0 24 24">
+            <circle cx="9" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="1.7" />
+            <path
+              d="M3.4 18.2c.6-2.6 2.6-4 5.6-4 1.2 0 2.3.3 3.2.8"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+            />
+            <path d="M17 10.2v5.2M14.4 12.8h5.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
+          </svg>
+        </span>
+        Invite friends
+      </button>
+      <button id="members-fold" type="button" aria-expanded="true">
+        <span>Members <span id="members-count">0</span></span>
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M6 14.5 12 8.5l6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </button>
+      <ul id="members-list"></ul>
+      <p id="members-note" class="members-note" hidden></p>
+    </div>
+    <footer id="members-foot" hidden>
+      <div id="auto-row">
+        <strong>Members join automatically</strong>
+        <button id="auto-help" type="button" aria-describedby="auto-copy" title="Members join the group as soon as they're invited. Disable this setting to always require members to accept an invite before joining.">
+          ?
+        </button>
+        <button id="auto-join" type="button" role="checkbox" aria-checked="true" aria-label="Members join automatically">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path fill="currentColor" d="M6.2 11.4 2.9 8.1l1.2-1.2 2.1 2.1 5.2-5.2 1.2 1.2z" />
+          </svg>
+        </button>
+      </div>
+      <p id="auto-copy">
+        Members join the group as soon as they're invited. Disable this setting to always require members to accept an invite before joining.
+      </p>
+    </footer>
+    <section id="invite-view" hidden>
+      <div id="invite-bar">
+        <button id="invite-back" type="button">Back</button>
+        <h2>Invite friends</h2>
+      </div>
+      <label id="invite-search">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="11" cy="11" r="6.2" fill="none" stroke="currentColor" stroke-width="1.8" />
+          <path d="M15.6 15.6 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+        </svg>
+        <input id="invite-query" type="search" placeholder="Search by display name" autocomplete="off" />
+      </label>
+      <ul id="invite-list"></ul>
+      <p id="invite-note" class="members-note" hidden></p>
+      <button id="invite-send" type="button" disabled>Invite</button>
+    </section>
+    <div id="remove-confirm" hidden>
+      <div id="remove-card" role="dialog" aria-modal="true" aria-labelledby="remove-text">
+        <p id="remove-text"></p>
+        <p id="remove-error" hidden></p>
+        <div>
+          <button id="remove-cancel" type="button">Cancel</button>
+          <button id="remove-yes" type="button">Remove</button>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/members.ts"></script>
+  </body>
+</html>

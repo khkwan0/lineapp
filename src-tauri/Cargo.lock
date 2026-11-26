@@ -1416,6 +1416,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "h2"
+version = "0.4.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b634322c4924093fe6a6e05ecbe5717cd3c6014934455f4ae8e5cf14ba3264a8"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "fnv",
+ "futures-core",
+ "futures-sink",
+ "http",
+ "indexmap 2.14.2",
+ "slab",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2109,24 +2128,32 @@ dependencies = [
  "aes",
  "aes-gcm",
  "base64 0.22.1",
+ "bytes",
  "cbc",
  "ctr",
  "dirs",
  "flate2",
+ "h2",
  "hkdf",
  "hmac",
+ "http",
  "image",
  "percent-encoding",
  "rand",
  "rsa",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "sha1",
  "sha2 0.10.9",
  "tauri",
  "tauri-build",
+ "tokio",
+ "tokio-rustls",
  "ureq",
+ "webkit2gtk",
+ "webpki-roots 0.26.11",
  "x25519-dalek",
 ]
 
@@ -4169,6 +4196,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-rustls"
+version = "0.26.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
+dependencies = [
+ "rustls",
+ "tokio",
+]
+
+[[package]]
 name = "tokio-util"
 version = "0.7.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4177,6 +4214,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "libc",
  "pin-project-lite",
  "tokio",
 ]

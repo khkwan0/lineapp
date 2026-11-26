@@ -53,6 +53,7 @@ export default defineConfig({
       input: {
         main: `${root}index.html`,
         profile: `${root}profile.html`,
+        members: `${root}members.html`,
       },
     },
   },
