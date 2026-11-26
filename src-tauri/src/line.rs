@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD;
@@ -19,6 +19,7 @@ use crate::e2ee::{self, open_text, seal_text};
 use crate::legy::{needs_legy, LegyTransport, LEGY_HOST, LEGY_LAP, LEGY_PATH};
 use crate::thrift::{self, bin, Field, Value};
 
+const APP_ID: &str = "dev.lineapp.desktop";
 const APP_VERSION: &str = "26.6.0.4004";
 const SYSTEM_VERSION: &str = "10.0.26100-11NT";
 const DEFAULT_ENDPOINT: &str = "legy-jp.line-apps.com";
@@ -54,9 +55,10 @@ struct OpCursor {
 
 enum InboxNotice {
     Message { id: String, message: BTreeMap<i16, Value>, incoming: bool, when: i64 },
-    Read { id: String },
+    Read { id: String, message_id: String },
     Receipt { id: String },
     Refresh { id: String },
+    Reaction { id: String, message_id: String, emoji: String, image: String, mine: bool },
 }
 
 #[derive(Debug)]
@@ -141,11 +143,69 @@ impl Default for Session {
     }
 }
 
+static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+pub(crate) fn install_config_dir(identifier: &str) {
+    let dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join(identifier);
+    let _ = CONFIG_DIR.set(dir.clone());
+    let _ = std::fs::create_dir_all(&dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    #[cfg(debug_assertions)]
+    import_repo_session(&dir);
+}
+
+fn config_dir() -> PathBuf {
+    CONFIG_DIR
+        .get()
+        .cloned()
+        .unwrap_or_else(|| dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join(APP_ID))
+}
+
 pub(crate) fn config_path() -> PathBuf {
     if let Ok(override_path) = std::env::var("LINE_CONFIG") {
-        return PathBuf::from(override_path);
+        if !override_path.is_empty() {
+            return PathBuf::from(override_path);
+        }
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("lineapp.local.json")
+    config_dir().join("lineapp.local.json")
+}
+
+/// A debug build still finds a session written next to the repo. Release
+/// packages never see that compile-time path.
+#[cfg(debug_assertions)]
+fn import_repo_session(dir: &PathBuf) {
+    let legacy = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("lineapp.local.json");
+    if dir.join("lineapp.local.json").is_file() || !legacy.is_file() {
+        return;
+    }
+    let Some(parent) = legacy.parent() else {
+        return;
+    };
+    for name in [
+        "lineapp.local.json",
+        "lineapp.settings.json",
+        "lineapp.db",
+        "lineapp.db-wal",
+        "lineapp.db-shm",
+    ] {
+        let from = parent.join(name);
+        if !from.is_file() {
+            continue;
+        }
+        let dest = dir.join(name);
+        if dest.exists() || std::fs::copy(&from, &dest).is_err() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600));
+        }
+    }
 }
 
 fn load_session() -> Session {
@@ -717,9 +777,10 @@ impl Client {
             let (sticker, fallback) = sticker_pair(Some(message));
             let kind = content_kind(int_field(message, 15));
             let media_id = if kind == "image" || kind == "video" { ident.clone() } else { String::new() };
-            messages.push(json!({
+            let mut item = json!({
                 "id": ident,
                 "mine": mine,
+                "sender": sender,
                 "status": status,
                 "readers": readers,
                 "name": if mine { "" } else { cards.get(&sender).map(|card| card.0.as_str()).unwrap_or("") },
@@ -734,9 +795,69 @@ impl Client {
                 "seq": meta_value(message, "GSEQ").parse::<i64>().unwrap_or(0),
                 "mediaId": media_id,
                 "animated": !media_id.is_empty() && message_animated(message),
-            }));
+            });
+            attach_reaction(&mut item, message, &me);
+            messages.push(item);
         }
-        Ok(json!({"type": "history", "id": mid, "messages": messages}))
+        Ok(json!({"type": "history", "id": mid, "lastMessageId": latest_message_id(&collected), "messages": messages}))
+    }
+
+    /// `TalkService.sendChatChecked`: the desktop call that moves the read cursor.
+    ///
+    /// The official client sends `seq`, the chat mid, the newest message id the
+    /// user has on screen, and `sessionId` 0. LINE then drops that box's unread
+    /// count and tells other devices with operation 40.
+    pub fn mark_chat_read(&mut self, chat: &str, last_message_id: &str) -> Result<(), LineError> {
+        self.require_token()?;
+        if !message_id_ok(last_message_id) {
+            return Err(line("that message cannot be marked read"));
+        }
+        let seq = self.next_seq();
+        self.talk("sendChatChecked", &chat_checked_fields(seq, chat, last_message_id))?;
+        Ok(())
+    }
+
+    /// `TalkService.react` / `cancelReaction`. The chosen icon goes out as a paid
+    /// sticon. LINE then tells this account's other devices with operation 139
+    /// and the other person with operation 140.
+    pub fn send_reaction(&mut self, message_id: &str, emoji: &str) -> Result<(), LineError> {
+        self.require_token()?;
+        if !message_id_ok(message_id) {
+            return Err(line("that message cannot take a reaction"));
+        }
+        let message_id = message_id.parse::<i64>().map_err(|_| line("that message cannot take a reaction"))?;
+        let seq = self.next_seq();
+        if emoji.is_empty() {
+            self.talk(
+                "cancelReaction",
+                &[(1, Field::Struct(vec![(1, Field::I32(seq)), (2, Field::I64(message_id))]))],
+            )?;
+            return Ok(());
+        }
+        let (product, emoji_id) = reaction_sticon(emoji).ok_or_else(|| line("that reaction is not available"))?;
+        self.talk(
+            "react",
+            &[(
+                1,
+                Field::Struct(vec![
+                    (1, Field::I32(seq)),
+                    (2, Field::I64(message_id)),
+                    (
+                        3,
+                        Field::Struct(vec![(
+                            2,
+                            Field::Struct(vec![
+                                (1, bin(product)),
+                                (2, bin(emoji_id)),
+                                (3, Field::I32(1)),
+                                (4, Field::I64(1)),
+                            ]),
+                        )]),
+                    ),
+                ]),
+            )],
+        )?;
+        Ok(())
     }
 
     pub fn load_media(&mut self, chat: &str, ids: &[String], preview: bool, animated_ids: &[String]) -> Result<Json, LineError> {
@@ -1054,6 +1175,7 @@ impl Client {
             } else {
                 (String::new(), false, String::new(), String::new(), when > 0)
             };
+            let message_id = message.as_ref().map(|item| text_field(item, 4)).unwrap_or_default();
             let mut item = json!({
                 "id": mid,
                 "lastMessage": preview,
@@ -1062,6 +1184,7 @@ impl Client {
                 "sticker": sticker,
                 "stickerFallback": fallback,
                 "unread": unread,
+                "messageId": message_id,
                 "keepPreview": keep_preview,
             });
             if !known.contains_key(&mid) && mid.starts_with('u') {
@@ -1341,7 +1464,9 @@ impl Client {
                 40 => {
                     let id = text_field(op, 10);
                     if looks_like_mid(&id) {
-                        notices.push(InboxNotice::Read { id });
+                        let message_id = text_field(op, 11);
+                        let message_id = if message_id_ok(&message_id) { message_id } else { String::new() };
+                        notices.push(InboxNotice::Read { id, message_id });
                     }
                 }
                 55 => {
@@ -1357,6 +1482,21 @@ impl Client {
                     if looks_like_mid(&id) {
                         notices.push(InboxNotice::Refresh { id });
                     }
+                }
+                139 | 140 => {
+                    let message_id = text_field(op, 10);
+                    let payload = text_field(op, 11);
+                    let Some((id, emoji, image)) = reaction_notice(&payload) else { continue };
+                    if !message_id_ok(&message_id) || !looks_like_mid(&id) {
+                        continue;
+                    }
+                    notices.push(InboxNotice::Reaction {
+                        id,
+                        message_id,
+                        emoji,
+                        image,
+                        mine: int_field(op, 3) == Some(139),
+                    });
                 }
                 _ => {}
             }
@@ -1384,13 +1524,14 @@ impl Client {
         let mut updates = Vec::new();
         for notice in notices {
             match notice {
-                InboxNotice::Read { id } => {
+                InboxNotice::Read { id, message_id } => {
                     updates.push(json!({
                         "id": id,
                         "lastMessage": "",
                         "time": 0,
                         "sealed": false,
                         "read": true,
+                        "messageId": message_id,
                     }));
                 }
                 InboxNotice::Receipt { id } => {
@@ -1424,6 +1565,21 @@ impl Client {
                     let message = self.full_message(&id, message, &cards);
                     let when = message_time(&message).max(when);
                     updates.push(self.message_update(&id, &message, when, incoming, &cards));
+                }
+                InboxNotice::Reaction { id, message_id, emoji, image, mine } => {
+                    updates.push(json!({
+                        "id": id,
+                        "lastMessage": "",
+                        "time": 0,
+                        "sealed": false,
+                        "keepPreview": true,
+                        "reaction": {
+                            "messageId": message_id,
+                            "emoji": emoji,
+                            "image": image,
+                            "mine": mine,
+                        },
+                    }));
                 }
             }
         }
@@ -1491,19 +1647,21 @@ impl Client {
             "sealed": sealed,
             "sticker": sticker,
             "stickerFallback": fallback,
+            "messageId": text_field(message, 4),
             "incoming": incoming,
             "keepPreview": chat_update,
         });
         if !chat_update {
             let (text, sealed_body) = self.visible_text(message, cards);
-            if !text.is_empty() {
+                if !text.is_empty() {
                 let ident = text_field(message, 4);
                 let mine = !self.session.mid.is_empty() && sender_id == self.session.mid;
                 let kind = content_kind(int_field(message, 15));
                 let media_id = if kind == "image" || kind == "video" { ident.clone() } else { String::new() };
-                item["thread"] = json!({
+                let mut thread = json!({
                     "id": ident,
                     "mine": mine,
+                    "sender": sender_id,
                     "name": if mine { "" } else { cards.get(&sender_id).map(|card| card.0.as_str()).unwrap_or("") },
                     "picture": if mine { "" } else { cards.get(&sender_id).map(|card| card.1.as_str()).unwrap_or("") },
                     "text": text,
@@ -1517,6 +1675,8 @@ impl Client {
                     "mediaId": media_id,
                     "animated": !media_id.is_empty() && message_animated(message),
                 });
+                attach_reaction(&mut thread, message, &self.session.mid);
+                item["thread"] = thread;
             }
         }
         if id.starts_with('u') {
@@ -2196,15 +2356,145 @@ impl Client {
 
     fn list_profile(&mut self) -> Json {
         let Ok(Some(value)) = self.talk("getProfile", &[]) else {
-            return json!({"name": "", "picture": ""});
+            return json!({"mid": self.session.mid, "name": "", "picture": ""});
         };
         let Ok(fields) = as_struct(&value) else {
-            return json!({"name": "", "picture": ""});
+            return json!({"mid": self.session.mid, "name": "", "picture": ""});
         };
+        let mid = text_field(fields, 1);
         json!({
+            "mid": if mid.is_empty() { self.session.mid.clone() } else { mid },
             "name": text_field(fields, 20),
             "picture": picture_url(&text_field(fields, 22)),
         })
+    }
+
+    pub fn contact_profile(&mut self, mid: &str) -> Result<Json, LineError> {
+        self.require_token()?;
+        let own = !self.session.mid.is_empty() && mid == self.session.mid;
+        let fields = if own {
+            let value = self.talk("getProfile", &[])?.ok_or_else(|| line("that profile could not be loaded"))?;
+            as_struct(&value)?.clone()
+        } else {
+            self.one_contact(mid)?
+        };
+        let mut card = person_card(&fields, own);
+        card["id"] = json!(mid);
+        card["mine"] = json!(own);
+        card["cover"] = json!(self.home_cover(mid));
+        Ok(card)
+    }
+
+    pub fn set_blocked(&mut self, mid: &str, blocked: bool) -> Result<(), LineError> {
+        self.require_token()?;
+        if !self.session.mid.is_empty() && mid == self.session.mid {
+            return Err(line("you cannot block yourself"));
+        }
+        let seq = self.next_seq();
+        let method = if blocked { "blockContact" } else { "unblockContact" };
+        self.talk(method, &[(1, Field::I32(seq)), (2, bin(mid))])?;
+        Ok(())
+    }
+
+    pub fn update_contact_setting(&mut self, mid: &str, flag: i32, value: &str) -> Result<(), LineError> {
+        self.require_token()?;
+        if !self.session.mid.is_empty() && mid == self.session.mid {
+            return Err(line("that profile is you"));
+        }
+        let seq = self.next_seq();
+        self.talk(
+            "updateContactSetting",
+            &[(1, Field::I32(seq)), (2, bin(mid)), (3, Field::I32(flag)), (4, bin(value))],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_contact(&mut self, mid: &str) -> Result<(), LineError> {
+        self.require_token()?;
+        if !self.session.mid.is_empty() && mid == self.session.mid {
+            return Err(line("that profile is you"));
+        }
+        let seq = self.next_seq();
+        self.talk(
+            "findAndAddContactsByMid",
+            &[(1, Field::I32(seq)), (2, bin(mid)), (3, Field::I32(0)), (4, bin(""))],
+        )?;
+        Ok(())
+    }
+
+    fn one_contact(&mut self, mid: &str) -> Result<BTreeMap<i16, Value>, LineError> {
+        let Some(value) = self.talk("getContacts", &[(2, Field::List(thrift::BINARY, vec![bin(mid)]))])? else {
+            return Err(line("that profile could not be loaded"));
+        };
+        let Value::List(people) = value else {
+            return Err(line("that profile could not be loaded"));
+        };
+        let mut fallback = None;
+        for person in people {
+            let Value::Struct(person) = person else { continue };
+            if text_field(&person, 1) == mid {
+                return Ok(person);
+            }
+            if fallback.is_none() {
+                fallback = Some(person);
+            }
+        }
+        fallback.ok_or_else(|| line("that profile could not be loaded"))
+    }
+
+    fn channel_token(&mut self) -> Option<String> {
+        let mid = self.session.mid.clone();
+        if let Some(token) = cached_channel_token(&mid) {
+            return Some(token);
+        }
+        for path in ["/CH4", "/S4"] {
+            let Ok(Some(value)) = self.call(
+                "issueChannelToken",
+                &[(1, bin("1341209850"))],
+                path,
+                Duration::from_secs(6),
+                &[],
+                None,
+            ) else {
+                continue;
+            };
+            let Ok(fields) = as_struct(&value) else { continue };
+            let primary = text_field(fields, 5);
+            let token = if primary.is_empty() { text_field(fields, 1) } else { primary };
+            if token.is_empty() {
+                continue;
+            }
+            if let Ok(mut slot) = CHANNEL_TOKEN.lock() {
+                *slot = Some(CachedChannel { mid: mid.clone(), token: token.clone(), at: Instant::now() });
+            }
+            return Some(token);
+        }
+        None
+    }
+
+    fn home_cover(&mut self, mid: &str) -> String {
+        let Some(token) = self.channel_token() else { return String::new() };
+        let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(8)).build();
+        let url = format!("https://gd2.line.naver.jp/mh/api/v1/home/profile.json?homeId={mid}");
+        let response = agent
+            .get(&url)
+            .set("user-agent", &user_agent())
+            .set("x-line-application", &application_header())
+            .set("x-line-access", &self.session.access_token)
+            .set("x-line-channeltoken", &token)
+            .set("accept", "application/json")
+            .call();
+        let response = match response {
+            Ok(response) => response,
+            Err(ureq::Error::Status(_, response)) => response,
+            Err(_) => return String::new(),
+        };
+        if response.status() >= 400 {
+            return String::new();
+        }
+        let Ok(body) = response.into_string() else { return String::new() };
+        let Ok(parsed) = serde_json::from_str::<Json>(&body) else { return String::new() };
+        cover_from_home(&parsed)
     }
 
     fn contact_cards(&mut self, mids: &[String]) -> HashMap<String, (String, String)> {
@@ -2278,6 +2568,186 @@ fn unread_from_rows(rows: &[(String, Option<i64>, i64)]) -> (HashMap<String, i64
         }
     }
     (counts, if any { json!(total) } else { Json::Null }, ids)
+}
+
+fn chat_checked_fields(seq: i32, chat_mid: &str, last_message_id: &str) -> Vec<(i16, Field)> {
+    vec![
+        (1, Field::I32(seq)),
+        (2, bin(chat_mid)),
+        (3, bin(last_message_id)),
+        (4, Field::Byte(0)),
+    ]
+}
+
+fn message_id_ok(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 24 && id.chars().all(|ch| ch.is_ascii_digit())
+}
+
+const REACTION_PACK: &str = "670e0cce840a8236ddd4ee4c";
+const REACTION_TRIAL: &str = "5ac1bfd5040ab15980c9b435";
+
+fn reaction_sticon(emoji: &str) -> Option<(&'static str, &'static str)> {
+    REACTION_ICONS.iter().find(|item| item.0 == emoji).map(|item| (item.1, item.2))
+}
+
+fn sticon_emoji(product: &str, emoji_id: &str) -> Option<&'static str> {
+    REACTION_ICONS.iter().find(|item| item.1 == product && item.2 == emoji_id).map(|item| item.0)
+}
+
+const REACTION_ICONS: &[(&str, &str, &str)] = &[
+    ("👍", REACTION_PACK, "143"),
+    ("😎", REACTION_PACK, "086"),
+    ("😍", REACTION_TRIAL, "001"),
+    ("😠", REACTION_PACK, "094"),
+    ("🥺", REACTION_PACK, "087"),
+    ("😭", REACTION_PACK, "093"),
+    ("😮", REACTION_PACK, "089"),
+];
+
+fn predefined_emoji(kind: i64) -> Option<&'static str> {
+    match kind {
+        2 => Some("👍"),
+        3 => Some("❤️"),
+        4 => Some("😆"),
+        5 => Some("😮"),
+        6 => Some("😢"),
+        7 => Some("😡"),
+        _ => None,
+    }
+}
+
+fn sticon_url(product: &str, emoji_id: &str) -> String {
+    format!("https://stickershop.line-scdn.net/sticonshop/v1/sticon/{product}/android/{emoji_id}.png")
+}
+
+fn reaction_notice(payload: &str) -> Option<(String, String, String)> {
+    let parsed = serde_json::from_str::<Json>(payload).ok()?;
+    let chat = parsed.get("chatMid").and_then(|value| value.as_str()).unwrap_or("").to_string();
+    if chat.is_empty() {
+        return None;
+    }
+    let Some(curr) = parsed.get("curr").filter(|value| !value.is_null()) else {
+        return Some((chat, String::new(), String::new()));
+    };
+    let (emoji, image) = reaction_from_detail(curr);
+    if emoji.is_empty() && image.is_empty() {
+        return None;
+    }
+    Some((chat, emoji, image))
+}
+
+fn reaction_from_detail(curr: &Json) -> (String, String) {
+    if let Some(paid) = curr.get("paidReactionType").filter(|value| !value.is_null()) {
+        let product = json_text(paid, "productId");
+        let emoji_id = emoji_token(paid.get("emojiId"));
+        if let Some(emoji) = sticon_emoji(&product, &emoji_id) {
+            return (emoji.to_string(), String::new());
+        }
+        if !product.is_empty() && !emoji_id.is_empty() {
+            return (String::new(), sticon_url(&product, &emoji_id));
+        }
+    }
+    let kind = curr.get("predefinedReactionType").and_then(json_int).unwrap_or(0);
+    (predefined_emoji(kind).unwrap_or("").to_string(), String::new())
+}
+
+fn json_text(value: &Json, key: &str) -> String {
+    match value.get(key) {
+        Some(Json::String(text)) => text.clone(),
+        Some(Json::Number(number)) => number.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn json_int(value: &Json) -> Option<i64> {
+    match value {
+        Json::Number(number) => number.as_i64(),
+        Json::String(text) => text.parse().ok(),
+        _ => None,
+    }
+}
+
+fn emoji_token(value: Option<&Json>) -> String {
+    let raw = match value {
+        Some(Json::String(text)) => text.trim().to_string(),
+        Some(Json::Number(number)) => number.to_string(),
+        _ => return String::new(),
+    };
+    if raw.chars().all(|ch| ch.is_ascii_digit()) && (1..3).contains(&raw.len()) {
+        return format!("{raw:0>3}");
+    }
+    raw
+}
+
+fn attach_reaction(item: &mut Json, message: &BTreeMap<i16, Value>, me: &str) {
+    let Some(reaction) = message_reaction(message, me) else { return };
+    item["reaction"] = json!(reaction.0);
+    if !reaction.1.is_empty() {
+        item["reactionImage"] = json!(reaction.1);
+    }
+    item["reactionMine"] = json!(reaction.2);
+}
+
+fn message_reaction(message: &BTreeMap<i16, Value>, me: &str) -> Option<(String, String, bool)> {
+    let Value::List(rows) = message.get(&27)? else { return None };
+    let mut mine = None;
+    let mut latest: Option<(i64, (String, String, bool))> = None;
+    for row in rows {
+        let Value::Struct(fields) = row else { continue };
+        let who = text_field(fields, 1);
+        let when = int_field(fields, 2).unwrap_or(0);
+        let Some(Value::Struct(kind)) = fields.get(&3) else { continue };
+        let (emoji, image) = reaction_from_type(kind);
+        if emoji.is_empty() && image.is_empty() {
+            continue;
+        }
+        let own = !me.is_empty() && who == me;
+        let shown = (emoji, image, own);
+        if own {
+            mine = Some(shown.clone());
+        }
+        let replace = match &latest {
+            None => true,
+            Some((at, _)) => when >= *at,
+        };
+        if replace {
+            latest = Some((when, shown));
+        }
+    }
+    mine.or_else(|| latest.map(|item| item.1))
+}
+
+fn reaction_from_type(kind: &BTreeMap<i16, Value>) -> (String, String) {
+    if let Some(Value::Struct(paid)) = kind.get(&2) {
+        let product = text_field(paid, 1);
+        let emoji_id = emoji_token(Some(&Json::String(text_field(paid, 2))));
+        if let Some(emoji) = sticon_emoji(&product, &emoji_id) {
+            return (emoji.to_string(), String::new());
+        }
+        if !product.is_empty() && !emoji_id.is_empty() {
+            return (String::new(), sticon_url(&product, &emoji_id));
+        }
+    }
+    let code = int_field(kind, 1).unwrap_or(0);
+    (predefined_emoji(code).unwrap_or("").to_string(), String::new())
+}
+
+fn newer_message_id(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return left.len() > right.len();
+    }
+    left > right
+}
+
+fn latest_message_id(messages: &[BTreeMap<i16, Value>]) -> String {
+    let mut best = String::new();
+    for message in messages {
+        let ident = text_field(message, 4);
+        if message_id_ok(&ident) && (best.is_empty() || newer_message_id(&ident, &best)) {
+            best = ident;
+        }
+    }
+    best
 }
 
 fn send_failure(to: &str, err: &LineError) -> Json {
@@ -2674,6 +3144,100 @@ fn id_list(value: Option<&Value>) -> Vec<String> {
         Value::Bytes(raw) if !raw.is_empty() => Some(String::from_utf8_lossy(raw).into_owned()),
         _ => None,
     }).collect()
+}
+
+struct CachedChannel {
+    mid: String,
+    token: String,
+    at: Instant,
+}
+
+static CHANNEL_TOKEN: Mutex<Option<CachedChannel>> = Mutex::new(None);
+
+fn cached_channel_token(mid: &str) -> Option<String> {
+    let guard = CHANNEL_TOKEN.lock().ok()?;
+    let hit = guard.as_ref()?;
+    if hit.mid != mid || hit.at.elapsed() > Duration::from_secs(20 * 60) {
+        return None;
+    }
+    Some(hit.token.clone())
+}
+
+fn person_card(fields: &BTreeMap<i16, Value>, own: bool) -> Json {
+    if own {
+        let path = text_field(fields, 22);
+        let path = if path.trim().is_empty() { text_field(fields, 33) } else { path };
+        let name = text_field(fields, 20).trim().to_string();
+        return json!({
+            "name": name,
+            "given": name,
+            "status": text_field(fields, 24).trim(),
+            "picture": picture_url(&path),
+            "friend": true,
+            "blocked": false,
+            "favorite": false,
+        });
+    }
+    let given = text_field(fields, 22).trim().to_string();
+    let over = text_field(fields, 27).trim().to_string();
+    let name = if over.is_empty() { given.clone() } else { over };
+    let path = text_field(fields, 24);
+    let path = if path.trim().is_empty() { text_field(fields, 37) } else { path };
+    let status_code = int_field(fields, 11).unwrap_or(0);
+    let relation = int_field(fields, 21).unwrap_or(-1);
+    let settings = int_field(fields, 36).unwrap_or(0);
+    json!({
+        "name": name,
+        "given": given,
+        "status": text_field(fields, 26).trim(),
+        "picture": picture_url(&path),
+        "friend": status_code == 1 || relation == 1,
+        "blocked": matches!(status_code, 2 | 4 | 6),
+        "favorite": settings & 8 != 0,
+    })
+}
+
+fn cover_object_url(id: &str) -> String {
+    let id = id.trim();
+    if id.is_empty() || id.contains("..") || id.contains('\\') || id.len() > 180 {
+        return String::new();
+    }
+    if let Some(rest) = id.strip_prefix("https://") {
+        let host_ok = rest.starts_with("obs.line-scdn.net/")
+            || rest.starts_with("profile.line-scdn.net/")
+            || rest.starts_with("obs.line-apps.com/");
+        return if host_ok { id.to_string() } else { String::new() };
+    }
+    let id = id.trim_start_matches('/');
+    let user_mid = matches!(id.chars().next(), Some('u' | 'c' | 'r'))
+        && (30..=40).contains(&id.len())
+        && id.chars().all(|ch| ch.is_ascii_alphanumeric());
+    if id.is_empty() || id.contains('/') || user_mid {
+        return String::new();
+    }
+    format!("https://obs.line-scdn.net/myhome/h/{id}")
+}
+
+fn cover_from_home(value: &Json) -> String {
+    for key in ["coverUrl", "backgroundUrl", "coverImageUrl", "profileCoverUrl"] {
+        for pointer in [format!("/result/{key}"), format!("/result/cover/{key}")] {
+            if let Some(url) = value.pointer(&pointer).and_then(|item| item.as_str()) {
+                let url = cover_object_url(url);
+                if !url.is_empty() {
+                    return url;
+                }
+            }
+        }
+    }
+    for pointer in ["/result/cover/objectId", "/result/objectId"] {
+        if let Some(id) = value.pointer(pointer).and_then(|item| item.as_str()) {
+            let url = cover_object_url(id);
+            if !url.is_empty() {
+                return url;
+            }
+        }
+    }
+    String::new()
 }
 
 fn picture_url(path: &str) -> String {
@@ -3179,6 +3743,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn session_file_lives_in_the_app_config_directory() {
+        if std::env::var_os("LINE_CONFIG").is_some_and(|value| !value.is_empty()) {
+            return;
+        }
+        let path = config_path();
+        assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("lineapp.local.json"));
+        assert_eq!(
+            path.parent().and_then(|parent| parent.file_name()).and_then(|name| name.to_str()),
+            Some(APP_ID)
+        );
+        assert!(!path.starts_with(env!("CARGO_MANIFEST_DIR")));
+    }
+
+    #[test]
     fn a_saved_sender_key_survives_an_older_session_write() {
         let mut current = Session::default();
         current.access_token = "new".into();
@@ -3195,6 +3773,86 @@ mod tests {
         current.e2ee_sender_key_id = Some(10);
         merge_e2ee(&mut current, &disk);
         assert_eq!(current.e2ee_sender_key_id, Some(10));
+    }
+
+    #[test]
+    fn a_reaction_notice_keeps_the_chosen_icon() {
+        let (chat, emoji, image) = reaction_notice(
+            r#"{"chatMid":"uabc","curr":{"paidReactionType":{"productId":"670e0cce840a8236ddd4ee4c","emojiId":"086","resourceType":1,"version":1}}}"#,
+        )
+        .unwrap();
+        assert_eq!(chat, "uabc");
+        assert_eq!(emoji, "😎");
+        assert!(image.is_empty());
+        let (chat, emoji, image) = reaction_notice(r#"{"chatMid":"uabc","curr":null}"#).unwrap();
+        assert_eq!(chat, "uabc");
+        assert!(emoji.is_empty());
+        assert!(image.is_empty());
+        let (_, emoji, _) = reaction_notice(r#"{"chatMid":"uabc","curr":{"predefinedReactionType":"3"}}"#).unwrap();
+        assert_eq!(emoji, "❤️");
+        let mut message = BTreeMap::new();
+        message.insert(
+            27,
+            Value::List(vec![Value::Struct(BTreeMap::from([
+                (1, Value::Bytes(b"uother".to_vec())),
+                (2, Value::Int(20)),
+                (3, Value::Struct(BTreeMap::from([(1, Value::Int(7))]))),
+            ]))]),
+        );
+        assert_eq!(message_reaction(&message, "ume"), Some(("😡".into(), String::new(), false)));
+    }
+
+    #[test]
+    fn chat_checked_matches_the_desktop_call() {
+        let frame = thrift::write_call("sendChatChecked", &chat_checked_fields(7, "uabc", "1400"));
+        let parsed = thrift::read_message(&frame).unwrap();
+        assert_eq!(parsed.name, "sendChatChecked");
+        assert_eq!(parsed.fields.get(&1), Some(&Value::Int(7)));
+        assert_eq!(parsed.fields.get(&2), Some(&Value::Bytes(b"uabc".to_vec())));
+        assert_eq!(parsed.fields.get(&3), Some(&Value::Bytes(b"1400".to_vec())));
+        assert_eq!(parsed.fields.get(&4), Some(&Value::Byte(0)));
+        assert!(newer_message_id("100", "99"));
+        assert!(!newer_message_id("99", "100"));
+        assert_eq!(latest_message_id(&[
+            BTreeMap::from([(4, Value::Bytes(b"99".to_vec()))]),
+            BTreeMap::from([(4, Value::Bytes(b"100".to_vec()))]),
+        ]), "100");
+    }
+
+    #[test]
+    fn profile_card_reads_the_name_status_and_photo() {
+        let fields = BTreeMap::from([
+            (11, Value::Int(1)),
+            (21, Value::Int(1)),
+            (22, Value::Bytes(b"Methini Mint Minto".to_vec())),
+            (24, Value::Bytes(b"0habc".to_vec())),
+            (26, Value::Bytes(b"Let it be.".to_vec())),
+        ]);
+        let card = person_card(&fields, false);
+        assert_eq!(card["name"], "Methini Mint Minto");
+        assert_eq!(card["status"], "Let it be.");
+        assert_eq!(card["picture"], "https://profile.line-scdn.net/0habc");
+        assert_eq!(card["friend"], true);
+        assert_eq!(card["blocked"], false);
+        assert_eq!(card["favorite"], false);
+        let named = BTreeMap::from([
+            (11, Value::Int(1)),
+            (22, Value::Bytes(b"Supansa".to_vec())),
+            (27, Value::Bytes(b"Sun".to_vec())),
+            (36, Value::Int(8)),
+        ]);
+        let named = person_card(&named, false);
+        assert_eq!(named["name"], "Sun");
+        assert_eq!(named["given"], "Supansa");
+        assert_eq!(named["favorite"], true);
+        let blocked = BTreeMap::from([(11, Value::Int(2)), (22, Value::Bytes(b"A".to_vec()))]);
+        assert_eq!(person_card(&blocked, false)["blocked"], true);
+        let cover = cover_from_home(&json!({"result": {"objectId": "cover1", "homeId": "u0123456789abcdef0123456789abcdef"}}));
+        assert_eq!(cover, "https://obs.line-scdn.net/myhome/h/cover1");
+        let linked = cover_from_home(&json!({"result": {"coverUrl": "https://obs.line-scdn.net/myhome/h/direct"}}));
+        assert_eq!(linked, "https://obs.line-scdn.net/myhome/h/direct");
+        assert_eq!(cover_from_home(&json!({"result": {"objectId": "../x"}})), "");
+        assert_eq!(cover_from_home(&json!({"result": {"coverUrl": "https://evil.example/a"}})), "");
     }
 
     #[test]

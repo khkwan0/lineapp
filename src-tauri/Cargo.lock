@@ -2111,6 +2111,7 @@ dependencies = [
  "base64 0.22.1",
  "cbc",
  "ctr",
+ "dirs",
  "flate2",
  "hkdf",
  "hmac",

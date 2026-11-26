@@ -28,6 +28,7 @@ type ChatRow = {
 type HistoryMessage = {
   id?: string;
   mine: boolean;
+  sender?: string;
   name: string;
   picture?: string;
   text: string;
@@ -42,6 +43,9 @@ type HistoryMessage = {
   seq?: number;
   mediaId?: string;
   animated?: boolean;
+  reaction?: string;
+  reactionImage?: string;
+  reactionMine?: boolean;
 };
 
 type MediaSlot = { id: string; seq: number; animated?: boolean };
@@ -64,12 +68,13 @@ type ReadMark = { end: string };
 
 type HistoryPayload = {
   id: string;
+  lastMessageId?: string;
   messages: HistoryMessage[];
 };
 
 type ChatPayload = {
   type: string;
-  profile: { name: string; picture: string };
+  profile: { name: string; picture: string; mid?: string };
   chats: ChatRow[];
   failures: { name: string; error: string }[];
   unreadTotal: number | null;
@@ -109,12 +114,20 @@ const lightboxNext = document.querySelector<HTMLButtonElement>("#lightbox-next")
 let shownUrl = "";
 let myName = "";
 let myPicture = "";
+let myMid = "";
 let rows: ChatRow[] = [];
 let filter = "all";
 let selected = 0;
 let openId = "";
+let openLastId = "";
 let historyToken = 0;
 let paintedHistory = "";
+let paintedIds = "";
+let openUnread = 0;
+let unreadFocus = "";
+let placingThread = false;
+let userMoved = false;
+let placeToken = 0;
 let signedIn = false;
 const mediaUrls = new Map<string, string>();
 const animatedMedia = new Set<string>();
@@ -131,6 +144,7 @@ type PollUpdate = {
   sticker?: string;
   stickerFallback?: string;
   unread?: number | null;
+  messageId?: string;
   incoming?: boolean;
   read?: boolean;
   refresh?: boolean;
@@ -141,6 +155,7 @@ type PollUpdate = {
   picture?: string;
   kind?: string;
   members?: number | null;
+  reaction?: { messageId: string; emoji?: string; image?: string; mine?: boolean };
 };
 
 type PollPayload = {
@@ -367,6 +382,13 @@ function playChime(): void {
   });
 }
 
+window.addEventListener("focus", () => catchUpRead());
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    catchUpRead();
+  }
+});
+
 document.addEventListener("pointerdown", () => {
   const Ctx = window.AudioContext;
   if (!Ctx) {
@@ -380,11 +402,138 @@ document.addEventListener("pointerdown", () => {
   }
 });
 
+const readHeld = new Map<string, string>();
+const readSent = new Map<string, string>();
+const readWant = new Map<string, string>();
+const latestSeen = new Map<string, string>();
+const readBusy = new Set<string>();
+
+function messageIdNumber(id: string): bigint | null {
+  if (!/^[0-9]+$/.test(id)) {
+    return null;
+  }
+  try {
+    return BigInt(id);
+  } catch {
+    return null;
+  }
+}
+
+function coversMessage(mark: string, messageId: string): boolean {
+  const left = messageIdNumber(mark);
+  const right = messageIdNumber(messageId);
+  return left !== null && right !== null && left >= right;
+}
+
+function newestMessageId(ids: string[]): string {
+  let best = "";
+  let bestValue: bigint | null = null;
+  for (const id of ids) {
+    const value = messageIdNumber(id);
+    if (value === null) {
+      continue;
+    }
+    if (bestValue === null || value > bestValue) {
+      best = id;
+      bestValue = value;
+    }
+  }
+  return best;
+}
+
+function readingChat(id: string): boolean {
+  return id !== "" && id === openId && document.hasFocus() && document.visibilityState !== "hidden";
+}
+
+function dismissUnread(id: string): void {
+  const chat = rows.find((row) => row.id === id);
+  if (!chat?.unread) {
+    return;
+  }
+  chat.unread = 0;
+  paintUnread();
+  chats.querySelector(".selected .badge")?.remove();
+}
+
+function noteLatest(id: string, messageId: string): void {
+  if (!messageIdNumber(messageId)) {
+    return;
+  }
+  const current = latestSeen.get(id) || "";
+  if (!current || !coversMessage(current, messageId)) {
+    latestSeen.set(id, messageId);
+  }
+  if (id === openId) {
+    openLastId = latestSeen.get(id) || messageId;
+  }
+}
+
+function holdRead(id: string, messageId: string): void {
+  if (!messageIdNumber(messageId)) {
+    return;
+  }
+  noteLatest(id, messageId);
+  const coveredBy = readWant.get(id) || readSent.get(id) || "";
+  if (coveredBy && coversMessage(coveredBy, messageId)) {
+    dismissUnread(id);
+    return;
+  }
+  readHeld.set(id, messageId);
+  dismissUnread(id);
+  readWant.set(id, messageId);
+  void flushRead(id);
+}
+
+async function flushRead(id: string): Promise<void> {
+  if (readBusy.has(id)) {
+    return;
+  }
+  const target = readWant.get(id);
+  if (!target) {
+    return;
+  }
+  readBusy.add(id);
+  readWant.delete(id);
+  try {
+    await invoke("mark_chat_read", { id, messageId: target });
+    const sent = readSent.get(id) || "";
+    if (!sent || !coversMessage(sent, target)) {
+      readSent.set(id, target);
+    }
+  } catch {
+    if (readHeld.get(id) === target) {
+      readHeld.delete(id);
+    }
+  } finally {
+    readBusy.delete(id);
+  }
+  const next = readWant.get(id) || "";
+  if (next && !coversMessage(target, next)) {
+    await flushRead(id);
+  }
+}
+
+function catchUpRead(): void {
+  if (!readingChat(openId)) {
+    return;
+  }
+  const onScreen = Array.from(threadBody.querySelectorAll<HTMLElement>(".msg[data-id]"), (row) => row.dataset.id || "");
+  const latest = newestMessageId([openLastId, ...onScreen]);
+  if (latest) {
+    holdRead(openId, latest);
+  }
+}
+
 function showThread(chat: ChatRow | undefined): void {
   if (!chat) {
     thread.hidden = true;
     openId = "";
+    openLastId = "";
+    paintedIds = "";
+    openUnread = 0;
+    unreadFocus = "";
     closeGallery();
+    closeReactionPicker();
     composerInput.disabled = true;
     sendError.hidden = true;
     threadHead.replaceChildren();
@@ -394,30 +543,38 @@ function showThread(chat: ChatRow | undefined): void {
   thread.hidden = false;
   paintThreadHead(chat);
   composerInput.disabled = false;
-  if (chat.id === openId) {
-    return;
+  if (chat.id !== openId) {
+    openId = chat.id;
+    openLastId = "";
+    paintedHistory = "";
+    paintedIds = "";
+    openUnread = chat.unread && chat.unread > 0 ? chat.unread : 0;
+    unreadFocus = "";
+    userMoved = false;
+    closeGallery();
+    closeReactionPicker();
+    sendError.hidden = true;
+    const token = ++historyToken;
+    threadBody.replaceChildren();
+    const note = document.createElement("p");
+    note.className = "thread-note";
+    note.textContent = "Loading messages…";
+    threadBody.append(note);
+    void invoke("load_history", { id: chat.id }).catch((error: unknown) => {
+      if (token !== historyToken) {
+        return;
+      }
+      note.textContent = error instanceof Error ? error.message : String(error);
+    });
   }
-  openId = chat.id;
-  paintedHistory = "";
-  closeGallery();
-  sendError.hidden = true;
-  const token = ++historyToken;
-  threadBody.replaceChildren();
-  const note = document.createElement("p");
-  note.className = "thread-note";
-  note.textContent = "Loading messages…";
-  threadBody.append(note);
-  void invoke("load_history", { id: chat.id }).catch((error: unknown) => {
-    if (token !== historyToken) {
-      return;
-    }
-    note.textContent = error instanceof Error ? error.message : String(error);
-  });
+  if (readingChat(chat.id)) {
+    dismissUnread(chat.id);
+  }
 }
 
 function historyStamp(payload: HistoryPayload): string {
   return payload.messages
-    .map((message) => [message.id || "", message.text, message.status || "", String(message.readers || 0), String(message.time)].join("\u001f"))
+    .map((message) => [message.id || "", message.sender || "", message.text, message.status || "", String(message.readers || 0), String(message.time)].join("\u001f"))
     .join("\u001e");
 }
 
@@ -425,11 +582,21 @@ function renderHistory(payload: HistoryPayload): void {
   if (payload.id !== openId) {
     return;
   }
+  const candidate = payload.lastMessageId || newestMessageId(payload.messages.map((message) => message.id || ""));
+  if (candidate) {
+    noteLatest(payload.id, candidate);
+  }
   const stamp = historyStamp(payload);
   if (stamp === paintedHistory && !threadBody.querySelector(".thread-note")) {
+    markOpenRead(payload.id);
     return;
   }
+  const firstPaint = paintedIds === "" || Boolean(threadBody.querySelector(".thread-note"));
+  const savedTop = threadBody.scrollTop;
+  const previousIds = new Set(paintedIds ? paintedIds.split("\u001f") : []);
   paintedHistory = stamp;
+  paintedIds = payload.messages.map((message) => message.id || "").join("\u001f");
+  closeReactionPicker();
   threadBody.replaceChildren();
   if (payload.messages.length === 0) {
     const note = document.createElement("p");
@@ -437,11 +604,79 @@ function renderHistory(payload: HistoryPayload): void {
     note.textContent = "No messages";
     threadBody.append(note);
     document.body.dataset.history = "0";
+    unreadFocus = "";
+    markOpenRead(payload.id);
     return;
   }
   groupMessages(payload.messages).forEach((message) => threadBody.append(messageBubble(message)));
-  threadBody.scrollTop = threadBody.scrollHeight;
+  settleThread(payload.messages, previousIds, firstPaint, savedTop);
   document.body.dataset.history = String(payload.messages.length);
+  markOpenRead(payload.id);
+}
+
+function incomingId(message: HistoryMessage): string {
+  if (message.mine || message.kind === "chat update" || !message.id) {
+    return "";
+  }
+  return message.id;
+}
+
+function firstUnreadId(messages: HistoryMessage[], count: number): string {
+  if (count <= 0) {
+    return "";
+  }
+  const incoming = messages.map(incomingId).filter((id) => id);
+  if (incoming.length === 0) {
+    return "";
+  }
+  return incoming[Math.max(0, incoming.length - count)] || "";
+}
+
+function bubbleById(id: string): HTMLElement | null {
+  if (!id) {
+    return null;
+  }
+  for (const row of threadBody.querySelectorAll<HTMLElement>(".msg")) {
+    if (row.dataset.id === id || row.dataset.ids?.split(",").includes(id)) {
+      return row;
+    }
+  }
+  return null;
+}
+
+function threadNearBottom(): boolean {
+  return threadBody.scrollHeight - threadBody.scrollTop - threadBody.clientHeight < 48;
+}
+
+function settleThread(messages: HistoryMessage[], previousIds: Set<string>, firstPaint: boolean, savedTop: number): void {
+  if (firstPaint) {
+    unreadFocus = firstUnreadId(messages, openUnread);
+    openUnread = 0;
+    placeThread();
+    return;
+  }
+  const added = messages.filter((message) => message.id && !previousIds.has(message.id));
+  if (added.length === 0 || userMoved) {
+    threadBody.scrollTop = savedTop;
+    return;
+  }
+  const incoming = added.map(incomingId).filter((id) => id);
+  if (incoming.length > 0) {
+    if (!unreadFocus) {
+      unreadFocus = incoming[0] || "";
+    }
+    placeThread();
+    return;
+  }
+  unreadFocus = "";
+  scrollThreadToEnd();
+}
+
+function markOpenRead(id: string): void {
+  if (!readingChat(id) || !openLastId) {
+    return;
+  }
+  holdRead(id, openLastId);
 }
 
 function stickerImage(
@@ -584,6 +819,276 @@ function clampIfTall(body: HTMLElement, attempt = 0): void {
   body.after(more);
 }
 
+const REACTIONS: { emoji: string; label: string }[] = [
+  { emoji: "👍", label: "Like" },
+  { emoji: "😎", label: "Cool" },
+  { emoji: "😍", label: "Love" },
+  { emoji: "😠", label: "Angry" },
+  { emoji: "🥺", label: "Please" },
+  { emoji: "😭", label: "Cry" },
+  { emoji: "😮", label: "Wow" },
+];
+
+type ShownReaction = { emoji: string; image: string; mine: boolean };
+
+const reactionOverride = new Map<string, ShownReaction>();
+
+let reactionPicker: { panel: HTMLElement; toggle: HTMLButtonElement; bubble: HTMLElement } | null = null;
+
+function reactionStorageKey(chatId: string, messageId: string): string {
+  return `${chatId}:${messageId}`;
+}
+
+function shownReaction(chatId: string, messageId: string, message?: HistoryMessage): ShownReaction {
+  if (chatId && messageId) {
+    const saved = reactionOverride.get(reactionStorageKey(chatId, messageId));
+    if (saved) {
+      return saved;
+    }
+  }
+  return {
+    emoji: message?.reaction || "",
+    image: message?.reactionImage || "",
+    mine: message?.reactionMine !== false,
+  };
+}
+
+function rememberReaction(chatId: string, messageId: string, reaction: ShownReaction): void {
+  if (!chatId || !messageId) {
+    return;
+  }
+  reactionOverride.set(reactionStorageKey(chatId, messageId), reaction);
+}
+
+function sendReaction(chatId: string, messageId: string, emoji: string, previous: ShownReaction, row: HTMLElement, chip: HTMLElement): void {
+  const next: ShownReaction = { emoji, image: "", mine: true };
+  rememberReaction(chatId, messageId, next);
+  paintReaction(row, chip, next);
+  void invoke("send_reaction", { id: chatId, messageId, emoji }).catch((error: unknown) => {
+    rememberReaction(chatId, messageId, previous);
+    paintReaction(row, chip, previous);
+    sendError.hidden = false;
+    sendError.textContent = error instanceof Error ? error.message : String(error);
+  });
+}
+
+function closeReactionPicker(): void {
+  if (!reactionPicker) {
+    return;
+  }
+  reactionPicker.panel.remove();
+  reactionPicker.toggle.setAttribute("aria-expanded", "false");
+  reactionPicker.bubble.classList.remove("reacting");
+  reactionPicker = null;
+}
+
+function paintReaction(row: HTMLElement, chip: HTMLElement, reaction: ShownReaction): void {
+  chip.replaceChildren();
+  if (reaction.emoji) {
+    chip.textContent = reaction.emoji;
+  } else if (reaction.image) {
+    const img = document.createElement("img");
+    img.alt = "";
+    img.src = reaction.image;
+    chip.append(img);
+  }
+  const visible = Boolean(reaction.emoji || reaction.image);
+  chip.hidden = !visible;
+  chip.dataset.mine = reaction.mine ? "1" : "0";
+  chip.setAttribute("aria-label", visible && reaction.mine ? "Remove reaction" : "Reaction");
+  row.classList.toggle("has-reaction", visible);
+}
+
+function applyLiveReaction(chatId: string, update: { messageId: string; emoji?: string; image?: string; mine?: boolean }): void {
+  const reaction: ShownReaction = {
+    emoji: update.emoji || "",
+    image: update.emoji ? "" : (update.image || ""),
+    mine: update.mine === true,
+  };
+  rememberReaction(chatId, update.messageId, reaction);
+  if (chatId !== openId) {
+    return;
+  }
+  const row = threadBody.querySelector<HTMLElement>(`.msg[data-id="${CSS.escape(update.messageId)}"]`);
+  const bubble = row?.querySelector<HTMLElement>(".bubble");
+  if (!row || !bubble) {
+    return;
+  }
+  let chip = bubble.querySelector<HTMLElement>(".msg-reaction");
+  if (!chip) {
+    chip = document.createElement(row.classList.contains("mine") ? "span" : "button");
+    chip.className = "msg-reaction";
+    if (chip instanceof HTMLButtonElement) {
+      chip.type = "button";
+      chip.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (chip?.dataset.mine === "0") {
+          return;
+        }
+        const previous = shownReaction(chatId, update.messageId);
+        sendReaction(chatId, update.messageId, "", previous, row, chip!);
+      });
+    }
+    bubble.append(chip);
+  }
+  paintReaction(row, chip, reaction);
+}
+
+function smileIcon(): SVGSVGElement {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  const face = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  face.setAttribute("cx", "12");
+  face.setAttribute("cy", "12");
+  face.setAttribute("r", "8.25");
+  face.setAttribute("fill", "none");
+  face.setAttribute("stroke", "currentColor");
+  face.setAttribute("stroke-width", "1.6");
+  const leftEye = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  leftEye.setAttribute("cx", "9");
+  leftEye.setAttribute("cy", "10.2");
+  leftEye.setAttribute("r", "0.9");
+  leftEye.setAttribute("fill", "currentColor");
+  const rightEye = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  rightEye.setAttribute("cx", "15");
+  rightEye.setAttribute("cy", "10.2");
+  rightEye.setAttribute("r", "0.9");
+  rightEye.setAttribute("fill", "currentColor");
+  const mouth = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  mouth.setAttribute("fill", "none");
+  mouth.setAttribute("stroke", "currentColor");
+  mouth.setAttribute("stroke-width", "1.6");
+  mouth.setAttribute("stroke-linecap", "round");
+  mouth.setAttribute("d", "M8.7 13.6c.9 1.45 2 2.15 3.3 2.15s2.4-.7 3.3-2.15");
+  svg.append(face, leftEye, rightEye, mouth);
+  return svg;
+}
+
+function openReactionPicker(
+  bubble: HTMLElement,
+  row: HTMLElement,
+  chip: HTMLButtonElement,
+  toggle: HTMLButtonElement,
+  chatId: string,
+  messageId: string,
+): void {
+  closeReactionPicker();
+  const panel = document.createElement("div");
+  panel.className = "react-picker";
+  panel.setAttribute("role", "menu");
+  const current = messageId ? shownReaction(chatId, messageId) : { emoji: chip.textContent || "", image: "", mine: true };
+  for (const reaction of REACTIONS) {
+    const choice = document.createElement("button");
+    choice.type = "button";
+    choice.className = "react-choice";
+    choice.textContent = reaction.emoji;
+    choice.setAttribute("role", "menuitem");
+    choice.setAttribute("aria-label", reaction.label);
+    if (reaction.emoji === current.emoji) {
+      choice.classList.add("on");
+      choice.setAttribute("aria-pressed", "true");
+    }
+    choice.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const next = reaction.emoji === current.emoji ? "" : reaction.emoji;
+      if (messageId) {
+        sendReaction(chatId, messageId, next, current, row, chip);
+      } else {
+        paintReaction(row, chip, { emoji: next, image: "", mine: true });
+      }
+      closeReactionPicker();
+    });
+    panel.append(choice);
+  }
+  panel.addEventListener("click", (event) => event.stopPropagation());
+  const bridge = document.createElement("span");
+  bridge.className = "react-bridge";
+  bridge.setAttribute("aria-hidden", "true");
+  panel.append(bridge);
+  row.append(panel);
+  bubble.classList.add("reacting");
+  const smile = toggle.getBoundingClientRect();
+  const box = panel.getBoundingClientRect();
+  let left = smile.left + smile.width / 2 - box.width / 2;
+  let top = smile.top - box.height - 8;
+  const below = top < 8;
+  if (below) {
+    top = smile.bottom + 8;
+  }
+  left = Math.max(8, Math.min(left, window.innerWidth - box.width - 8));
+  panel.style.left = `${left}px`;
+  panel.style.top = `${top}px`;
+  panel.classList.toggle("below", below);
+  const placed = panel.getBoundingClientRect();
+  const gap = below ? placed.top - smile.bottom : smile.top - placed.bottom;
+  const reachLeft = Math.min(placed.left, smile.left);
+  const reachRight = Math.max(placed.right, smile.right);
+  bridge.style.left = `${reachLeft - placed.left}px`;
+  bridge.style.width = `${Math.max(placed.width, reachRight - reachLeft)}px`;
+  bridge.style.height = `${Math.max(10, gap + 12)}px`;
+  const meta = toggle.parentElement instanceof HTMLElement ? toggle.parentElement : row;
+  panel.addEventListener("mouseleave", (event) => leaveReaction(event, { bubble, meta, toggle }));
+  toggle.setAttribute("aria-expanded", "true");
+  reactionPicker = { panel, toggle, bubble };
+}
+
+function pointerStillChoosing(next: EventTarget | null, bubble: HTMLElement, meta: HTMLElement, toggle: HTMLButtonElement): boolean {
+  if (!(next instanceof Node)) {
+    return false;
+  }
+  if (bubble.contains(next) || meta.contains(next)) {
+    return true;
+  }
+  return Boolean(reactionPicker?.toggle === toggle && reactionPicker.panel.contains(next));
+}
+
+function leaveReaction(event: MouseEvent, hover: { bubble: HTMLElement; meta: HTMLElement; toggle: HTMLButtonElement }): void {
+  if (pointerStillChoosing(event.relatedTarget, hover.bubble, hover.meta, hover.toggle)) {
+    return;
+  }
+  if (reactionPicker?.toggle === hover.toggle) {
+    closeReactionPicker();
+  }
+}
+
+function reactionControls(row: HTMLElement, bubble: HTMLElement, meta: HTMLElement, messageId: string): HTMLButtonElement {
+  const chatId = openId;
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "react-toggle";
+  toggle.setAttribute("aria-label", "Add reaction");
+  toggle.setAttribute("aria-haspopup", "menu");
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.append(smileIcon());
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "msg-reaction";
+  paintReaction(row, chip, shownReaction(chatId, messageId));
+  chip.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (!messageId || chip.dataset.mine === "0") {
+      return;
+    }
+    const previous = shownReaction(chatId, messageId);
+    sendReaction(chatId, messageId, "", previous, row, chip);
+    closeReactionPicker();
+  });
+  bubble.append(chip);
+  const hover = { bubble, meta, toggle };
+  bubble.addEventListener("mouseleave", (event) => leaveReaction(event, hover));
+  meta.addEventListener("mouseleave", (event) => leaveReaction(event, hover));
+  toggle.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (toggle.getAttribute("aria-expanded") === "true") {
+      closeReactionPicker();
+      return;
+    }
+    openReactionPicker(bubble, row, chip, toggle, chatId, messageId);
+  });
+  return toggle;
+}
+
 function messageBubble(message: BubbleMessage): HTMLElement {
   if (message.kind === "chat update") {
     const note = document.createElement("div");
@@ -630,21 +1135,35 @@ function messageBubble(message: BubbleMessage): HTMLElement {
   }
   const row = document.createElement("div");
   row.className = message.mine ? "msg mine" : "msg";
+  const ids = [message.id || "", ...(message.media?.map((slot) => slot.id) || [])].filter((id) => id);
   if (message.id) {
     row.dataset.id = message.id;
   }
+  if (ids.length > 0) {
+    row.dataset.ids = ids.join(",");
+  }
   const meta = messageMeta(message);
   const mark = senderMark(message);
+  const reaction = shownReaction(openId, message.id || "", message);
   if (message.mine) {
     if (meta) {
       row.append(meta);
     }
     row.append(bubble, mark);
+    if (reaction.emoji || reaction.image) {
+      const chip = document.createElement("span");
+      chip.className = "msg-reaction";
+      paintReaction(row, chip, reaction);
+      bubble.append(chip);
+    }
   } else {
     row.append(mark, bubble);
-    if (meta) {
-      row.append(meta);
+    const slot = meta ?? document.createElement("div");
+    if (!meta) {
+      slot.className = "msg-meta";
     }
+    slot.append(reactionControls(row, bubble, slot, message.id || ""));
+    row.append(slot);
   }
   return row;
 }
@@ -742,24 +1261,60 @@ function senderName(message: BubbleMessage): string {
   return chat.name;
 }
 
+function profileId(message: BubbleMessage): string {
+  if (message.sender?.startsWith("u")) {
+    return message.sender;
+  }
+  if (message.mine && myMid.startsWith("u")) {
+    return myMid;
+  }
+  if (!message.mine && openId.startsWith("u")) {
+    return openId;
+  }
+  return "";
+}
+
+function openProfile(message: BubbleMessage): void {
+  const id = profileId(message);
+  if (!id) {
+    return;
+  }
+  const friend = rows.some((row) => row.id === id && row.kind === "friend");
+  void invoke("open_profile", {
+    id,
+    name: senderName(message),
+    picture: senderPicture(message),
+    mine: message.mine || id === myMid,
+    friend,
+  }).catch((error: unknown) => {
+    sendError.hidden = false;
+    sendError.textContent = error instanceof Error ? error.message : String(error);
+  });
+}
+
 function senderMark(message: BubbleMessage): HTMLElement {
   const name = senderName(message);
   const picture = senderPicture(message);
-  if (!picture) {
-    const circle = fallback(name);
-    circle.classList.add("msg-avatar");
-    return circle;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "msg-avatar";
+  button.setAttribute("aria-label", name ? `Profile of ${name}` : "Profile");
+  if (picture) {
+    const photo = document.createElement("img");
+    photo.alt = "";
+    photo.src = picture;
+    photo.addEventListener("error", () => {
+      photo.replaceWith(fallback(name));
+    });
+    button.append(photo);
+  } else {
+    button.append(fallback(name));
   }
-  const photo = document.createElement("img");
-  photo.className = "msg-avatar";
-  photo.alt = "";
-  photo.src = picture;
-  photo.addEventListener("error", () => {
-    const circle = fallback(name);
-    circle.classList.add("msg-avatar");
-    photo.replaceWith(circle);
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openProfile(message);
   });
-  return photo;
+  return button;
 }
 
 function showFrame(host: HTMLElement, url: string, mime: string): void {
@@ -1082,6 +1637,9 @@ function renderChats(payload: ChatPayload): void {
   const profile = payload.profile;
   myName = profile.name;
   myPicture = profile.picture;
+  if (profile.mid) {
+    myMid = profile.mid;
+  }
   if (profile.picture) {
     railPhoto.hidden = false;
     railPhoto.src = profile.picture;
@@ -1215,7 +1773,8 @@ function onSent(payload: SendResult): void {
       status: "sent",
       time: payload.time || Date.now(),
     }));
-    threadBody.scrollTop = threadBody.scrollHeight;
+    unreadFocus = "";
+    scrollThreadToEnd();
   }
   renderList();
 }
@@ -1309,7 +1868,10 @@ railMenu.addEventListener("click", (event) => {
   }
 });
 
-document.addEventListener("click", () => closeMenu());
+document.addEventListener("click", () => {
+  closeMenu();
+  closeReactionPicker();
+});
 
 document.querySelector<HTMLButtonElement>("#sheet-close")!.addEventListener("click", () => {
   sheet.hidden = true;
@@ -1332,6 +1894,10 @@ lightbox.addEventListener("click", (event) => {
   }
 });
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && reactionPicker && lightbox.hidden) {
+    closeReactionPicker();
+    return;
+  }
   if (lightbox.hidden) {
     return;
   }
@@ -1344,7 +1910,7 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-function appendLiveMessage(update: PollUpdate): void {
+function appendLiveMessage(update: PollUpdate, followTail: boolean, batch: { focus: string; end: boolean }): void {
   const message = update.thread;
   if (!message?.text || update.id !== openId) {
     return;
@@ -1354,7 +1920,113 @@ function appendLiveMessage(update: PollUpdate): void {
   }
   threadBody.querySelector(".thread-note")?.remove();
   threadBody.append(messageBubble(message));
-  threadBody.scrollTop = threadBody.scrollHeight;
+  if (message.mine) {
+    batch.end = true;
+    return;
+  }
+  const id = incomingId(message);
+  if (id && followTail && !batch.focus) {
+    batch.focus = id;
+  }
+}
+
+function scrollThreadToEnd(): void {
+  const token = ++placeToken;
+  userMoved = false;
+  const pin = (): void => {
+    if (token !== placeToken) {
+      return;
+    }
+    placingThread = true;
+    threadBody.scrollTop = threadBody.scrollHeight;
+    requestAnimationFrame(() => {
+      placingThread = false;
+    });
+  };
+  pin();
+  requestAnimationFrame(pin);
+}
+
+function placeThread(): void {
+  const token = ++placeToken;
+  const id = unreadFocus;
+  const target = id ? bubbleById(id) : null;
+  userMoved = false;
+  if (!target) {
+    scrollThreadToEnd();
+    return;
+  }
+  const pin = (): void => {
+    if (token !== placeToken || !target.isConnected) {
+      return;
+    }
+    const pad = parseFloat(getComputedStyle(threadBody).paddingTop) || 0;
+    const delta = target.getBoundingClientRect().top - threadBody.getBoundingClientRect().top - pad;
+    const next = Math.max(0, threadBody.scrollTop + delta);
+    const tail = threadBody.scrollHeight - next;
+    placingThread = true;
+    threadBody.scrollTop = tail <= threadBody.clientHeight + 1 ? threadBody.scrollHeight : next;
+    requestAnimationFrame(() => {
+      placingThread = false;
+    });
+  };
+  pin();
+  requestAnimationFrame(pin);
+  threadBody.querySelectorAll("img, video").forEach((node) => {
+    if (node instanceof HTMLImageElement && node.complete) {
+      return;
+    }
+    const refresh = (): void => {
+      if (token === placeToken && unreadFocus === id && target.isConnected) {
+        pin();
+      }
+    };
+    node.addEventListener("load", refresh, { once: true });
+    node.addEventListener("loadedmetadata", refresh, { once: true });
+  });
+}
+
+threadBody.addEventListener("scroll", () => {
+  closeReactionPicker();
+  if (placingThread) {
+    return;
+  }
+  placeToken += 1;
+  if (threadNearBottom()) {
+    userMoved = false;
+    unreadFocus = "";
+  } else {
+    userMoved = true;
+  }
+});
+
+function applyServerUnread(chat: ChatRow, count: number, messageId = ""): void {
+  if (messageId) {
+    noteLatest(chat.id, messageId);
+  }
+  const sent = readSent.get(chat.id) || "";
+  const held = readHeld.get(chat.id) || "";
+  const cursor = coversMessage(held, sent) ? held : (sent || held);
+  const newer = Boolean(cursor && messageId && !coversMessage(cursor, messageId));
+  if (readingChat(chat.id) && messageId) {
+    holdRead(chat.id, messageId);
+    return;
+  }
+  if (readingChat(chat.id)) {
+    chat.unread = 0;
+    return;
+  }
+  if (newer) {
+    readHeld.delete(chat.id);
+    readSent.delete(chat.id);
+    chat.unread = count;
+    return;
+  }
+  if (cursor && count > 0) {
+    chat.unread = 0;
+    return;
+  }
+  chat.unread = count;
 }
 
 function applyPoll(payload: PollPayload): void {
@@ -1366,12 +2038,18 @@ function applyPoll(payload: PollPayload): void {
   for (const item of payload.unreads || []) {
     const chat = rows.find((row) => row.id === item.id);
     if (chat) {
-      chat.unread = item.unread;
+      applyServerUnread(chat, item.unread);
     }
   }
   let openAdvanced = false;
   let shouldChime = false;
+  const followTail = threadNearBottom();
+  const batch = { focus: "", end: false };
   for (const update of payload.updates || []) {
+    if (update.reaction?.messageId) {
+      applyLiveReaction(update.id, update.reaction);
+      continue;
+    }
     const chat = rows.find((row) => row.id === update.id);
     if (!chat) {
       if (update.read) {
@@ -1399,15 +2077,42 @@ function applyPoll(payload: PollPayload): void {
     if (update.readMarks?.length) {
       applyReadMarks(update.id, update.readMarks);
     }
+    const arrived = update.messageId || update.thread?.id || "";
+    if (arrived) {
+      noteLatest(chat.id, arrived);
+    }
     if (update.read) {
-      chat.unread = 0;
+      const seen = latestSeen.get(chat.id) || "";
+      if (!(arrived && seen && !coversMessage(arrived, seen))) {
+        chat.unread = 0;
+        if (arrived) {
+          const held = readHeld.get(chat.id) || "";
+          if (!held || !coversMessage(held, arrived)) {
+            readHeld.set(chat.id, arrived);
+          }
+          const sent = readSent.get(chat.id) || "";
+          if (!sent || !coversMessage(sent, arrived)) {
+            readSent.set(chat.id, arrived);
+          }
+        }
+      }
     } else if (update.incoming) {
-      chat.unread = (chat.unread || 0) + 1;
-      if (notifySound(chat.id, chat.muted)) {
-        shouldChime = true;
+      if (readingChat(chat.id) && arrived) {
+        holdRead(chat.id, arrived);
+      } else if (readingChat(chat.id) || coversMessage(readSent.get(chat.id) || readHeld.get(chat.id) || "", arrived)) {
+        chat.unread = 0;
+      } else {
+        readHeld.delete(chat.id);
+        if (!arrived || !coversMessage(readSent.get(chat.id) || "", arrived)) {
+          readSent.delete(chat.id);
+        }
+        chat.unread = (chat.unread || 0) + 1;
+        if (notifySound(chat.id, chat.muted)) {
+          shouldChime = true;
+        }
       }
     } else if (typeof update.unread === "number") {
-      chat.unread = update.unread;
+      applyServerUnread(chat, update.unread, arrived);
     }
     const readable = Boolean(update.lastMessage) && !update.keepPreview && !updateLabel(update.lastMessage);
     const newer = update.time > chat.time;
@@ -1436,7 +2141,14 @@ function applyPoll(payload: PollPayload): void {
         openAdvanced = true;
       }
     }
-    appendLiveMessage(update);
+    appendLiveMessage(update, followTail, batch);
+  }
+  if (batch.end) {
+    unreadFocus = "";
+    scrollThreadToEnd();
+  } else if (batch.focus) {
+    unreadFocus = batch.focus;
+    placeThread();
   }
   rows.sort((left, right) => right.time - left.time);
   const index = visibleRows().findIndex((row) => row.id === selectedId);
@@ -1454,7 +2166,17 @@ function applyPoll(payload: PollPayload): void {
 async function logout(): Promise<void> {
   signedIn = false;
   trayBadge = -1;
+  myMid = "";
+  readHeld.clear();
+  readSent.clear();
+  readWant.clear();
+  latestSeen.clear();
+  openLastId = "";
+  paintedIds = "";
+  openUnread = 0;
+  unreadFocus = "";
   closeMenu();
+  closeReactionPicker();
   sheet.hidden = true;
   try {
     await invoke("logout");
@@ -1478,6 +2200,32 @@ async function logout(): Promise<void> {
     status.textContent = error instanceof Error ? error.message : String(error);
   }
 }
+
+(window as unknown as { __openChat?: (id: string) => void }).__openChat = (id: string) => {
+  search.value = "";
+  if (filter !== "all") {
+    filter = "all";
+    document.querySelectorAll("#tabs button").forEach((tab) => {
+      tab.classList.toggle("on", (tab as HTMLButtonElement).dataset.filter === "all");
+    });
+  }
+  const index = visibleRows().findIndex((row) => row.id === id);
+  if (index < 0) {
+    return;
+  }
+  selected = index;
+  renderList();
+};
+
+(window as unknown as { __renameChat?: (detail: { id?: string; name?: string }) => void }).__renameChat = (detail) => {
+  const chat = rows.find((row) => row.id === detail.id);
+  const name = detail.name?.trim() || "";
+  if (!chat || !name) {
+    return;
+  }
+  chat.name = name;
+  renderList();
+};
 
 refresh.addEventListener("click", () => {
   void start();

@@ -149,6 +149,176 @@ fn chat_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn user_mid(id: &str) -> Result<(), String> {
+    if (2..=64).contains(&id.len()) && id.starts_with('u') && id.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return Ok(());
+    }
+    Err("that profile cannot be opened".into())
+}
+
+fn profile_script(payload: &serde_json::Value) -> String {
+    let bytes = serde_json::to_vec(payload).unwrap_or_else(|_| b"{}".to_vec());
+    let encoded = base64_encode(&bytes);
+    format!(
+        "window.__profile = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob('{encoded}'), function (c) {{ return c.charCodeAt(0); }}))); if (typeof window.__applyProfile === 'function') window.__applyProfile(window.__profile);"
+    )
+}
+
+fn show_profile<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>, payload: &serde_json::Value) {
+    let _ = window.eval(profile_script(payload));
+    if let Some(name) = payload.get("name").and_then(|value| value.as_str()).filter(|name| !name.is_empty()) {
+        let _ = window.set_title(name);
+    }
+}
+
+#[tauri::command]
+async fn open_profile(app: AppHandle, id: String, name: String, picture: String, mine: bool, friend: bool) -> Result<(), String> {
+    user_mid(&id)?;
+    let label = format!("p{id}");
+    let title = {
+        let trimmed = name.trim();
+        if trimmed.is_empty() { "LINE".to_string() } else { trimmed.to_string() }
+    };
+    let initial = serde_json::json!({
+        "id": id,
+        "name": name.trim(),
+        "status": "",
+        "picture": picture.trim(),
+        "cover": "",
+        "mine": mine,
+        "friend": friend && !mine,
+        "blocked": false,
+        "favorite": false,
+        "given": name.trim(),
+    });
+    if let Some(window) = app.get_webview_window(&label) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    } else {
+        let window = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("profile.html".into()))
+            .title(&title)
+            .inner_size(380.0, 560.0)
+            .min_inner_size(320.0, 480.0)
+            .resizable(true)
+            .center()
+            .initialization_script(profile_script(&initial))
+            .build()
+            .map_err(|err| format!("could not open the profile: {err}"))?;
+        let _ = window.set_focus();
+    }
+    let app_refresh = app.clone();
+    let refresh_label = label.clone();
+    tauri::async_runtime::spawn(async move {
+        let fetched = tauri::async_runtime::spawn_blocking(move || line::Client::new().contact_profile(&id).map_err(|err| err.to_string())).await;
+        let Ok(Ok(card)) = fetched else { return };
+        let Some(window) = app_refresh.get_webview_window(&refresh_label) else { return };
+        show_profile(&window, &card);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+async fn block_profile(id: String, blocked: bool) -> Result<(), String> {
+    user_mid(&id)?;
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().set_blocked(&id, blocked).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not update this profile: {err}"))?
+}
+
+#[tauri::command]
+async fn add_profile(id: String) -> Result<(), String> {
+    user_mid(&id)?;
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().add_contact(&id).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not add this friend: {err}"))?
+}
+
+#[tauri::command]
+async fn rename_profile(app: AppHandle, id: String, name: String) -> Result<(), String> {
+    user_mid(&id)?;
+    let trimmed = name.trim();
+    if trimmed.chars().count() > 20 {
+        return Err("that name is too long".into());
+    }
+    let chat = id.clone();
+    let label = trimmed.to_string();
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().update_contact_setting(&chat, 2, &label).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not rename this friend: {err}"))??;
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.eval(profile_script_call("__renameChat", &serde_json::json!({"id": id, "name": trimmed})));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn favorite_profile(id: String, favorite: bool) -> Result<(), String> {
+    user_mid(&id)?;
+    let value = if favorite { "true" } else { "false" };
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().update_contact_setting(&id, 8, value).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not update this friend: {err}"))?
+}
+
+#[tauri::command]
+async fn open_friend_chat(app: AppHandle, id: String) -> Result<(), String> {
+    user_mid(&id)?;
+    let Some(window) = app.get_webview_window("main") else {
+        return Err("the chat window is not open".into());
+    };
+    let _ = window.eval(format!("if (typeof window.__openChat === 'function') window.__openChat('{id}')"));
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+    Ok(())
+}
+
+fn profile_script_call(name: &str, payload: &serde_json::Value) -> String {
+    let bytes = serde_json::to_vec(payload).unwrap_or_else(|_| b"{}".to_vec());
+    let encoded = base64_encode(&bytes);
+    format!(
+        "(() => {{ const detail = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob('{encoded}'), function (c) {{ return c.charCodeAt(0); }}))); if (typeof window.{name} === 'function') window.{name}(detail); }})();"
+    )
+}
+
+#[tauri::command]
+fn open_fraud_help() -> Result<(), String> {
+    std::process::Command::new("xdg-open")
+        .arg("https://help.line.me/line/desktop/?contentId=20011496")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|err| format!("could not open the help page: {err}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn mark_chat_read(id: String, message_id: String) -> Result<(), String> {
+    chat_id(&id)?;
+    if message_id.len() > 24 || message_id.is_empty() || !message_id.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err("that message cannot be marked read".to_string());
+    }
+    let chat = id.clone();
+    let checked = message_id.clone();
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().mark_chat_read(&chat, &checked).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not mark the chat read: {err}"))??;
+    let _ = store::apply_poll(&serde_json::json!({
+        "unreads": [{"id": id, "unread": 0}],
+        "updates": [{
+            "id": id,
+            "read": true,
+            "messageId": message_id,
+            "lastMessage": "",
+            "time": 0,
+            "sealed": false
+        }]
+    }));
+    Ok(())
+}
+
 #[tauri::command]
 async fn load_media(id: String, message_ids: Vec<String>, preview: bool, animated_ids: Option<Vec<String>>) -> Result<serde_json::Value, String> {
     chat_id(&id)?;
@@ -159,6 +329,21 @@ async fn load_media(id: String, message_ids: Vec<String>, preview: bool, animate
     tauri::async_runtime::spawn_blocking(move || line::Client::new().load_media(&id, &message_ids, preview, &animated_ids).map_err(|err| err.to_string()))
         .await
         .map_err(|err| format!("could not load the photo: {err}"))?
+}
+
+#[tauri::command]
+async fn send_reaction(id: String, message_id: String, emoji: String) -> Result<(), String> {
+    chat_id(&id)?;
+    if message_id.len() > 24 || message_id.is_empty() || !message_id.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err("that message cannot take a reaction".to_string());
+    }
+    let chosen = emoji.trim().to_string();
+    if chosen.len() > 16 {
+        return Err("that reaction is not available".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().send_reaction(&message_id, &chosen).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not send the reaction: {err}"))?
 }
 
 #[tauri::command]
@@ -448,12 +633,17 @@ fn install_taskbar_icon() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_taskbar_icon();
+    let context = tauri::generate_context!();
+    line::install_config_dir(&context.config().identifier);
     let minimize_to_tray = load_minimize_to_tray();
     tauri::Builder::default()
         .manage(LoginState { cancel: Mutex::new(None), inbox: Mutex::new(None) })
         .manage(AppPrefs { minimize_to_tray: AtomicBool::new(minimize_to_tray), tray_badge: AtomicU32::new(0) })
-        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, load_media, send_message, logout, quit, get_settings, set_minimize_to_tray, set_tray_badge])
+        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, send_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_tray_badge, open_profile, block_profile, add_profile, open_fraud_help, rename_profile, favorite_profile, open_friend_chat])
         .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if keep_in_tray(window.app_handle()) {
                     api.prevent_close();
@@ -469,7 +659,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("failed to build the LINE window")
         .run(|app, event| match event {
             tauri::RunEvent::ExitRequested { api, code, .. } => {

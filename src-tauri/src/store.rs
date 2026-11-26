@@ -134,12 +134,29 @@ fn connect(path: &Path) -> Result<Connection, String> {
             seq INTEGER NOT NULL,
             media_id TEXT NOT NULL,
             animated INTEGER NOT NULL,
+            sender TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (chat_id, msg_id)
          );",
     )
     .map_err(|err| err.to_string())?;
+    ensure_sender_column(&conn)?;
     let _ = fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600));
     Ok(conn)
+}
+
+fn ensure_sender_column(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn.prepare("PRAGMA table_info(messages)").map_err(|err| err.to_string())?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|err| err.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    if names.iter().any(|name| name == "sender") {
+        return Ok(());
+    }
+    conn.execute("ALTER TABLE messages ADD COLUMN sender TEXT NOT NULL DEFAULT ''", [])
+        .map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 fn stored_mid(conn: &Connection) -> Result<Option<String>, String> {
@@ -314,6 +331,9 @@ fn apply_locked(path: &Path, mid: &str, payload: &Json) -> Result<(), String> {
             if id.is_empty() {
                 continue;
             }
+            if update.get("reaction").is_some() {
+                continue;
+            }
             let read = update.get("read").and_then(|value| value.as_bool()).unwrap_or(false);
             if read {
                 if let Some(chat) = rows.get_mut(id) {
@@ -464,7 +484,7 @@ fn history_locked(path: &Path, mid: &str, chat: &str) -> Result<Option<Json>, St
     }
     let mut stmt = conn
         .prepare(
-            "SELECT msg_id, mine, name, picture, body, sealed, time, status, readers, sticker, sticker_fallback, kind, gid, seq, media_id, animated
+            "SELECT msg_id, mine, name, picture, body, sealed, time, status, readers, sticker, sticker_fallback, kind, gid, seq, media_id, animated, sender
              FROM messages WHERE chat_id = ?1 ORDER BY time ASC",
         )
         .map_err(|err| err.to_string())?;
@@ -487,6 +507,7 @@ fn history_locked(path: &Path, mid: &str, chat: &str) -> Result<Option<Json>, St
                 "seq": row.get::<_, i64>(13)?,
                 "mediaId": row.get::<_, String>(14)?,
                 "animated": row.get::<_, i64>(15)? != 0,
+                "sender": row.get::<_, String>(16)?,
             }))
         })
         .map_err(|err| err.to_string())?;
@@ -598,10 +619,11 @@ fn upsert_message(conn: &Connection, chat: &str, key: &str, message: &Json) -> R
     let text = message.get("text").and_then(|value| value.as_str()).unwrap_or("");
     conn.execute(
         "INSERT INTO messages (
-            chat_id, msg_id, mine, name, picture, body, sealed, time, status, readers, sticker, sticker_fallback, kind, gid, seq, media_id, animated
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+            chat_id, msg_id, mine, name, picture, body, sealed, time, status, readers, sticker, sticker_fallback, kind, gid, seq, media_id, animated, sender
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
          ON CONFLICT(chat_id, msg_id) DO UPDATE SET
             mine = excluded.mine,
+            sender = CASE WHEN excluded.sender != '' THEN excluded.sender ELSE messages.sender END,
             name = CASE WHEN excluded.name != '' THEN excluded.name ELSE messages.name END,
             picture = CASE WHEN excluded.picture != '' THEN excluded.picture ELSE messages.picture END,
             body = excluded.body,
@@ -634,6 +656,7 @@ fn upsert_message(conn: &Connection, chat: &str, key: &str, message: &Json) -> R
             message.get("seq").and_then(|value| value.as_i64()).unwrap_or(0),
             message.get("mediaId").and_then(|value| value.as_str()).unwrap_or(""),
             if message.get("animated").and_then(|value| value.as_bool()).unwrap_or(false) { 1 } else { 0 },
+            message.get("sender").and_then(|value| value.as_str()).unwrap_or(""),
         ],
     )
     .map_err(|err| err.to_string())?;
@@ -738,6 +761,12 @@ mod tests {
         })).unwrap();
         let rows = rows_locked(&path, "uMe").unwrap();
         assert_eq!(rows.get("u1").unwrap().last_message, "new");
+        apply_locked(&path, "uMe", &json!({
+            "updates": [{"id": "u9", "lastMessage": "", "time": 0, "sealed": false, "keepPreview": true, "reaction": {"messageId": "12", "emoji": "👍", "mine": false}}]
+        })).unwrap();
+        let rows = rows_locked(&path, "uMe").unwrap();
+        assert!(rows.get("u9").is_none());
+        assert_eq!(rows.get("u1").unwrap().last_message, "new");
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -747,12 +776,13 @@ mod tests {
         save_history_locked(&path, "uMe", &json!({
             "id": "u1",
             "messages": [
-                {"id": "1", "mine": false, "name": "Ada", "picture": "", "text": "one", "sealed": false, "time": 10, "status": "", "readers": 0, "sticker": "", "stickerFallback": "", "kind": "", "gid": "", "seq": 0, "mediaId": "", "animated": false},
+                {"id": "1", "mine": false, "sender": "uAda", "name": "Ada", "picture": "", "text": "one", "sealed": false, "time": 10, "status": "", "readers": 0, "sticker": "", "stickerFallback": "", "kind": "", "gid": "", "seq": 0, "mediaId": "", "animated": false},
                 {"id": "2", "mine": true, "name": "", "picture": "", "text": "two", "sealed": false, "time": 20, "status": "read", "readers": 1, "sticker": "", "stickerFallback": "", "kind": "", "gid": "", "seq": 0, "mediaId": "", "animated": false}
             ]
         })).unwrap();
         let loaded = history_locked(&path, "uMe", "u1").unwrap().unwrap();
         assert_eq!(loaded["messages"][0]["text"], "one");
+        assert_eq!(loaded["messages"][0]["sender"], "uAda");
         assert_eq!(loaded["messages"][1]["status"], "read");
         apply_locked(&path, "uMe", &json!({
             "updates": [{
@@ -775,6 +805,7 @@ mod tests {
         let loaded = history_locked(&path, "uMe", "u1").unwrap().unwrap();
         let texts: Vec<&str> = loaded["messages"].as_array().unwrap().iter().filter_map(|item| item.get("text").and_then(|value| value.as_str())).collect();
         assert_eq!(texts, ["one", "three"]);
+        assert_eq!(loaded["messages"][0]["sender"], "uAda");
         assert!(history_locked(&path, "uOther", "u1").unwrap().is_none());
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }

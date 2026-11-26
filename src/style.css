@@ -206,6 +206,7 @@ input {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   background: #f3f4f6;
   border-right: 1px solid #e4e6ea;
 }
@@ -256,6 +257,7 @@ input {
   padding: 0;
   overflow: auto;
   flex: 1;
+  min-height: 0;
 }
 
 #chats li {
@@ -379,8 +381,10 @@ input {
 #thread {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   background: #f7f7f8;
 }
 
@@ -434,6 +438,7 @@ input {
 
 #thread-body {
   flex: 1;
+  min-height: 0;
   overflow: auto;
   padding: 18px;
 }
@@ -470,22 +475,334 @@ input {
   justify-content: flex-end;
 }
 
-.msg-avatar {
+button.msg-avatar {
   width: 36px;
   height: 36px;
+  padding: 0;
+  border: 0;
   border-radius: 50%;
   flex: none;
-  object-fit: cover;
+  overflow: hidden;
+  cursor: pointer;
   background: #d7dbe2;
 }
 
-.avatar-fallback.msg-avatar {
-  width: 36px;
-  height: 36px;
+button.msg-avatar img,
+button.msg-avatar .avatar-fallback {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  object-fit: cover;
   font-size: 14px;
 }
 
+button.msg-avatar img {
+  display: block;
+}
+
+button.msg-avatar .avatar-fallback {
+  display: grid;
+  place-items: center;
+}
+
+body.profile {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #fff;
+  color: #222;
+}
+
+#cover {
+  position: relative;
+  z-index: 1;
+  height: 188px;
+  flex: none;
+  background: #adadad;
+}
+
+#cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+#profile-body {
+  position: relative;
+  z-index: 0;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 64px 18px 18px;
+}
+
+#avatar {
+  position: absolute;
+  left: 50%;
+  bottom: -52px;
+  transform: translateX(-50%);
+  width: 104px;
+  height: 104px;
+  border-radius: 50%;
+  border: 4px solid #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.16);
+  overflow: hidden;
+  background: #d7dbe2;
+  z-index: 1;
+}
+
+#avatar img,
+#avatar span {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 36px;
+  font-weight: 700;
+}
+
+#name-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 32px;
+  margin-top: 14px;
+}
+
+#profile-name {
+  margin: 0;
+  max-width: calc(100% - 88px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 18px;
+  font-weight: 500;
+  color: #3c4043;
+  text-align: center;
+  line-height: 1.3;
+}
+
+#rename,
+#favorite,
+#chat {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #8b919a;
+  cursor: pointer;
+}
+
+#rename {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+}
+
+#rename svg,
+#favorite svg,
+#chat svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
+#name-input {
+  width: min(220px, 70%);
+  border: 0;
+  border-bottom: 1px solid #c5c8ce;
+  background: transparent;
+  color: #3c4043;
+  text-align: center;
+  font-size: 18px;
+  padding: 2px 4px;
+  outline: none;
+}
+
+#favorite {
+  position: absolute;
+  right: -8px;
+  top: 50%;
+  width: 32px;
+  height: 32px;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+}
+
+#favorite svg {
+  width: 22px;
+  height: 22px;
+}
+
+#favorite.is-on {
+  color: #e0a31a;
+}
+
+#favorite.is-on svg path {
+  fill: currentColor;
+}
+
+body.profile.is-friend #profile-actions {
+  justify-content: center;
+}
+
+#chat {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+}
+
+#chat svg {
+  width: 28px;
+  height: 28px;
+}
+
+#profile-status {
+  margin: 6px 0 0;
+  color: #9aa0a8;
+  font-size: 15px;
+  line-height: 1.4;
+  text-align: center;
+  white-space: pre-wrap;
+}
+
+#report {
+  margin-top: 16px;
+  padding: 6px 22px;
+  border: 1px solid #d7dbe2;
+  border-radius: 8px;
+  background: #fff;
+  color: #222;
+  cursor: pointer;
+}
+
+#report:hover {
+  background: #f6f7f9;
+}
+
+#fraud {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 22px;
+  padding: 14px;
+  background: #f3f4f6;
+  border-radius: 10px;
+}
+
+#fraud svg {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  margin-top: 1px;
+}
+
+#fraud p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+#learn {
+  display: inline-block;
+  margin-top: 2px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #222;
+  font-size: 14px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+#note {
+  margin: 14px 0 0;
+  font-size: 13px;
+  text-align: center;
+  color: #3d7a57;
+}
+
+#note.warn {
+  color: #8a3b2d;
+}
+
+#confirm {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  background: #f7f7f8;
+  border-top: 1px solid #eceff3;
+}
+
+#confirm p {
+  margin: 0;
+  font-size: 14px;
+}
+
+#confirm button {
+  border: 0;
+  border-radius: 8px;
+  padding: 6px 12px;
+  background: transparent;
+  cursor: pointer;
+}
+
+#confirm-yes {
+  background: #e23b2f;
+  color: #fff;
+}
+
+#profile-actions {
+  flex: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 64px;
+  padding: 0 22px;
+  border-top: 1px solid #eceff3;
+  background: #fff;
+}
+
+#profile-actions button {
+  width: 44px;
+  height: 44px;
+  padding: 6px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: #5c6570;
+  cursor: pointer;
+}
+
+#profile-actions button:hover {
+  background: #f3f4f6;
+}
+
+#profile-actions svg {
+  width: 28px;
+  height: 28px;
+  display: block;
+}
+
 .bubble {
+  position: relative;
   max-width: min(460px, calc(100% - 112px));
   background: #fff;
   border-radius: 12px;
@@ -494,6 +811,133 @@ input {
   line-height: 1.45;
   white-space: pre-wrap;
   box-shadow: 0 1px 0 rgba(0, 0, 0, 0.04);
+}
+
+.msg.has-reaction {
+  margin-bottom: 22px;
+}
+
+.react-toggle {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  display: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #c5cad1;
+  cursor: pointer;
+}
+
+.react-toggle svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
+.msg:not(.mine):is(:has(.bubble:hover), :has(.msg-meta:hover), :has(.react-picker:hover)) .react-toggle,
+.react-toggle[aria-expanded="true"] {
+  display: block;
+}
+
+.msg:not(.mine):is(:has(.bubble:hover), :has(.msg-meta:hover), :has(.react-picker:hover)) .msg-time,
+.msg:not(.mine):has(.react-toggle[aria-expanded="true"]) .msg-time {
+  visibility: hidden;
+}
+
+.bubble.reacting {
+  background: #d5d8de;
+  color: #8b919a;
+}
+
+.bubble.reacting .who {
+  color: #8b919a;
+}
+
+.bubble.reacting img,
+.bubble.reacting video {
+  filter: grayscale(1);
+  opacity: 0.7;
+}
+
+.react-toggle:hover,
+.react-toggle[aria-expanded="true"] {
+  color: #8b919a;
+}
+
+.react-picker {
+  position: fixed;
+  z-index: 30;
+  display: flex;
+  gap: 4px;
+}
+
+.react-bridge {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  height: 12px;
+}
+
+.react-picker.below .react-bridge {
+  top: auto;
+  bottom: 100%;
+}
+
+.react-choice {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.16);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.react-choice:hover,
+.react-choice.on {
+  transform: translateY(-2px);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.18);
+}
+
+.msg-reaction {
+  position: absolute;
+  left: 8px;
+  bottom: -12px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.16);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.msg-reaction img {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+
+.msg-reaction[data-mine="0"] {
+  cursor: default;
+}
+
+.msg-reaction[hidden] {
+  display: none;
 }
 
 .bubble.mine {
@@ -554,7 +998,10 @@ input {
 }
 
 .msg:not(.mine) .msg-meta {
+  position: relative;
   align-items: flex-start;
+  margin-left: -8px;
+  padding-left: 8px;
   text-align: left;
 }
 
