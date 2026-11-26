@@ -2,6 +2,58 @@
 
 **BETA.** This app is an unfinished beta. It is incomplete, it breaks, and it changes without warning. Do not rely on it as a stable LINE client.
 
+## Implemented
+
+Sign-in and the window:
+
+- QR login. The phone app scans the code, confirms a PIN, and a saved certificate skips that PIN the next time.
+- The session stays in the app config directory. Log out clears it. Quit exits.
+- A tray icon shows the unread count. Closing the window can leave the app in the tray.
+- About shows the build number and the time it was built.
+
+Chats:
+
+- The chat list covers friends, groups, rooms, and official accounts. Tabs and a name search filter that list. New activity arrives while the window is open.
+- Opening a chat loads the latest 40 messages and marks the chat read. Your own messages show Read, or Read and a count when more than one person has read them.
+- The composer sends text, including a reply that quotes another message. A failed send can be retried.
+- One-to-one text that LINE refuses with `E2EE_RETRY_ENCRYPT` is sent with letter sealing. Text sealed to a key this client holds opens in the thread. Text sealed to another device's key stays labeled "Letter-sealed message."
+- Stickers, photos, videos, and short animated images already in a chat are shown. Photos and videos open in a viewer.
+- A call that already happened shows as a duration. The app does not place the call.
+- Reactions use a fixed set: like, cool, love, angry, please, cry, and wow.
+- The message menu copies text, shares that text into another chat, unsends your own message, and reports someone else's.
+- Each chat can mute the notification sound on this machine. A chat LINE already muted stays quiet. A new message plays a chime and updates the tray badge.
+- Group system lines cover joins, leaves, removals, invites, renames, and picture changes.
+
+People and groups:
+
+- The rail shows your profile photo.
+- A profile window shows a person's name, picture, and status. From there you can favorite them, rename how they appear to you, open the chat, add them, block or unblock them, or report them. Someone who is not a friend gets a fraud warning.
+- A group window lists members and can search them, invite friends, remove a member, rename the group, and turn automatic join on or off.
+
+## What the official LINE app does that this does not
+
+Sending and history:
+
+- You can send text only. Photos, videos, voice messages, files, stickers, locations, and contact cards cannot be sent. Received stickers, photos, and videos are shown. Voice messages, files, locations, and contact cards are only a label in the thread.
+- There is no search inside a chat or across message text. Search covers chat names.
+- History stops at the latest 40 messages.
+- Letter sealing on send is one-to-one text. A message this client cannot unseal stays a label.
+- There is no typing indicator, no way to announce a message, and no albums, notes, or Keep.
+
+Calls:
+
+- There are no voice or video calls. Settings lists speakers, microphones, and cameras, and those lists do nothing. This app has no LINE VoIP.
+
+People, groups, and the rest of LINE:
+
+- Friends is a filter of chats you already have. There is no friend directory, and no way to add someone by LINE ID, phone number, or QR.
+- You cannot create a group or a room, leave a group, change the group picture, or manage an invite link.
+- You cannot change your own name, status message, or profile picture.
+- Official accounts appear in the list. Rich menus, coupons, and shop actions do not.
+- There is no OpenChat, LINE VOOM, Keep, albums, notes, LINE Pay, sticker shop, or theme.
+- There is one account. Chats cannot be pinned, hidden, or archived. Notification settings on LINE's servers are not edited here. The sound mute is local.
+- Help opens a note that help is not in this window yet. There is no desktop notification popup, only the chime and the tray badge.
+
 A small desktop client for the protocol the LINE desktop app speaks: Thrift
 TCompact POSTed to `legy-jp.line-apps.com`. This is not the public Bot /
 Messaging API.
