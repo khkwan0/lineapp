@@ -3,6 +3,9 @@ __pycache__/
 .venv/
 lineapp.local.json
 *.local.json
+lineapp.db
+lineapp.db-*
+lineapp.settings.json
 node_modules/
 dist/
 src-tauri/target/

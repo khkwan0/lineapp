@@ -74,10 +74,26 @@
         </form>
       </section>
     </div>
+    <div id="lightbox" hidden>
+      <button id="lightbox-prev" type="button" aria-label="Previous">‹</button>
+      <img id="lightbox-img" alt="" />
+      <video id="lightbox-video" hidden autoplay loop muted playsinline></video>
+      <button id="lightbox-next" type="button" aria-label="Next">›</button>
+      <button id="lightbox-close" type="button" aria-label="Close">×</button>
+    </div>
     <div id="sheet" hidden>
       <div id="sheet-card">
         <h2 id="sheet-title"></h2>
         <p id="sheet-body"></p>
+        <form id="sheet-settings" hidden>
+          <label class="setting">
+            <input id="minimize-to-tray" type="checkbox" checked />
+            <span>
+              Keep running in the tray
+              <small>Closing the window leaves LINE in the tray. Right-click that icon to open it again, or use Quit to exit.</small>
+            </span>
+          </label>
+        </form>
         <button id="sheet-close" type="button">Close</button>
       </div>
     </div>

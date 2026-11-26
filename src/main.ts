@@ -28,12 +28,24 @@ type ChatRow = {
 type HistoryMessage = {
   mine: boolean;
   name: string;
+  picture?: string;
   text: string;
   sealed: boolean;
   time: number;
   sticker?: string;
   stickerFallback?: string;
+  kind?: string;
+  gid?: string;
+  seq?: number;
+  mediaId?: string;
+  animated?: boolean;
 };
+
+type MediaSlot = { id: string; seq: number; animated?: boolean };
+
+type BubbleMessage = HistoryMessage & { media?: MediaSlot[] };
+
+type MediaFile = { id: string; mime?: string; data?: string; error?: string };
 
 type SendResult = {
   id: string;
@@ -80,15 +92,29 @@ const railMenu = document.querySelector<HTMLElement>("#rail-menu")!;
 const sheet = document.querySelector<HTMLElement>("#sheet")!;
 const sheetTitle = document.querySelector<HTMLElement>("#sheet-title")!;
 const sheetBody = document.querySelector<HTMLElement>("#sheet-body")!;
+const sheetSettings = document.querySelector<HTMLElement>("#sheet-settings")!;
+const minimizeToTray = document.querySelector<HTMLInputElement>("#minimize-to-tray")!;
+const lightbox = document.querySelector<HTMLElement>("#lightbox")!;
+const lightboxImg = document.querySelector<HTMLImageElement>("#lightbox-img")!;
+const lightboxVideo = document.querySelector<HTMLVideoElement>("#lightbox-video")!;
+const lightboxPrev = document.querySelector<HTMLButtonElement>("#lightbox-prev")!;
+const lightboxNext = document.querySelector<HTMLButtonElement>("#lightbox-next")!;
 
 let shownUrl = "";
+let myName = "";
+let myPicture = "";
 let rows: ChatRow[] = [];
 let filter = "all";
 let selected = 0;
 let openId = "";
 let historyToken = 0;
-let pollTimer = 0;
-let pollBusy = false;
+let signedIn = false;
+const mediaUrls = new Map<string, string>();
+const animatedMedia = new Set<string>();
+const mediaMimes = new Map<string, string>();
+const mediaJobs = new Map<string, Promise<void>>();
+let gallery: { ids: string[]; index: number } | null = null;
+let trayBadge = -1;
 
 type PollUpdate = {
   id: string;
@@ -97,7 +123,11 @@ type PollUpdate = {
   sealed: boolean;
   sticker?: string;
   stickerFallback?: string;
-  unread: number | null;
+  unread?: number | null;
+  incoming?: boolean;
+  read?: boolean;
+  refresh?: boolean;
+  keepPreview?: boolean;
   name?: string;
   picture?: string;
   kind?: string;
@@ -200,23 +230,166 @@ function visibleRows(): ChatRow[] {
   });
 }
 
+const SOUND_MUTE_KEY = "lineapp.soundMuted";
+
+function readSoundMutes(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(SOUND_MUTE_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    const saved: Record<string, boolean> = {};
+    for (const [id, value] of Object.entries(parsed)) {
+      if (typeof value === "boolean") {
+        saved[id] = value;
+      }
+    }
+    return saved;
+  } catch {
+    return {};
+  }
+}
+
+function soundMuted(chat: { id: string; muted: boolean }): boolean {
+  const saved = readSoundMutes();
+  if (Object.prototype.hasOwnProperty.call(saved, chat.id)) {
+    return saved[chat.id];
+  }
+  return chat.muted;
+}
+
+function setSoundMuted(id: string, muted: boolean): void {
+  const saved = readSoundMutes();
+  saved[id] = muted;
+  localStorage.setItem(SOUND_MUTE_KEY, JSON.stringify(saved));
+}
+
+function notifySound(id: string, serverMuted: boolean): boolean {
+  if (soundMuted({ id, muted: serverMuted })) {
+    return false;
+  }
+  return !(id === openId && document.hasFocus());
+}
+
+function speakerIcon(muted: boolean): SVGSVGElement {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  const body = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  body.setAttribute("fill", "currentColor");
+  body.setAttribute("d", "M3.5 9.25h3.2L11 5.4v13.2l-4.3-3.85H3.5a1 1 0 0 1-1-1v-3.5a1 1 0 0 1 1-1z");
+  svg.append(body);
+  if (muted) {
+    const slash = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    slash.setAttribute("fill", "none");
+    slash.setAttribute("stroke", "currentColor");
+    slash.setAttribute("stroke-width", "1.8");
+    slash.setAttribute("stroke-linecap", "round");
+    slash.setAttribute("d", "M16 9.2l5.2 5.6M21.2 9.2 16 14.8");
+    svg.append(slash);
+  } else {
+    for (const d of ["M15.2 8.6a4.2 4.2 0 0 1 0 6.8", "M17.6 6.2a7.6 7.6 0 0 1 0 11.6"]) {
+      const wave = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      wave.setAttribute("fill", "none");
+      wave.setAttribute("stroke", "currentColor");
+      wave.setAttribute("stroke-width", "1.7");
+      wave.setAttribute("stroke-linecap", "round");
+      wave.setAttribute("d", d);
+      svg.append(wave);
+    }
+  }
+  return svg;
+}
+
+function paintThreadHead(chat: ChatRow): void {
+  const muted = soundMuted(chat);
+  threadHead.replaceChildren();
+  const title = document.createElement("span");
+  title.className = "thread-title";
+  const count = chat.members === null ? "" : ` (${chat.members})`;
+  title.textContent = `${chat.name}${count}`;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = muted ? "thread-mute is-muted" : "thread-mute";
+  button.dataset.muted = muted ? "1" : "0";
+  button.setAttribute("aria-pressed", muted ? "true" : "false");
+  button.setAttribute("aria-label", muted ? "Unmute sound notifications" : "Mute sound notifications");
+  button.append(speakerIcon(muted));
+  button.addEventListener("click", () => {
+    setSoundMuted(chat.id, !soundMuted(chat));
+    renderList();
+  });
+  threadHead.append(title, button);
+  document.body.dataset.sound = muted ? "off" : "on";
+}
+
+let audioCtx: AudioContext | undefined;
+
+function playChime(): void {
+  const Ctx = window.AudioContext;
+  if (!Ctx) {
+    return;
+  }
+  if (!audioCtx) {
+    audioCtx = new Ctx();
+  }
+  if (audioCtx.state === "suspended") {
+    void audioCtx.resume();
+  }
+  const ctx = audioCtx;
+  const now = ctx.currentTime;
+  [784, 1046].forEach((freq, index) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const start = now + index * 0.09;
+    osc.type = "sine";
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.exponentialRampToValueAtTime(0.045, start + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.18);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(start);
+    osc.stop(start + 0.2);
+  });
+}
+
+document.addEventListener("pointerdown", () => {
+  const Ctx = window.AudioContext;
+  if (!Ctx) {
+    return;
+  }
+  if (!audioCtx) {
+    audioCtx = new Ctx();
+  }
+  if (audioCtx.state === "suspended") {
+    void audioCtx.resume();
+  }
+});
+
 function showThread(chat: ChatRow | undefined): void {
   if (!chat) {
     thread.hidden = true;
     openId = "";
+    closeGallery();
     composerInput.disabled = true;
     sendError.hidden = true;
+    threadHead.replaceChildren();
+    delete document.body.dataset.sound;
     return;
   }
   thread.hidden = false;
-  const count = chat.members === null ? "" : ` (${chat.members})`;
-  const mute = chat.muted ? " 🔇" : "";
-  threadHead.textContent = `${chat.name}${count}${mute}`;
+  paintThreadHead(chat);
   composerInput.disabled = false;
   if (chat.id === openId) {
     return;
   }
   openId = chat.id;
+  closeGallery();
   sendError.hidden = true;
   const token = ++historyToken;
   threadBody.replaceChildren();
@@ -245,7 +418,7 @@ function renderHistory(payload: HistoryPayload): void {
     document.body.dataset.history = "0";
     return;
   }
-  payload.messages.forEach((message) => threadBody.append(messageBubble(message)));
+  groupMessages(payload.messages).forEach((message) => threadBody.append(messageBubble(message)));
   threadBody.scrollTop = threadBody.scrollHeight;
   document.body.dataset.history = String(payload.messages.length);
 }
@@ -271,25 +444,162 @@ function stickerImage(
   return img;
 }
 
-function messageBubble(message: HistoryMessage): HTMLElement {
+function groupMessages(messages: HistoryMessage[]): BubbleMessage[] {
+  const out: BubbleMessage[] = [];
+  const at = new Map<string, number>();
+  for (const message of messages) {
+    const visual = (message.kind === "image" || message.kind === "video") && message.mediaId;
+    const gid = message.gid || "";
+    if (visual && gid) {
+      const key = `${message.kind}:${gid}`;
+      const index = at.get(key);
+      if (index !== undefined) {
+        out[index].media?.push({ id: message.mediaId || "", seq: message.seq || 0, animated: Boolean(message.animated) });
+        continue;
+      }
+      at.set(key, out.length);
+    }
+    out.push({
+      ...message,
+      media: visual ? [{ id: message.mediaId || "", seq: message.seq || 0, animated: Boolean(message.animated) }] : undefined,
+    });
+  }
+  for (const message of out) {
+    message.media?.sort((left, right) => left.seq - right.seq);
+  }
+  return out;
+}
+
+function mediaLabel(text: string): boolean {
+  return /^(letter-sealed )?(image|video)$/i.test(text.trim());
+}
+
+function mediaKey(id: string, preview: boolean): string {
+  return `${preview ? "p" : "f"}:${id}`;
+}
+
+function decodeBase64(data: string): ArrayBuffer {
+  const raw = atob(data);
+  const bytes = new Uint8Array(raw.length);
+  for (let index = 0; index < raw.length; index += 1) {
+    bytes[index] = raw.charCodeAt(index);
+  }
+  return bytes.buffer;
+}
+
+function warmMedia(ids: string[], preview: boolean): Promise<void> {
+  const missing = ids.filter((id) => id && !mediaUrls.has(mediaKey(id, preview)) && !mediaJobs.has(mediaKey(id, preview)));
+  if (missing.length === 0) {
+    const pending = ids.map((id) => mediaJobs.get(mediaKey(id, preview))).filter((job): job is Promise<void> => Boolean(job));
+    return Promise.all(pending).then(() => undefined);
+  }
+  const chat = openId;
+  const animatedIds = missing.filter((id) => animatedMedia.has(id));
+  const job = invoke<MediaFile[]>("load_media", { id: chat, messageIds: missing, preview, animatedIds })
+    .then((files) => {
+      for (const file of files) {
+        if (!file.data) {
+          continue;
+        }
+        const mime = file.mime || "application/octet-stream";
+        const url = URL.createObjectURL(new Blob([decodeBase64(file.data)], { type: mime }));
+        const key = mediaKey(file.id, preview);
+        mediaUrls.set(key, url);
+        mediaMimes.set(key, mime);
+      }
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      for (const id of missing) {
+        mediaJobs.delete(mediaKey(id, preview));
+      }
+    });
+  for (const id of missing) {
+    mediaJobs.set(mediaKey(id, preview), job);
+  }
+  return job;
+}
+
+const COLLAPSED_LINES = 15;
+
+function appendMessageText(bubble: HTMLElement, text: string): void {
+  const body = document.createElement("div");
+  body.className = "msg-text";
+  body.textContent = text;
+  bubble.append(body);
+  queueMicrotask(() => clampIfTall(body));
+}
+
+function clampIfTall(body: HTMLElement, attempt = 0): void {
+  if (!body.isConnected || body.classList.contains("clamped") || body.dataset.fit === "1") {
+    return;
+  }
+  const lineHeight = parseFloat(getComputedStyle(body).lineHeight);
+  if (!Number.isFinite(lineHeight) || lineHeight <= 0 || body.clientWidth === 0) {
+    if (attempt < 5) {
+      requestAnimationFrame(() => clampIfTall(body, attempt + 1));
+    }
+    return;
+  }
+  if (body.scrollHeight <= lineHeight * (COLLAPSED_LINES + 0.5)) {
+    body.dataset.fit = "1";
+    return;
+  }
+  body.classList.add("clamped");
+  const more = document.createElement("button");
+  more.type = "button";
+  more.className = "msg-more";
+  more.textContent = "more";
+  more.addEventListener("click", () => {
+    body.classList.remove("clamped");
+    more.remove();
+  });
+  body.after(more);
+}
+
+function messageBubble(message: BubbleMessage): HTMLElement {
+  if (message.kind === "chat update") {
+    const note = document.createElement("div");
+    note.className = "chat-update";
+    note.textContent = message.text;
+    const label = clock(message.time);
+    if (label) {
+      const time = document.createElement("div");
+      time.className = "when";
+      time.textContent = label;
+      note.append(time);
+    }
+    return note;
+  }
   const bubble = document.createElement("div");
+  const rich = Boolean(message.media?.length);
   bubble.className = message.mine ? "bubble mine" : "bubble";
+  if (rich) {
+    bubble.classList.add("rich");
+  }
   if (message.name && !message.mine) {
     const who = document.createElement("div");
     who.className = "who";
     who.textContent = message.name;
     bubble.append(who);
   }
-  if (message.sticker) {
+  const token = historyToken;
+  if (message.media?.length && message.kind === "image") {
+    bubble.append(imageGrid(message.media, token));
+    if (message.text && !mediaLabel(message.text)) {
+      appendMessageText(bubble, message.text);
+    }
+  } else if (message.media?.length && message.kind === "video") {
+    bubble.append(videoStack(message.media, token));
+    if (message.text && !mediaLabel(message.text)) {
+      appendMessageText(bubble, message.text);
+    }
+  } else if (message.sticker) {
     bubble.append(stickerImage(message.sticker, message.stickerFallback || "", "sticker", () => {
-      const text = document.createElement("div");
-      text.textContent = message.text || "Sticker";
-      bubble.append(text);
+      appendMessageText(bubble, message.text || "Sticker");
     }));
   } else {
-    const text = document.createElement("div");
-    text.textContent = message.text;
-    bubble.append(text);
+    appendMessageText(bubble, message.text);
   }
   if (message.time) {
     const when = document.createElement("div");
@@ -297,7 +607,219 @@ function messageBubble(message: HistoryMessage): HTMLElement {
     when.textContent = clock(message.time);
     bubble.append(when);
   }
-  return bubble;
+  const row = document.createElement("div");
+  row.className = message.mine ? "msg mine" : "msg";
+  const mark = senderMark(message);
+  if (message.mine) {
+    row.append(bubble, mark);
+  } else {
+    row.append(mark, bubble);
+  }
+  return row;
+}
+
+function senderPicture(message: BubbleMessage): string {
+  if (message.mine) {
+    return myPicture;
+  }
+  if (message.picture) {
+    return message.picture;
+  }
+  const chat = rows.find((row) => row.id === openId);
+  if (!chat || chat.kind === "group" || chat.kind === "room") {
+    return "";
+  }
+  return chat.picture;
+}
+
+function senderName(message: BubbleMessage): string {
+  if (message.mine) {
+    return myName;
+  }
+  if (message.name) {
+    return message.name;
+  }
+  const chat = rows.find((row) => row.id === openId);
+  if (!chat || chat.kind === "group" || chat.kind === "room") {
+    return "";
+  }
+  return chat.name;
+}
+
+function senderMark(message: BubbleMessage): HTMLElement {
+  const name = senderName(message);
+  const picture = senderPicture(message);
+  if (!picture) {
+    const circle = fallback(name);
+    circle.classList.add("msg-avatar");
+    return circle;
+  }
+  const photo = document.createElement("img");
+  photo.className = "msg-avatar";
+  photo.alt = "";
+  photo.src = picture;
+  photo.addEventListener("error", () => {
+    const circle = fallback(name);
+    circle.classList.add("msg-avatar");
+    photo.replaceWith(circle);
+  });
+  return photo;
+}
+
+function showFrame(host: HTMLElement, url: string, mime: string): void {
+  if (mime.startsWith("video/")) {
+    const video = document.createElement("video");
+    video.className = "gif-preview";
+    video.src = url;
+    video.autoplay = true;
+    video.loop = true;
+    video.muted = true;
+    video.playsInline = true;
+    host.replaceChildren(video);
+    void video.play().catch(() => undefined);
+    return;
+  }
+  const img = document.createElement("img");
+  img.alt = "";
+  img.src = url;
+  host.replaceChildren(img);
+}
+
+function imageGrid(items: MediaSlot[], token: number): HTMLElement {
+  const grid = document.createElement("div");
+  grid.className = items.length > 1 ? "media-grid many" : "media-grid one";
+  const ids = items.map((item) => item.id);
+  for (const item of items) {
+    if (item.animated && item.id) {
+      animatedMedia.add(item.id);
+    }
+  }
+  void warmMedia(items.filter((item) => !item.animated).map((item) => item.id), true);
+  void warmMedia(items.filter((item) => item.animated).map((item) => item.id), false);
+  items.forEach((item, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "media-thumb";
+    const img = document.createElement("img");
+    img.alt = "";
+    button.append(img);
+    button.addEventListener("click", () => openGallery(ids, index));
+    grid.append(button);
+    const thumb = !item.animated;
+    void warmMedia([item.id], thumb).then(() => {
+      if (token !== historyToken) {
+        return;
+      }
+      const key = mediaKey(item.id, thumb);
+      const url = mediaUrls.get(key);
+      if (!url) {
+        button.textContent = "Image";
+        return;
+      }
+      showFrame(button, url, mediaMimes.get(key) || "");
+    });
+  });
+  return grid;
+}
+
+function videoStack(items: MediaSlot[], token: number): HTMLElement {
+  const stack = document.createElement("div");
+  stack.className = "video-stack";
+  const ids = items.map((item) => item.id);
+  void warmMedia(ids, false);
+  for (const item of items) {
+    const video = document.createElement("video");
+    video.className = "chat-video";
+    video.controls = true;
+    video.preload = "metadata";
+    video.setAttribute("playsinline", "");
+    stack.append(video);
+    void warmMedia([item.id], false).then(() => {
+      if (token !== historyToken) {
+        return;
+      }
+      const url = mediaUrls.get(mediaKey(item.id, false));
+      if (url) {
+        video.src = url;
+      } else {
+        const note = document.createElement("div");
+        note.textContent = "Video";
+        video.replaceWith(note);
+      }
+    });
+  }
+  return stack;
+}
+
+function openGallery(ids: string[], index: number): void {
+  gallery = { ids, index };
+  lightbox.hidden = false;
+  paintGallery();
+}
+
+function closeGallery(): void {
+  gallery = null;
+  lightbox.hidden = true;
+  lightboxImg.removeAttribute("src");
+  lightboxVideo.pause();
+  lightboxVideo.removeAttribute("src");
+  delete lightboxVideo.dataset.file;
+  lightboxVideo.hidden = true;
+  lightboxImg.hidden = false;
+}
+
+function showLightbox(url: string, mime: string): void {
+  if (mime.startsWith("video/")) {
+    lightboxImg.hidden = true;
+    lightboxVideo.hidden = false;
+    if (lightboxVideo.dataset.file !== url) {
+      lightboxVideo.dataset.file = url;
+      lightboxVideo.src = url;
+    }
+    void lightboxVideo.play().catch(() => undefined);
+    return;
+  }
+  lightboxVideo.pause();
+  lightboxVideo.hidden = true;
+  lightboxVideo.removeAttribute("src");
+  delete lightboxVideo.dataset.file;
+  lightboxImg.hidden = false;
+  lightboxImg.src = url;
+}
+
+function stepGallery(delta: number): void {
+  if (!gallery || gallery.ids.length < 2) {
+    return;
+  }
+  const count = gallery.ids.length;
+  gallery.index = (gallery.index + delta + count) % count;
+  paintGallery();
+}
+
+function paintGallery(): void {
+  if (!gallery) {
+    return;
+  }
+  const id = gallery.ids[gallery.index];
+  const several = gallery.ids.length > 1;
+  lightboxPrev.hidden = !several;
+  lightboxNext.hidden = !several;
+  const previewKey = mediaKey(id, true);
+  const preview = mediaUrls.get(previewKey);
+  if (preview) {
+    showLightbox(preview, mediaMimes.get(previewKey) || "");
+  }
+  const token = historyToken;
+  void warmMedia([id], false).then(() => {
+    if (!gallery || gallery.ids[gallery.index] !== id || token !== historyToken) {
+      return;
+    }
+    const fullKey = mediaKey(id, false);
+    const full = mediaUrls.get(fullKey);
+    if (full) {
+      showLightbox(full, mediaMimes.get(fullKey) || "");
+    }
+  });
 }
 
 function renderList(): void {
@@ -340,7 +862,7 @@ function renderList(): void {
       count.textContent = `(${chat.members})`;
       top.append(count);
     }
-    if (chat.muted) {
+    if (soundMuted(chat)) {
       const mute = document.createElement("span");
       mute.className = "mute";
       mute.textContent = "🔇";
@@ -357,7 +879,7 @@ function renderList(): void {
     }
     const preview = document.createElement("span");
     preview.className = "preview";
-    preview.textContent = chat.lastMessage || "No messages";
+    preview.textContent = previewText(chat.lastMessage);
     bottom.append(preview);
     if (chat.unread !== null && chat.unread > 0) {
       const badge = document.createElement("span");
@@ -373,6 +895,15 @@ function renderList(): void {
   document.body.dataset.chats = String(rows.length);
 }
 
+function updateLabel(text: string): boolean {
+  return /^(letter-sealed )?chat update$/i.test(text.trim());
+}
+
+function previewText(text: string): string {
+  const trimmed = text.trim();
+  return trimmed && !updateLabel(trimmed) ? trimmed : "No messages";
+}
+
 function fallback(name: string): HTMLElement {
   const circle = document.createElement("span");
   circle.className = "avatar-fallback";
@@ -382,14 +913,44 @@ function fallback(name: string): HTMLElement {
   return circle;
 }
 
+function paintUnread(): void {
+  const total = rows.reduce((sum, row) => sum + (row.unread && row.unread > 0 ? row.unread : 0), 0);
+  if (total > 0) {
+    railCount.hidden = false;
+    railCount.textContent = String(total);
+  } else {
+    railCount.hidden = true;
+    railCount.textContent = "";
+  }
+  if (total === trayBadge) {
+    return;
+  }
+  trayBadge = total;
+  void invoke("set_tray_badge", { count: total }).catch(() => {
+    trayBadge = -1;
+  });
+}
+
 function renderChats(payload: ChatPayload): void {
+  const keepId = signedIn ? (openId || visibleRows()[selected]?.id || "") : "";
+  signedIn = true;
   login.hidden = true;
   app.hidden = false;
   rows = payload.chats;
-  selected = 0;
-  openId = "";
+  if (keepId) {
+    const index = visibleRows().findIndex((row) => row.id === keepId);
+    selected = index >= 0 ? index : 0;
+    if (index < 0) {
+      openId = "";
+    }
+  } else {
+    selected = 0;
+    openId = "";
+  }
   document.body.dataset.friends = String(rows.filter((chat) => chat.kind === "friend").length);
   const profile = payload.profile;
+  myName = profile.name;
+  myPicture = profile.picture;
   if (profile.picture) {
     railPhoto.hidden = false;
     railPhoto.src = profile.picture;
@@ -402,16 +963,8 @@ function renderChats(payload: ChatPayload): void {
   railInitial.textContent = (profile.name.trim()[0] || "L").toUpperCase();
   failures.hidden = payload.failures.length === 0;
   failures.textContent = payload.failures.map((failure) => `${failure.name}: ${failure.error}`).join(" ");
-  const total = payload.unreadTotal;
-  if (total !== null && total > 0) {
-    railCount.hidden = false;
-    railCount.textContent = String(total);
-  } else {
-    railCount.hidden = true;
-    railCount.textContent = "";
-  }
+  paintUnread();
   renderList();
-  startPolling();
 }
 
 async function showChats(): Promise<boolean> {
@@ -577,7 +1130,24 @@ function closeMenu(): void {
 function showSheet(title: string, body: string): void {
   sheetTitle.textContent = title;
   sheetBody.textContent = body;
+  sheetBody.hidden = false;
+  sheetSettings.hidden = true;
   sheet.hidden = false;
+}
+
+async function showSettings(): Promise<void> {
+  sheetTitle.textContent = "Settings";
+  sheetBody.hidden = true;
+  sheetSettings.hidden = false;
+  sheet.hidden = false;
+  minimizeToTray.disabled = true;
+  try {
+    const settings = await invoke<{ minimizeToTray: boolean }>("get_settings");
+    minimizeToTray.checked = settings.minimizeToTray;
+  } catch (error) {
+    status.textContent = error instanceof Error ? error.message : String(error);
+  }
+  minimizeToTray.disabled = false;
 }
 
 railMore.addEventListener("click", (event) => {
@@ -594,7 +1164,7 @@ railMenu.addEventListener("click", (event) => {
   }
   closeMenu();
   if (action === "settings") {
-    showSheet("Settings", "Settings are not in this window yet.");
+    void showSettings();
   } else if (action === "help") {
     showSheet("Help", "Help is not in this window yet.");
   } else if (action === "about") {
@@ -612,41 +1182,41 @@ document.querySelector<HTMLButtonElement>("#sheet-close")!.addEventListener("cli
   sheet.hidden = true;
 });
 
-function startPolling(): void {
-  window.clearInterval(pollTimer);
-  pollTimer = window.setInterval(() => {
-    void pollInbox();
-  }, 5000);
-}
+minimizeToTray.addEventListener("change", () => {
+  const enabled = minimizeToTray.checked;
+  void invoke("set_minimize_to_tray", { enabled }).catch((error: unknown) => {
+    minimizeToTray.checked = !enabled;
+    status.textContent = error instanceof Error ? error.message : String(error);
+  });
+});
 
-async function pollInbox(): Promise<void> {
-  if (pollBusy || app.hidden || rows.length === 0) {
+lightboxPrev.addEventListener("click", () => stepGallery(-1));
+lightboxNext.addEventListener("click", () => stepGallery(1));
+document.querySelector<HTMLButtonElement>("#lightbox-close")!.addEventListener("click", () => closeGallery());
+lightbox.addEventListener("click", (event) => {
+  if (event.target === lightbox) {
+    closeGallery();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (lightbox.hidden) {
     return;
   }
-  pollBusy = true;
-  const times: Record<string, number> = {};
-  for (const row of rows) {
-    times[row.id] = row.time || 0;
+  if (event.key === "Escape") {
+    closeGallery();
+  } else if (event.key === "ArrowLeft") {
+    stepGallery(-1);
+  } else if (event.key === "ArrowRight") {
+    stepGallery(1);
   }
-  try {
-    await invoke("refresh_inbox", { known: JSON.stringify({ times }) });
-  } catch {
-    // The next pass tries again.
-  } finally {
-    pollBusy = false;
-  }
-}
+});
 
 function applyPoll(payload: PollPayload): void {
+  if (!signedIn) {
+    return;
+  }
   const selectedId = visibleRows()[selected]?.id || openId;
   const openTime = rows.find((row) => row.id === openId)?.time || 0;
-  if (payload.unreadTotal !== null && payload.unreadTotal > 0) {
-    railCount.hidden = false;
-    railCount.textContent = String(payload.unreadTotal);
-  } else if (payload.unreadTotal === 0) {
-    railCount.hidden = true;
-    railCount.textContent = "";
-  }
   for (const item of payload.unreads || []) {
     const chat = rows.find((row) => row.id === item.id);
     if (chat) {
@@ -654,61 +1224,91 @@ function applyPoll(payload: PollPayload): void {
     }
   }
   let openAdvanced = false;
+  let shouldChime = false;
   for (const update of payload.updates || []) {
     const chat = rows.find((row) => row.id === update.id);
     if (!chat) {
+      if (update.read) {
+        continue;
+      }
       rows.push({
         id: update.id,
         name: update.name || "Direct chat",
-        lastMessage: update.lastMessage,
+        lastMessage: update.keepPreview || updateLabel(update.lastMessage) ? "" : update.lastMessage,
         sealed: update.sealed,
         time: update.time,
         members: update.members ?? null,
         picture: update.picture || "",
         muted: false,
         kind: update.kind || "friend",
-        unread: update.unread,
+        unread: update.incoming ? 1 : (update.unread ?? null),
         sticker: update.sticker || "",
         stickerFallback: update.stickerFallback || "",
       });
+      if (update.incoming && notifySound(update.id, false)) {
+        shouldChime = true;
+      }
       continue;
     }
-    if (typeof update.unread === "number") {
+    if (update.read) {
+      chat.unread = 0;
+    } else if (update.incoming) {
+      chat.unread = (chat.unread || 0) + 1;
+      if (notifySound(chat.id, chat.muted)) {
+        shouldChime = true;
+      }
+    } else if (typeof update.unread === "number") {
       chat.unread = update.unread;
     }
-    if (update.time > chat.time) {
-      const keepTyped = update.sealed
+    const fill = Boolean(update.refresh && update.lastMessage && !update.keepPreview);
+    if (update.time > chat.time || fill) {
+      const keepTyped = !fill
+        && update.sealed
         && Boolean(chat.lastMessage)
         && !chat.lastMessage.startsWith("Letter-sealed")
         && update.time - chat.time < 20000;
-      if (!keepTyped) {
-        chat.lastMessage = update.lastMessage;
+      if (update.keepPreview && updateLabel(chat.lastMessage)) {
+        chat.lastMessage = "";
+        chat.sticker = "";
+        chat.stickerFallback = "";
+      } else if (!keepTyped && !update.keepPreview) {
+        chat.lastMessage = updateLabel(update.lastMessage) ? "" : update.lastMessage;
         chat.sealed = update.sealed;
         chat.sticker = update.sticker || "";
         chat.stickerFallback = update.stickerFallback || "";
         if (chat.id === openId && update.time > openTime) {
           openAdvanced = true;
         }
+      } else if (update.keepPreview && chat.id === openId && update.time > openTime) {
+        openAdvanced = true;
       }
-      chat.time = update.time;
+      if (update.time > chat.time) {
+        chat.time = update.time;
+      }
     }
   }
   rows.sort((left, right) => right.time - left.time);
   const index = visibleRows().findIndex((row) => row.id === selectedId);
   selected = index >= 0 ? index : 0;
+  paintUnread();
   renderList();
+  if (shouldChime) {
+    playChime();
+  }
   if (openAdvanced && openId) {
     void invoke("load_history", { id: openId });
   }
 }
 
 async function logout(): Promise<void> {
-  window.clearInterval(pollTimer);
+  signedIn = false;
+  trayBadge = -1;
   closeMenu();
   sheet.hidden = true;
   try {
     await invoke("logout");
   } catch (error) {
+    signedIn = true;
     status.textContent = error instanceof Error ? error.message : String(error);
     return;
   }

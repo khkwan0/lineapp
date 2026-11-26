@@ -10,6 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "enableGTKAppId": true,
     "windows": [
       {
         "label": "main",
@@ -24,6 +25,9 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": false,
+    "icon": [
+      "icons/icon.png"
+    ]
   }
 }
