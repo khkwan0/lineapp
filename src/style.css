@@ -463,6 +463,100 @@ input {
   color: #8b919a;
 }
 
+.reply-quote {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  padding: 4px 8px;
+  border-left: 3px solid #06c755;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.reply-avatar,
+#reply-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex: none;
+  background: #d7dbe2;
+}
+
+#reply-avatar {
+  width: 28px;
+  height: 28px;
+}
+
+.reply-avatar img,
+.reply-avatar .avatar-fallback,
+#reply-avatar img,
+#reply-avatar .avatar-fallback {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+}
+
+.bubble.mine .reply-quote {
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.reply-quote .reply-who {
+  color: #069a45;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.reply-quote .reply-body {
+  max-width: 220px;
+  overflow: hidden;
+  color: inherit;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.85;
+}
+
+#msg-menu {
+  position: fixed;
+  z-index: 36;
+  min-width: 148px;
+  margin: 0;
+  padding: 6px 0;
+  background: #fff;
+  color: #111;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(20, 24, 33, 0.18);
+}
+
+#msg-menu button {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 10px 16px;
+  border: 0;
+  background: transparent;
+  color: #111;
+  font-size: 15px;
+  text-align: left;
+  cursor: pointer;
+}
+
+#msg-menu button:hover {
+  background: #f3f4f6;
+}
+
+#msg-menu hr {
+  margin: 6px 0;
+  border: 0;
+  border-top: 1px solid #eceff3;
+}
+
 .msg {
   display: flex;
   align-items: flex-end;
@@ -1128,6 +1222,47 @@ body.profile.is-friend #profile-actions {
   border-top: 1px solid #eceff3;
 }
 
+#reply-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border-left: 3px solid #06c755;
+  border-radius: 8px;
+  background: #f3f4f6;
+}
+
+#reply-bar > div {
+  min-width: 0;
+}
+
+#reply-bar strong {
+  display: block;
+  color: #06c755;
+  font-size: 12px;
+}
+
+#reply-bar span {
+  display: block;
+  max-width: 420px;
+  overflow: hidden;
+  color: #444;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#reply-cancel {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: #666;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
 #composer input {
   width: 100%;
   box-sizing: border-box;
@@ -1177,6 +1312,33 @@ body.profile.is-friend #profile-actions {
 
 #sheet-settings {
   margin: 0 0 16px;
+}
+
+#sheet-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+  margin: 0 0 16px;
+  overflow: auto;
+  border: 1px solid #eceff3;
+  border-radius: 8px;
+}
+
+#sheet-list button {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 1px solid #f2f3f5;
+  background: #fff;
+  color: #222;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+#sheet-list button:hover {
+  background: #f3f4f6;
 }
 
 .setting {

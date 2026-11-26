@@ -59,6 +59,7 @@ enum InboxNotice {
     Receipt { id: String },
     Refresh { id: String },
     Reaction { id: String, message_id: String, emoji: String, image: String, mine: bool },
+    Unsent { id: String, message_id: String },
 }
 
 #[derive(Debug)]
@@ -774,27 +775,31 @@ impl Client {
             let mine = !me.is_empty() && sender == me;
             let ident = text_field(message, 4);
             let (status, readers) = if mine { delivery_state(&ident, &me, &marks) } else { (String::new(), 0) };
-            let (sticker, fallback) = sticker_pair(Some(message));
+            let name = if mine { "" } else { cards.get(&sender).map(|card| card.0.as_str()).unwrap_or("") };
+            let unsent = message_unsent(message);
+            let (sticker, fallback) = if unsent { (String::new(), String::new()) } else { sticker_pair(Some(message)) };
             let kind = content_kind(int_field(message, 15));
-            let media_id = if kind == "image" || kind == "video" { ident.clone() } else { String::new() };
+            let media_id = if !unsent && (kind == "image" || kind == "video") { ident.clone() } else { String::new() };
+            let (text, kind, media_id) = finish_body(message, mine, name, text, kind, media_id);
             let mut item = json!({
                 "id": ident,
                 "mine": mine,
                 "sender": sender,
                 "status": status,
                 "readers": readers,
-                "name": if mine { "" } else { cards.get(&sender).map(|card| card.0.as_str()).unwrap_or("") },
+                "name": name,
                 "picture": if mine { "" } else { cards.get(&sender).map(|card| card.1.as_str()).unwrap_or("") },
                 "text": text,
-                "sealed": sealed,
+                "sealed": sealed && !unsent,
                 "time": message_time(message),
                 "sticker": sticker,
                 "stickerFallback": fallback,
                 "kind": kind,
                 "gid": if media_id.is_empty() { String::new() } else { meta_value(message, "GID") },
-                "seq": meta_value(message, "GSEQ").parse::<i64>().unwrap_or(0),
+                "seq": if media_id.is_empty() { 0 } else { meta_value(message, "GSEQ").parse::<i64>().unwrap_or(0) },
                 "mediaId": media_id,
                 "animated": !media_id.is_empty() && message_animated(message),
+                "replyId": reply_target(message),
             });
             attach_reaction(&mut item, message, &me);
             messages.push(item);
@@ -1101,12 +1106,12 @@ impl Client {
         self.talk("getLastE2EEGroupSharedKey", &[(2, Field::I32(2)), (3, bin(group))]).ok().flatten()
     }
 
-    pub fn send_for_window(&mut self, to: &str, message: &str) -> Json {
-        match self.send_text(to, message) {
+    pub fn send_for_window(&mut self, to: &str, message: &str, related_id: &str) -> Json {
+        match self.send_text(to, message, related_id) {
             Ok(sent) => sent,
             Err(err) => {
                 if to.starts_with('u') && (err.code == Some(82) || invalid_sender_key(&err)) {
-                    match self.send_sealed_text(to, message) {
+                    match self.send_sealed_text(to, message, related_id) {
                         Ok(sent) => sent,
                         Err(sealed) => send_failure(to, &sealed),
                     }
@@ -1115,6 +1120,29 @@ impl Client {
                 }
             }
         }
+    }
+
+    /// `TalkService.unsendMessage`: seq plus the message id. LINE recalls that
+    /// message for everyone and follows up with operation 64 or 65.
+    pub fn unsend_message(&mut self, message_id: &str) -> Result<(), LineError> {
+        self.require_token()?;
+        if !message_id_ok(message_id) {
+            return Err(line("that message cannot be unsent"));
+        }
+        let seq = self.next_seq();
+        self.talk("unsendMessage", &[(1, Field::I32(seq)), (2, bin(message_id))])?;
+        Ok(())
+    }
+
+    /// `TalkService.reportSpam` for one message: the chat, the sender, the
+    /// message id, and a `SpammerReason` (other, advertising, gender harassment, harassment).
+    pub fn report_message(&mut self, chat: &str, sender: &str, message_id: &str, reason: i32, text: &str) -> Result<(), LineError> {
+        self.require_token()?;
+        if !message_id_ok(message_id) || !looks_like_mid(sender) || !matches!(reason, 0..=3) {
+            return Err(line("that message cannot be reported"));
+        }
+        self.talk("reportSpam", &report_fields(chat, sender, message_id, reason, text))?;
+        Ok(())
     }
 
     pub fn poll_inbox(&mut self, known: &mut HashMap<String, i64>) -> Result<Json, LineError> {
@@ -1483,6 +1511,10 @@ impl Client {
                         notices.push(InboxNotice::Refresh { id });
                     }
                 }
+                64 | 65 => {
+                    let Some((id, message_id)) = destroy_target(op, &me) else { continue };
+                    notices.push(InboxNotice::Unsent { id, message_id });
+                }
                 139 | 140 => {
                     let message_id = text_field(op, 10);
                     let payload = text_field(op, 11);
@@ -1581,6 +1613,16 @@ impl Client {
                         },
                     }));
                 }
+                InboxNotice::Unsent { id, message_id } => {
+                    updates.push(json!({
+                        "id": id,
+                        "lastMessage": "",
+                        "time": 0,
+                        "sealed": false,
+                        "keepPreview": true,
+                        "unsentId": message_id,
+                    }));
+                }
             }
         }
         if updates.is_empty() {
@@ -1633,12 +1675,13 @@ impl Client {
             sender = "You".into();
         }
         let chat_update = is_chat_update(message);
+        let unsent = message_unsent(message);
         let (preview, sealed, sticker, fallback) = if chat_update {
             (String::new(), false, String::new(), String::new())
         } else {
             let (preview, sealed) = self.visible_preview(message, &sender);
-            let (sticker, fallback) = sticker_pair(Some(message));
-            (preview, sealed, sticker, fallback)
+            let (sticker, fallback) = if unsent { (String::new(), String::new()) } else { sticker_pair(Some(message)) };
+            (preview, sealed && !unsent, sticker, fallback)
         };
         let mut item = json!({
             "id": id,
@@ -1656,24 +1699,27 @@ impl Client {
                 if !text.is_empty() {
                 let ident = text_field(message, 4);
                 let mine = !self.session.mid.is_empty() && sender_id == self.session.mid;
+                let name = if mine { "" } else { cards.get(&sender_id).map(|card| card.0.as_str()).unwrap_or("") };
                 let kind = content_kind(int_field(message, 15));
-                let media_id = if kind == "image" || kind == "video" { ident.clone() } else { String::new() };
+                let media_id = if !unsent && (kind == "image" || kind == "video") { ident.clone() } else { String::new() };
+                let (text, kind, media_id) = finish_body(message, mine, name, text, kind, media_id);
                 let mut thread = json!({
                     "id": ident,
                     "mine": mine,
                     "sender": sender_id,
-                    "name": if mine { "" } else { cards.get(&sender_id).map(|card| card.0.as_str()).unwrap_or("") },
+                    "name": name,
                     "picture": if mine { "" } else { cards.get(&sender_id).map(|card| card.1.as_str()).unwrap_or("") },
                     "text": text,
-                    "sealed": sealed_body,
+                    "sealed": sealed_body && !unsent,
                     "time": when,
                     "sticker": sticker,
                     "stickerFallback": fallback,
                     "kind": kind,
                     "gid": if media_id.is_empty() { String::new() } else { meta_value(message, "GID") },
-                    "seq": meta_value(message, "GSEQ").parse::<i64>().unwrap_or(0),
+                    "seq": if media_id.is_empty() { 0 } else { meta_value(message, "GSEQ").parse::<i64>().unwrap_or(0) },
                     "mediaId": media_id,
                     "animated": !media_id.is_empty() && message_animated(message),
+                    "replyId": reply_target(message),
                 });
                 attach_reaction(&mut thread, message, &self.session.mid);
                 item["thread"] = thread;
@@ -2025,26 +2071,19 @@ impl Client {
             .map_err(fail_line)
     }
 
-    fn send_text(&mut self, to: &str, message: &str) -> Result<Json, LineError> {
+    fn send_text(&mut self, to: &str, message: &str, related_id: &str) -> Result<Json, LineError> {
         self.require_token()?;
         let seq = self.next_seq();
-        let success = self.talk("sendMessage", &send_fields(to, message, seq))?.ok_or_else(|| line("empty send response"))?;
+        let success = self.talk("sendMessage", &send_fields(to, message, seq, related_id))?.ok_or_else(|| line("empty send response"))?;
         let fields = as_struct(&success)?;
         let when = message_time(fields);
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
         let body = text_field(fields, 10);
         let text = if body.is_empty() { message.to_string() } else { body };
-        Ok(json!({
-            "type": "sent",
-            "ok": true,
-            "id": to,
-            "messageId": text_field(fields, 4),
-            "text": text,
-            "time": if when == 0 { now } else { when },
-        }))
+        Ok(sent_payload(to, &text_field(fields, 4), &text, if when == 0 { now } else { when }, related_id))
     }
 
-    fn send_sealed_text(&mut self, to: &str, message: &str) -> Result<Json, LineError> {
+    fn send_sealed_text(&mut self, to: &str, message: &str, related_id: &str) -> Result<Json, LineError> {
         self.require_token()?;
         if !to.starts_with('u') || self.session.mid.is_empty() {
             return Err(line_code("letter sealing is not available for this chat", Some(82), "E2EE_RETRY_ENCRYPT"));
@@ -2075,7 +2114,7 @@ impl Client {
             ));
         };
         let chunks = self.seal_for(to, message, &private, sender_key_id, &receiver_public, receiver_key_id, spec_version)?;
-        self.post_sealed(to, message, &chunks, spec_version)
+        self.post_sealed(to, message, &chunks, spec_version, related_id)
     }
 
     fn seal_for(
@@ -2092,22 +2131,15 @@ impl Client {
             .map_err(|err| line_code(err, Some(82), "E2EE_RETRY_ENCRYPT"))
     }
 
-    fn post_sealed(&mut self, to: &str, message: &str, chunks: &[Vec<u8>], spec_version: i64) -> Result<Json, LineError> {
+    fn post_sealed(&mut self, to: &str, message: &str, chunks: &[Vec<u8>], spec_version: i64, related_id: &str) -> Result<Json, LineError> {
         let seq = self.next_seq();
         let success = self
-            .talk("sendMessage", &sealed_fields(to, chunks, spec_version, seq))?
+            .talk("sendMessage", &sealed_fields(to, chunks, spec_version, seq, related_id))?
             .ok_or_else(|| line("empty send response"))?;
         let fields = as_struct(&success)?;
         let when = message_time(fields);
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
-        Ok(json!({
-            "type": "sent",
-            "ok": true,
-            "id": to,
-            "messageId": text_field(fields, 4),
-            "text": message,
-            "time": if when == 0 { now } else { when },
-        }))
+        Ok(sent_payload(to, &text_field(fields, 4), message, if when == 0 { now } else { when }, related_id))
     }
 
     // LINE's encryption overview: the registered key id is the latest public key, and older ones are rejected as an invalid sender key.
@@ -2165,6 +2197,9 @@ impl Client {
     }
 
     fn visible_text(&mut self, message: &BTreeMap<i16, Value>, cards: &HashMap<String, (String, String)>) -> (String, bool) {
+        if message_unsent(message) {
+            return ("Unsent a message.".into(), false);
+        }
         let me = self.session.mid.clone();
         if let Some(opened) = self.open_sealed_text(message) {
             return (opened, false);
@@ -2181,6 +2216,10 @@ impl Client {
     fn visible_preview(&mut self, message: &BTreeMap<i16, Value>, sender_name: &str) -> (String, bool) {
         if is_chat_update(message) {
             return (String::new(), false);
+        }
+        if message_unsent(message) {
+            let who = if sender_name.is_empty() { "Someone" } else { sender_name };
+            return (format!("{who} unsent a message."), false);
         }
         if let Some(opened) = self.open_sealed_text(message) {
             return (opened, false);
@@ -2760,7 +2799,19 @@ fn send_failure(to: &str, err: &LineError) -> Json {
     })
 }
 
-fn send_fields(to: &str, text_body: &str, seq: i32) -> Vec<(i16, Field)> {
+fn sent_payload(to: &str, message_id: &str, text: &str, when: i64, related_id: &str) -> Json {
+    json!({
+        "type": "sent",
+        "ok": true,
+        "id": to,
+        "messageId": message_id,
+        "text": text,
+        "time": when,
+        "replyId": if message_id_ok(related_id) { related_id } else { "" },
+    })
+}
+
+fn send_fields(to: &str, text_body: &str, seq: i32, related_id: &str) -> Vec<(i16, Field)> {
     let mut message = vec![
         (2, bin(to)),
         (5, Field::I64(0)),
@@ -2774,16 +2825,17 @@ fn send_fields(to: &str, text_body: &str, seq: i32) -> Vec<(i16, Field)> {
     if let Some(kind) = mid_type(to) {
         message.push((3, Field::I32(kind)));
     }
+    attach_reply(&mut message, related_id);
     vec![(1, Field::I32(seq)), (2, Field::Struct(message))]
 }
 
-fn sealed_fields(to: &str, chunks: &[Vec<u8>], spec_version: i64, seq: i32) -> Vec<(i16, Field)> {
+fn sealed_fields(to: &str, chunks: &[Vec<u8>], spec_version: i64, seq: i32, related_id: &str) -> Vec<(i16, Field)> {
     let meta = vec![
         (b"e2eeVersion".to_vec(), spec_version.to_string().into_bytes()),
         (b"contentType".to_vec(), b"0".to_vec()),
         (b"e2eeMark".to_vec(), b"2".to_vec()),
     ];
-    let message = vec![
+    let mut message = vec![
         (2, bin(to)),
         (3, Field::I32(0)),
         (5, Field::I64(0)),
@@ -2794,7 +2846,34 @@ fn sealed_fields(to: &str, chunks: &[Vec<u8>], spec_version: i64, seq: i32) -> V
         (19, Field::Byte(0)),
         (20, Field::List(thrift::BINARY, chunks.iter().cloned().map(Field::Bin).collect())),
     ];
+    attach_reply(&mut message, related_id);
     vec![(1, Field::I32(seq)), (2, Field::Struct(message))]
+}
+
+/// A reply points at the original message with relation type REPLY and service TALK.
+fn string_list(items: &[&str]) -> Field {
+    Field::List(thrift::BINARY, items.iter().filter(|item| !item.is_empty()).map(|item| bin(*item)).collect())
+}
+
+fn report_fields(chat: &str, sender: &str, message_id: &str, reason: i32, text: &str) -> Vec<(i16, Field)> {
+    let clipped: String = text.chars().take(1000).collect();
+    vec![
+        (2, bin(chat)),
+        (3, string_list(&[])),
+        (4, Field::List(thrift::I32, vec![Field::I32(reason)])),
+        (5, string_list(&[sender])),
+        (6, string_list(&[message_id])),
+        (7, string_list(&[clipped.as_str()])),
+    ]
+}
+
+fn attach_reply(message: &mut Vec<(i16, Field)>, related_id: &str) {
+    if !message_id_ok(related_id) {
+        return;
+    }
+    message.push((21, bin(related_id)));
+    message.push((22, Field::I32(3)));
+    message.push((24, Field::I32(1)));
 }
 
 fn mid_type(mid: &str) -> Option<i32> {
@@ -3570,6 +3649,66 @@ fn sealed_label(text: &str) -> bool {
     text.is_empty() || text.to_ascii_lowercase().starts_with("letter-sealed")
 }
 
+fn message_unsent(message: &BTreeMap<i16, Value>) -> bool {
+    meta_value(message, "UNSENT").eq_ignore_ascii_case("true")
+}
+
+fn unsent_line(mine: bool, name: &str) -> String {
+    if mine {
+        "You unsent a message.".into()
+    } else if name.is_empty() {
+        "Unsent a message.".into()
+    } else {
+        format!("{name} unsent a message.")
+    }
+}
+
+fn finish_body(message: &BTreeMap<i16, Value>, mine: bool, name: &str, text: String, kind: &str, media_id: String) -> (String, String, String) {
+    if message_unsent(message) {
+        return (unsent_line(mine, name), "unsent".into(), String::new());
+    }
+    (text, kind.to_string(), media_id)
+}
+
+fn reply_target(message: &BTreeMap<i16, Value>) -> String {
+    if int_field(message, 22) != Some(3) {
+        return String::new();
+    }
+    let id = text_field(message, 21);
+    if message_id_ok(&id) { id } else { String::new() }
+}
+
+/// Operation 64/65 carries the chat mid and the recalled message id, in either
+/// param order, and sometimes on the nested message.
+fn destroy_target(op: &BTreeMap<i16, Value>, me: &str) -> Option<(String, String)> {
+    let mut chat = String::new();
+    let mut message_id = String::new();
+    if let Some(Value::Struct(message)) = op.get(&20) {
+        let id = text_field(message, 4);
+        if message_id_ok(&id) {
+            message_id = id;
+        }
+        let target = chat_target(message, me);
+        if target.starts_with(['u', 'c', 'r', 's']) && looks_like_mid(&target) {
+            chat = target;
+        }
+    }
+    for field in [10_i16, 11, 12] {
+        let value = text_field(op, field);
+        if message_id.is_empty() && message_id_ok(&value) {
+            message_id = value;
+            continue;
+        }
+        if chat.is_empty() && value.starts_with(['u', 'c', 'r', 's']) && looks_like_mid(&value) {
+            chat = value;
+        }
+    }
+    if message_id.is_empty() {
+        return None;
+    }
+    Some((chat, message_id))
+}
+
 fn message_preview(message: &BTreeMap<i16, Value>) -> (String, bool) {
     let mut keys = Vec::new();
     if let Some(Value::Map(pairs)) = message.get(&18) {
@@ -3583,8 +3722,8 @@ fn message_preview(message: &BTreeMap<i16, Value>) -> (String, bool) {
     let sealed = keys.iter().any(|key| key == "e2eeVersion") || chunks;
     let body = text_field(message, 10).trim().to_string();
     let kind = content_kind(int_field(message, 15));
-    if keys.iter().any(|key| key == "UNSENT") && meta_value(message, "UNSENT").eq_ignore_ascii_case("true") {
-        return ("Unsent message".into(), false);
+    if message_unsent(message) {
+        return ("Unsent a message.".into(), false);
     }
     if kind == "chat update" {
         return (body, false);
@@ -3800,6 +3939,49 @@ mod tests {
             ]))]),
         );
         assert_eq!(message_reaction(&message, "ume"), Some(("😡".into(), String::new(), false)));
+    }
+
+    #[test]
+    fn reply_and_unsend_match_the_desktop_calls() {
+        let frame = thrift::write_call("sendMessage", &send_fields("uabc", "Xo", 4, "1500"));
+        let parsed = thrift::read_message(&frame).unwrap();
+        let Value::Struct(message) = parsed.fields.get(&2).unwrap() else { panic!("message") };
+        assert_eq!(text_field(message, 10), "Xo");
+        assert_eq!(text_field(message, 21), "1500");
+        assert_eq!(int_field(message, 22), Some(3));
+        assert_eq!(int_field(message, 24), Some(1));
+        let plain = thrift::write_call("sendMessage", &send_fields("uabc", "Xo", 4, ""));
+        let plain = thrift::read_message(&plain).unwrap();
+        let Value::Struct(message) = plain.fields.get(&2).unwrap() else { panic!("message") };
+        assert!(message.get(&21).is_none());
+        let unsend = thrift::write_call("unsendMessage", &[(1, Field::I32(9)), (2, bin("1500"))]);
+        let unsend = thrift::read_message(&unsend).unwrap();
+        assert_eq!(unsend.name, "unsendMessage");
+        assert_eq!(unsend.fields.get(&1), Some(&Value::Int(9)));
+        assert_eq!(unsend.fields.get(&2), Some(&Value::Bytes(b"1500".to_vec())));
+        let mut op = BTreeMap::new();
+        op.insert(10, Value::Bytes(b"uabcdefghij".to_vec()));
+        op.insert(11, Value::Bytes(b"1500".to_vec()));
+        assert_eq!(destroy_target(&op, "ume"), Some(("uabcdefghij".into(), "1500".into())));
+        let mut swapped = BTreeMap::new();
+        swapped.insert(10, Value::Bytes(b"1500".to_vec()));
+        swapped.insert(11, Value::Bytes(b"cgroupgroup".to_vec()));
+        assert_eq!(destroy_target(&swapped, "ume"), Some(("cgroupgroup".into(), "1500".into())));
+        let report = thrift::write_call("reportSpam", &report_fields("uabcdefghij", "uotherothero", "1500", 1, "Hi"));
+        let report = thrift::read_message(&report).unwrap();
+        assert_eq!(report.name, "reportSpam");
+        assert_eq!(report.fields.get(&2), Some(&Value::Bytes(b"uabcdefghij".to_vec())));
+        assert_eq!(report.fields.get(&4), Some(&Value::List(vec![Value::Int(1)])));
+        assert_eq!(report.fields.get(&5), Some(&Value::List(vec![Value::Bytes(b"uotherothero".to_vec())])));
+        assert_eq!(report.fields.get(&6), Some(&Value::List(vec![Value::Bytes(b"1500".to_vec())])));
+        assert_eq!(report.fields.get(&7), Some(&Value::List(vec![Value::Bytes(b"Hi".to_vec())])));
+        assert_eq!(unsent_line(true, ""), "You unsent a message.");
+        assert_eq!(unsent_line(false, "Ada"), "Ada unsent a message.");
+        assert_eq!(reply_target(&BTreeMap::from([
+            (21, Value::Bytes(b"1500".to_vec())),
+            (22, Value::Int(3)),
+        ])), "1500");
+        assert!(reply_target(&BTreeMap::from([(21, Value::Bytes(b"1500".to_vec())), (22, Value::Int(0))])).is_empty());
     }
 
     #[test]

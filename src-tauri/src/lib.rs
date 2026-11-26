@@ -347,20 +347,66 @@ async fn send_reaction(id: String, message_id: String, emoji: String) -> Result<
 }
 
 #[tauri::command]
-async fn send_message(app: AppHandle, id: String, text: String) -> Result<(), String> {
+async fn send_message(app: AppHandle, id: String, text: String, related_id: Option<String>) -> Result<(), String> {
     chat_id(&id)?;
     let body = text.trim().to_string();
     if body.is_empty() || body.len() > 5000 {
         return Err("enter a message first".to_string());
     }
+    let related = related_id.unwrap_or_default();
+    if !related.is_empty() && (related.len() > 24 || !related.chars().all(|ch| ch.is_ascii_digit())) {
+        return Err("that message cannot be replied to".to_string());
+    }
     let chat = id.clone();
-    let value = tauri::async_runtime::spawn_blocking(move || line::Client::new().send_for_window(&id, &body))
+    let value = tauri::async_runtime::spawn_blocking(move || line::Client::new().send_for_window(&id, &body, &related))
         .await
         .map_err(|err| format!("could not send: {err}"))?;
     let _ = store::save_outgoing(&chat, &value);
     let payload = serde_json::to_vec(&value).map_err(|err| format!("could not read the send result: {err}"))?;
     deliver(&app, "__lineSentBuf", "__lineSent", &payload);
     Ok(())
+}
+
+#[tauri::command]
+async fn unsend_message(id: String, message_id: String) -> Result<(), String> {
+    chat_id(&id)?;
+    if message_id.len() > 24 || message_id.is_empty() || !message_id.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err("that message cannot be unsent".to_string());
+    }
+    let checked = message_id.clone();
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().unsend_message(&checked).map_err(|err| unsend_reason(&err)))
+        .await
+        .map_err(|err| format!("could not unsend: {err}"))??;
+    let _ = store::mark_unsent(&message_id);
+    Ok(())
+}
+
+#[tauri::command]
+async fn report_message(id: String, message_id: String, sender: String, reason: i32, text: String) -> Result<(), String> {
+    chat_id(&id)?;
+    if message_id.len() > 24 || message_id.is_empty() || !message_id.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err("that message cannot be reported".to_string());
+    }
+    if !matches!(reason, 0..=3) || sender.len() > 64 || !sender.starts_with('u') || !sender.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return Err("that message cannot be reported".to_string());
+    }
+    let body = text.chars().take(1000).collect::<String>();
+    tauri::async_runtime::spawn_blocking(move || {
+        line::Client::new().report_message(&id, &sender, &message_id, reason, &body).map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| format!("could not send the report: {err}"))?
+}
+
+fn unsend_reason(err: &line::LineError) -> String {
+    let reason = err.reason.to_ascii_uppercase();
+    if err.code == Some(71) || reason.contains("NOT_DESTRUCTIBLE") {
+        return "You can't unsend this message as too much time has passed.".into();
+    }
+    if reason.contains("NOT_FOUND") {
+        return "That message is already gone.".into();
+    }
+    if err.reason.is_empty() { err.message.clone() } else { err.reason.clone() }
 }
 
 #[tauri::command]
@@ -639,7 +685,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(LoginState { cancel: Mutex::new(None), inbox: Mutex::new(None) })
         .manage(AppPrefs { minimize_to_tray: AtomicBool::new(minimize_to_tray), tray_badge: AtomicU32::new(0) })
-        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, send_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_tray_badge, open_profile, block_profile, add_profile, open_fraud_help, rename_profile, favorite_profile, open_friend_chat])
+        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, send_message, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_tray_badge, open_profile, block_profile, add_profile, open_fraud_help, rename_profile, favorite_profile, open_friend_chat])
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;

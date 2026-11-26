@@ -46,6 +46,10 @@ type HistoryMessage = {
   reaction?: string;
   reactionImage?: string;
   reactionMine?: boolean;
+  replyId?: string;
+  replyText?: string;
+  replyName?: string;
+  replyPicture?: string;
 };
 
 type MediaSlot = { id: string; seq: number; animated?: boolean };
@@ -62,6 +66,7 @@ type SendResult = {
   messageId?: string;
   code?: number | null;
   error?: string;
+  replyId?: string;
 };
 
 type ReadMark = { end: string };
@@ -110,6 +115,12 @@ const lightboxImg = document.querySelector<HTMLImageElement>("#lightbox-img")!;
 const lightboxVideo = document.querySelector<HTMLVideoElement>("#lightbox-video")!;
 const lightboxPrev = document.querySelector<HTMLButtonElement>("#lightbox-prev")!;
 const lightboxNext = document.querySelector<HTMLButtonElement>("#lightbox-next")!;
+const msgMenu = document.querySelector<HTMLElement>("#msg-menu")!;
+const replyBar = document.querySelector<HTMLElement>("#reply-bar")!;
+const replyAvatar = document.querySelector<HTMLElement>("#reply-avatar")!;
+const replyLabel = document.querySelector<HTMLElement>("#reply-label")!;
+const replyText = document.querySelector<HTMLElement>("#reply-text")!;
+const sheetList = document.querySelector<HTMLElement>("#sheet-list")!;
 
 let shownUrl = "";
 let myName = "";
@@ -136,6 +147,14 @@ const mediaJobs = new Map<string, Promise<void>>();
 let gallery: { ids: string[]; index: number } | null = null;
 let trayBadge = -1;
 
+type ReplyDraft = { id: string; text: string; name: string; picture: string };
+let replyDraft: ReplyDraft | null = null;
+let outgoingReply: ReplyDraft | null = null;
+let msgMenuRow: HTMLElement | null = null;
+let shareText = "";
+let sharingTo = "";
+let menuOpenedAt = 0;
+
 type PollUpdate = {
   id: string;
   lastMessage: string;
@@ -156,6 +175,7 @@ type PollUpdate = {
   kind?: string;
   members?: number | null;
   reaction?: { messageId: string; emoji?: string; image?: string; mine?: boolean };
+  unsentId?: string;
 };
 
 type PollPayload = {
@@ -553,6 +573,8 @@ function showThread(chat: ChatRow | undefined): void {
     userMoved = false;
     closeGallery();
     closeReactionPicker();
+    closeMsgMenu();
+    clearReply();
     sendError.hidden = true;
     const token = ++historyToken;
     threadBody.replaceChildren();
@@ -574,7 +596,7 @@ function showThread(chat: ChatRow | undefined): void {
 
 function historyStamp(payload: HistoryPayload): string {
   return payload.messages
-    .map((message) => [message.id || "", message.sender || "", message.text, message.status || "", String(message.readers || 0), String(message.time)].join("\u001f"))
+    .map((message) => [message.id || "", message.sender || "", message.text, message.status || "", message.kind || "", message.replyId || "", String(message.readers || 0), String(message.time)].join("\u001f"))
     .join("\u001e");
 }
 
@@ -597,6 +619,7 @@ function renderHistory(payload: HistoryPayload): void {
   paintedHistory = stamp;
   paintedIds = payload.messages.map((message) => message.id || "").join("\u001f");
   closeReactionPicker();
+  closeMsgMenu();
   threadBody.replaceChildren();
   if (payload.messages.length === 0) {
     const note = document.createElement("p");
@@ -608,7 +631,7 @@ function renderHistory(payload: HistoryPayload): void {
     markOpenRead(payload.id);
     return;
   }
-  groupMessages(payload.messages).forEach((message) => threadBody.append(messageBubble(message)));
+  groupMessages(hydrateReplies(payload.messages)).forEach((message) => threadBody.append(messageBubble(message)));
   settleThread(payload.messages, previousIds, firstPaint, savedTop);
   document.body.dataset.history = String(payload.messages.length);
   markOpenRead(payload.id);
@@ -1089,8 +1112,377 @@ function reactionControls(row: HTMLElement, bubble: HTMLElement, meta: HTMLEleme
   return toggle;
 }
 
+function quoteFromHistory(message: HistoryMessage): string {
+  if (message.kind === "unsent" || message.kind === "chat update") {
+    return "Message";
+  }
+  const text = message.text.trim();
+  if (text && !mediaLabel(text)) {
+    return text;
+  }
+  if (message.sticker) {
+    return "Sticker";
+  }
+  if (message.kind === "video") {
+    return "Video";
+  }
+  if (message.kind === "image") {
+    return "Photo";
+  }
+  return text || "Message";
+}
+
+function hydrateReplies(messages: HistoryMessage[]): HistoryMessage[] {
+  const byId = new Map<string, HistoryMessage>();
+  for (const message of messages) {
+    if (message.id) {
+      byId.set(message.id, message);
+    }
+  }
+  return messages.map((message) => {
+    if (!message.replyId) {
+      return message;
+    }
+    const source = byId.get(message.replyId);
+    return {
+      ...message,
+      replyText: message.replyText || (source ? quoteFromHistory(source) : "Message"),
+      replyName: message.replyName || (source ? (source.mine ? (myName || "You") : (source.name || "Message")) : ""),
+      replyPicture: message.replyPicture || (source ? quotedPicture(source) : ""),
+    };
+  });
+}
+
+function appendReplyQuote(bubble: HTMLElement, message: BubbleMessage): void {
+  if (!message.replyId || message.kind === "unsent" || message.kind === "chat update") {
+    return;
+  }
+  const quote = document.createElement("div");
+  quote.className = "reply-quote";
+  const who = document.createElement("div");
+  who.className = "reply-who";
+  who.textContent = message.replyName || "Message";
+  const body = document.createElement("div");
+  body.className = "reply-body";
+  body.textContent = message.replyText || "Message";
+  const copy = document.createElement("div");
+  copy.append(who, body);
+  const face = document.createElement("span");
+  face.className = "reply-avatar";
+  paintSmallAvatar(face, message.replyPicture || "", message.replyName || "");
+  quote.append(face, copy);
+  const name = bubble.querySelector(".who");
+  if (name) {
+    name.after(quote);
+  } else {
+    bubble.prepend(quote);
+  }
+}
+
+function quoteText(row: HTMLElement): string {
+  const text = row.querySelector(".msg-text")?.textContent?.trim() || "";
+  if (text && !mediaLabel(text)) {
+    return text;
+  }
+  if (row.querySelector(".sticker")) {
+    return "Sticker";
+  }
+  if (row.querySelector("video")) {
+    return "Video";
+  }
+  if (row.querySelector(".media-grid")) {
+    return "Photo";
+  }
+  return text || "Message";
+}
+
+function copyableText(row: HTMLElement): string {
+  const text = row.querySelector(".msg-text")?.textContent?.trim() || "";
+  if (!text || mediaLabel(text)) {
+    return "";
+  }
+  return text;
+}
+
+function senderLabel(row: HTMLElement): string {
+  if (row.classList.contains("mine")) {
+    return myName || "You";
+  }
+  return row.querySelector(".who")?.textContent?.trim() || rows.find((item) => item.id === openId)?.name || "Message";
+}
+
+function unsentLine(mine: boolean, name: string): string {
+  if (mine) {
+    return "You unsent a message.";
+  }
+  const who = name.trim();
+  return who ? `${who} unsent a message.` : "Unsent a message.";
+}
+
+function quotedPicture(source: HistoryMessage): string {
+  if (source.mine) {
+    return myPicture;
+  }
+  if (source.picture) {
+    return source.picture;
+  }
+  const chat = rows.find((row) => row.id === openId);
+  if (!chat || chat.kind === "group" || chat.kind === "room") {
+    return "";
+  }
+  return chat.picture;
+}
+
+function rowPicture(row: HTMLElement): string {
+  if (row.classList.contains("mine")) {
+    return myPicture;
+  }
+  return row.querySelector<HTMLImageElement>("button.msg-avatar img")?.currentSrc
+    || row.querySelector<HTMLImageElement>("button.msg-avatar img")?.src
+    || "";
+}
+
+function paintSmallAvatar(host: HTMLElement, picture: string, name: string): void {
+  host.replaceChildren();
+  if (!picture) {
+    host.append(fallback(name));
+    return;
+  }
+  const photo = document.createElement("img");
+  photo.alt = "";
+  photo.src = picture;
+  photo.addEventListener("error", () => {
+    host.replaceChildren(fallback(name));
+  });
+  host.append(photo);
+}
+
+function paintReplyBar(): void {
+  if (!replyDraft) {
+    replyBar.hidden = true;
+    replyAvatar.replaceChildren();
+    replyLabel.textContent = "";
+    replyText.textContent = "";
+    return;
+  }
+  paintSmallAvatar(replyAvatar, replyDraft.picture, replyDraft.name);
+  replyLabel.textContent = replyDraft.name;
+  replyText.textContent = replyDraft.text;
+  replyBar.hidden = false;
+  composerInput.focus();
+}
+
+function clearReply(): void {
+  replyDraft = null;
+  paintReplyBar();
+}
+
+function closeMsgMenu(): void {
+  msgMenu.hidden = true;
+  msgMenuRow = null;
+}
+
+function openMsgMenu(event: MouseEvent, row: HTMLElement): void {
+  event.preventDefault();
+  event.stopPropagation();
+  closeMenu();
+  closeReactionPicker();
+  menuOpenedAt = Date.now();
+  msgMenuRow = row;
+  const mine = row.classList.contains("mine");
+  msgMenu.querySelectorAll<HTMLElement>("[data-for]").forEach((item) => {
+    item.hidden = item.dataset.for === "mine" ? !mine : mine;
+  });
+  msgMenu.hidden = false;
+  const width = msgMenu.offsetWidth;
+  const height = msgMenu.offsetHeight;
+  let left = event.clientX;
+  let top = event.clientY;
+  if (left + width > window.innerWidth - 8) {
+    left = window.innerWidth - width - 8;
+  }
+  if (top + height > window.innerHeight - 8) {
+    top = Math.max(8, event.clientY - height);
+  }
+  msgMenu.style.left = `${Math.max(8, left)}px`;
+  msgMenu.style.top = `${Math.max(8, top)}px`;
+}
+
+function paintUnsent(row: HTMLElement, mine: boolean, name: string): void {
+  const previous = copyableText(row) || quoteText(row);
+  const sentence = unsentLine(mine, name);
+  const note = document.createElement("div");
+  note.className = "chat-update";
+  note.dataset.unsent = "1";
+  if (row.dataset.id) {
+    note.dataset.id = row.dataset.id;
+  }
+  note.textContent = sentence;
+  const chatId = openId;
+  row.replaceWith(note);
+  const chat = rows.find((item) => item.id === chatId);
+  if (chat && previous && chat.lastMessage === previous) {
+    chat.lastMessage = sentence;
+    chat.sticker = "";
+    chat.stickerFallback = "";
+    renderList();
+  }
+  if (replyDraft && note.dataset.id && replyDraft.id === note.dataset.id) {
+    clearReply();
+  }
+}
+
+function messageRow(messageId: string): HTMLElement | null {
+  const rowsInThread = threadBody.querySelectorAll<HTMLElement>(".msg[data-id]");
+  for (const row of rowsInThread) {
+    if (row.dataset.id === messageId) {
+      return row;
+    }
+    const ids = (row.dataset.ids || "").split(",");
+    if (ids.length === 1 && ids[0] === messageId) {
+      return row;
+    }
+  }
+  return null;
+}
+
+async function copyMessage(row: HTMLElement): Promise<void> {
+  const text = copyableText(row);
+  if (!text) {
+    sendError.hidden = false;
+    sendError.textContent = "Nothing to copy";
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    document.body.append(area);
+    area.select();
+    const copied = document.execCommand("copy");
+    area.remove();
+    if (!copied) {
+      sendError.hidden = false;
+      sendError.textContent = "Could not copy that message";
+      return;
+    }
+  }
+  sendError.hidden = true;
+}
+
+const REPORT_REASONS: { id: number; label: string }[] = [
+  { id: 1, label: "Spam" },
+  { id: 2, label: "Sexual harassment" },
+  { id: 3, label: "Harassment" },
+  { id: 0, label: "Other" },
+];
+
+function messageSender(row: HTMLElement): string {
+  const stored = row.dataset.sender || "";
+  if (stored.startsWith("u")) {
+    return stored;
+  }
+  return openId.startsWith("u") ? openId : "";
+}
+
+function showReport(row: HTMLElement): void {
+  const messageId = row.dataset.id || "";
+  const sender = messageSender(row);
+  const text = copyableText(row);
+  if (!openId || !messageId || !sender) {
+    sendError.hidden = false;
+    sendError.textContent = "That message cannot be reported";
+    return;
+  }
+  const chatId = openId;
+  sheetTitle.textContent = "Report";
+  sheetBody.hidden = false;
+  sheetBody.textContent = "Why are you reporting this message?";
+  sheetSettings.hidden = true;
+  sheetList.hidden = false;
+  sheetList.replaceChildren();
+  for (const reason of REPORT_REASONS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = reason.label;
+    button.addEventListener("click", () => {
+      button.disabled = true;
+      void invoke("report_message", { id: chatId, messageId, sender, reason: reason.id, text }).then(() => {
+        sheetList.hidden = true;
+        sheetBody.hidden = false;
+        sheetBody.textContent = "Report sent.";
+      }).catch((error: unknown) => {
+        button.disabled = false;
+        sheetBody.hidden = false;
+        sheetBody.textContent = error instanceof Error ? error.message : String(error);
+      });
+    });
+    sheetList.append(button);
+  }
+  sheet.hidden = false;
+}
+
+function showShare(text: string): void {
+  shareText = text;
+  sheetTitle.textContent = "Share";
+  sheetBody.hidden = true;
+  sheetSettings.hidden = true;
+  sheetList.hidden = false;
+  sheetList.replaceChildren();
+  const choices = rows.filter((row) => row.id && row.name);
+  if (choices.length === 0) {
+    sheetList.hidden = true;
+    sheetBody.hidden = false;
+    sheetBody.textContent = "No chats to share to.";
+  } else {
+    for (const chat of choices) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = chat.name;
+      button.addEventListener("click", () => {
+        sheet.hidden = true;
+        const body = shareText;
+        sharingTo = chat.id;
+        void invoke("send_message", { id: chat.id, text: body }).catch((error: unknown) => {
+          sharingTo = "";
+          showSheet("Share", error instanceof Error ? error.message : String(error));
+        });
+      });
+      sheetList.append(button);
+    }
+  }
+  sheet.hidden = false;
+}
+
+async function unsendRow(row: HTMLElement): Promise<void> {
+  const ids = (row.dataset.ids || row.dataset.id || "").split(",").map((id) => id.trim()).filter((id) => id);
+  if (ids.length === 0 || !openId) {
+    sendError.hidden = false;
+    sendError.textContent = "That message cannot be unsent";
+    return;
+  }
+  const chatId = openId;
+  const mine = row.classList.contains("mine");
+  const name = senderLabel(row);
+  try {
+    for (const messageId of ids) {
+      await invoke("unsend_message", { id: chatId, messageId });
+    }
+  } catch (error) {
+    sendError.hidden = false;
+    sendError.textContent = error instanceof Error ? error.message : String(error);
+    return;
+  }
+  sendError.hidden = true;
+  if (row.isConnected) {
+    paintUnsent(row, mine, name);
+  }
+}
+
 function messageBubble(message: BubbleMessage): HTMLElement {
-  if (message.kind === "chat update") {
+  if (message.kind === "chat update" || message.kind === "unsent") {
     const note = document.createElement("div");
     note.className = "chat-update";
     note.textContent = message.text;
@@ -1133,11 +1525,15 @@ function messageBubble(message: BubbleMessage): HTMLElement {
   } else {
     appendMessageText(bubble, message.text);
   }
+  appendReplyQuote(bubble, message);
   const row = document.createElement("div");
   row.className = message.mine ? "msg mine" : "msg";
   const ids = [message.id || "", ...(message.media?.map((slot) => slot.id) || [])].filter((id) => id);
   if (message.id) {
     row.dataset.id = message.id;
+  }
+  if (message.sender) {
+    row.dataset.sender = message.sender;
   }
   if (ids.length > 0) {
     row.dataset.ids = ids.join(",");
@@ -1715,6 +2111,54 @@ document.querySelector<HTMLButtonElement>("#rail-friends")!.addEventListener("cl
   document.querySelector<HTMLButtonElement>('#tabs button[data-filter="friend"]')!.click();
 });
 
+threadBody.addEventListener("contextmenu", (event) => {
+  const row = (event.target as HTMLElement).closest<HTMLElement>(".msg");
+  if (!row?.dataset.id) {
+    return;
+  }
+  openMsgMenu(event, row);
+});
+
+threadBody.addEventListener("scroll", () => {
+  closeMsgMenu();
+});
+
+msgMenu.addEventListener("click", (event) => {
+  event.stopPropagation();
+  const action = (event.target as HTMLElement).closest("button")?.dataset.action;
+  const row = msgMenuRow;
+  closeMsgMenu();
+  if (!action || !row?.isConnected) {
+    return;
+  }
+  if (action === "reply") {
+    replyDraft = { id: row.dataset.id || "", text: quoteText(row), name: senderLabel(row), picture: rowPicture(row) };
+    if (!replyDraft.id) {
+      replyDraft = null;
+      return;
+    }
+    paintReplyBar();
+  } else if (action === "copy") {
+    void copyMessage(row);
+  } else if (action === "share") {
+    const text = copyableText(row);
+    if (!text) {
+      sendError.hidden = false;
+      sendError.textContent = "Nothing to share";
+      return;
+    }
+    showShare(text);
+  } else if (action === "unsend") {
+    void unsendRow(row);
+  } else if (action === "report") {
+    showReport(row);
+  }
+});
+
+document.querySelector<HTMLButtonElement>("#reply-cancel")!.addEventListener("click", () => {
+  clearReply();
+});
+
 await listen<LoginEvent>("login-event", (event) => {
   void onEvent(event.payload);
 });
@@ -1737,12 +2181,23 @@ await listen<LoginEvent>("login-event", (event) => {
 
 function onSent(payload: SendResult): void {
   composerInput.disabled = !openId;
+  const reply = outgoingReply;
+  outgoingReply = null;
+  const sharing = sharingTo !== "" && payload.id === sharingTo;
+  sharingTo = "";
   if (!payload.ok) {
+    if (reply && !replyDraft) {
+      replyDraft = reply;
+      paintReplyBar();
+    }
+    const note = payload.code === 82
+      ? "Letter sealing blocked this send (E2EE_RETRY_ENCRYPT)."
+      : (payload.error || "Could not send");
     if (payload.id === openId) {
       sendError.hidden = false;
-      sendError.textContent = payload.code === 82
-        ? "Letter sealing blocked this send (E2EE_RETRY_ENCRYPT)."
-        : (payload.error || "Could not send");
+      sendError.textContent = note;
+    } else if (sharing) {
+      showSheet("Share", note);
     }
     return;
   }
@@ -1764,6 +2219,7 @@ function onSent(payload: SendResult): void {
     composerInput.value = "";
     const note = threadBody.querySelector(".thread-note");
     note?.remove();
+    const quoted = reply && payload.replyId === reply.id ? reply : null;
     threadBody.append(messageBubble({
       id: payload.messageId,
       mine: true,
@@ -1772,6 +2228,10 @@ function onSent(payload: SendResult): void {
       sealed: false,
       status: "sent",
       time: payload.time || Date.now(),
+      replyId: quoted?.id || payload.replyId || "",
+      replyText: quoted?.text || "",
+      replyName: quoted?.name || "",
+      replyPicture: quoted?.picture || "",
     }));
     unreadFocus = "";
     scrollThreadToEnd();
@@ -1802,9 +2262,18 @@ document.querySelector<HTMLFormElement>("#composer")!.addEventListener("submit",
     return;
   }
   const id = openId;
+  const reply = replyDraft;
+  outgoingReply = reply;
+  replyDraft = null;
+  paintReplyBar();
   composerInput.disabled = true;
   sendError.hidden = true;
-  void invoke("send_message", { id, text }).catch((error: unknown) => {
+  void invoke("send_message", { id, text, relatedId: reply?.id || undefined }).catch((error: unknown) => {
+    outgoingReply = null;
+    if (reply && !replyDraft) {
+      replyDraft = reply;
+      paintReplyBar();
+    }
     composerInput.disabled = !openId;
     if (id !== openId) {
       return;
@@ -1824,6 +2293,7 @@ function showSheet(title: string, body: string): void {
   sheetBody.textContent = body;
   sheetBody.hidden = false;
   sheetSettings.hidden = true;
+  sheetList.hidden = true;
   sheet.hidden = false;
 }
 
@@ -1831,6 +2301,7 @@ async function showSettings(): Promise<void> {
   sheetTitle.textContent = "Settings";
   sheetBody.hidden = true;
   sheetSettings.hidden = false;
+  sheetList.hidden = true;
   sheet.hidden = false;
   minimizeToTray.disabled = true;
   try {
@@ -1868,9 +2339,16 @@ railMenu.addEventListener("click", (event) => {
   }
 });
 
-document.addEventListener("click", () => {
+document.addEventListener("click", (event) => {
   closeMenu();
   closeReactionPicker();
+  if (Date.now() - menuOpenedAt < 400) {
+    return;
+  }
+  if (msgMenu.contains(event.target as Node)) {
+    return;
+  }
+  closeMsgMenu();
 });
 
 document.querySelector<HTMLButtonElement>("#sheet-close")!.addEventListener("click", () => {
@@ -1894,8 +2372,16 @@ lightbox.addEventListener("click", (event) => {
   }
 });
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !msgMenu.hidden) {
+    closeMsgMenu();
+    return;
+  }
   if (event.key === "Escape" && reactionPicker && lightbox.hidden) {
     closeReactionPicker();
+    return;
+  }
+  if (event.key === "Escape" && !sheet.hidden && lightbox.hidden) {
+    sheet.hidden = true;
     return;
   }
   if (lightbox.hidden) {
@@ -1915,8 +2401,23 @@ function appendLiveMessage(update: PollUpdate, followTail: boolean, batch: { foc
   if (!message?.text || update.id !== openId) {
     return;
   }
+  if (message.kind === "unsent") {
+    if (message.id) {
+      const row = messageRow(message.id);
+      if (row) {
+        paintUnsent(row, message.mine, message.name || "");
+      }
+    }
+    return;
+  }
   if (message.id && threadBody.querySelector(`.msg[data-id="${CSS.escape(message.id)}"]`)) {
     return;
+  }
+  if (message.replyId && !message.replyText) {
+    const source = messageRow(message.replyId);
+    message.replyText = source ? quoteText(source) : "Message";
+    message.replyName = source ? senderLabel(source) : "";
+    message.replyPicture = source ? rowPicture(source) : "";
   }
   threadBody.querySelector(".thread-note")?.remove();
   threadBody.append(messageBubble(message));
@@ -2046,6 +2547,13 @@ function applyPoll(payload: PollPayload): void {
   const followTail = threadNearBottom();
   const batch = { focus: "", end: false };
   for (const update of payload.updates || []) {
+    if (update.unsentId) {
+      const row = messageRow(update.unsentId);
+      if (row && (!update.id || update.id === openId)) {
+        paintUnsent(row, row.classList.contains("mine"), senderLabel(row));
+      }
+      continue;
+    }
     if (update.reaction?.messageId) {
       applyLiveReaction(update.id, update.reaction);
       continue;

@@ -70,6 +70,14 @@
         <div id="thread-body"></div>
         <form id="composer">
           <p id="send-error" class="send-error" hidden></p>
+          <div id="reply-bar" hidden>
+            <span id="reply-avatar" aria-hidden="true"></span>
+            <div>
+              <strong id="reply-label"></strong>
+              <span id="reply-text"></span>
+            </div>
+            <button id="reply-cancel" type="button" aria-label="Cancel reply">×</button>
+          </div>
           <input id="composer-input" type="text" placeholder="Enter a message" disabled />
         </form>
       </section>
@@ -85,6 +93,7 @@
       <div id="sheet-card">
         <h2 id="sheet-title"></h2>
         <p id="sheet-body"></p>
+        <div id="sheet-list" hidden></div>
         <form id="sheet-settings" hidden>
           <label class="setting">
             <input id="minimize-to-tray" type="checkbox" checked />
@@ -96,6 +105,14 @@
         </form>
         <button id="sheet-close" type="button">Close</button>
       </div>
+    </div>
+    <div id="msg-menu" role="menu" hidden>
+      <button type="button" data-action="reply" role="menuitem">Reply</button>
+      <button type="button" data-action="copy" role="menuitem">Copy</button>
+      <button type="button" data-action="share" role="menuitem">Share</button>
+      <hr data-for="report" hidden />
+      <button type="button" data-action="report" data-for="report" role="menuitem" hidden>Report</button>
+      <button type="button" data-action="unsend" data-for="mine" role="menuitem">Unsend</button>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

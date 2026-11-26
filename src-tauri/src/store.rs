@@ -72,6 +72,18 @@ pub fn save_outgoing(chat: &str, sent: &Json) -> Result<(), String> {
     save_outgoing_locked(&db_path(), &account_mid(), chat, sent)
 }
 
+pub fn mark_unsent(message_id: &str) -> Result<(), String> {
+    let _guard = LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    let conn = connect(&db_path())?;
+    if !claim(&conn, &account_mid())? {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction().map_err(|err| err.to_string())?;
+    mark_unsent_tx(&tx, message_id)?;
+    tx.commit().map_err(|err| err.to_string())?;
+    Ok(())
+}
+
 fn account_mid() -> String {
     let Ok(text) = fs::read_to_string(line::config_path()) else {
         return String::new();
@@ -135,11 +147,13 @@ fn connect(path: &Path) -> Result<Connection, String> {
             media_id TEXT NOT NULL,
             animated INTEGER NOT NULL,
             sender TEXT NOT NULL DEFAULT '',
+            reply_id TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (chat_id, msg_id)
          );",
     )
     .map_err(|err| err.to_string())?;
     ensure_sender_column(&conn)?;
+    ensure_reply_column(&conn)?;
     let _ = fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600));
     Ok(conn)
 }
@@ -155,6 +169,21 @@ fn ensure_sender_column(conn: &Connection) -> Result<(), String> {
         return Ok(());
     }
     conn.execute("ALTER TABLE messages ADD COLUMN sender TEXT NOT NULL DEFAULT ''", [])
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn ensure_reply_column(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn.prepare("PRAGMA table_info(messages)").map_err(|err| err.to_string())?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|err| err.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    if names.iter().any(|name| name == "reply_id") {
+        return Ok(());
+    }
+    conn.execute("ALTER TABLE messages ADD COLUMN reply_id TEXT NOT NULL DEFAULT ''", [])
         .map_err(|err| err.to_string())?;
     Ok(())
 }
@@ -316,6 +345,7 @@ fn apply_locked(path: &Path, mid: &str, payload: &Json) -> Result<(), String> {
     }
     let mut rows = read_chats(&conn)?;
     let mut threads = Vec::new();
+    let mut unsents = Vec::new();
     if let Some(unreads) = payload.get("unreads").and_then(|value| value.as_array()) {
         for item in unreads {
             let Some(id) = item.get("id").and_then(|value| value.as_str()) else { continue };
@@ -327,6 +357,10 @@ fn apply_locked(path: &Path, mid: &str, payload: &Json) -> Result<(), String> {
     }
     if let Some(updates) = payload.get("updates").and_then(|value| value.as_array()) {
         for update in updates {
+            if let Some(message_id) = update.get("unsentId").and_then(|value| value.as_str()).filter(|id| !id.is_empty()) {
+                unsents.push(message_id.to_string());
+                continue;
+            }
             let Some(id) = update.get("id").and_then(|value| value.as_str()) else { continue };
             if id.is_empty() {
                 continue;
@@ -410,6 +444,9 @@ fn apply_locked(path: &Path, mid: &str, payload: &Json) -> Result<(), String> {
             prune_messages(&tx, chat)?;
         }
     }
+    for message_id in &unsents {
+        mark_unsent_tx(&tx, message_id)?;
+    }
     set_mid(&tx, mid)?;
     tx.commit().map_err(|err| err.to_string())?;
     Ok(())
@@ -484,7 +521,7 @@ fn history_locked(path: &Path, mid: &str, chat: &str) -> Result<Option<Json>, St
     }
     let mut stmt = conn
         .prepare(
-            "SELECT msg_id, mine, name, picture, body, sealed, time, status, readers, sticker, sticker_fallback, kind, gid, seq, media_id, animated, sender
+            "SELECT msg_id, mine, name, picture, body, sealed, time, status, readers, sticker, sticker_fallback, kind, gid, seq, media_id, animated, sender, reply_id
              FROM messages WHERE chat_id = ?1 ORDER BY time ASC",
         )
         .map_err(|err| err.to_string())?;
@@ -508,6 +545,7 @@ fn history_locked(path: &Path, mid: &str, chat: &str) -> Result<Option<Json>, St
                 "mediaId": row.get::<_, String>(14)?,
                 "animated": row.get::<_, i64>(15)? != 0,
                 "sender": row.get::<_, String>(16)?,
+                "replyId": row.get::<_, String>(17)?,
             }))
         })
         .map_err(|err| err.to_string())?;
@@ -597,6 +635,7 @@ fn save_outgoing_locked(path: &Path, mid: &str, chat: &str, sent: &Json) -> Resu
         "seq": 0,
         "mediaId": "",
         "animated": false,
+        "replyId": sent.get("replyId").and_then(|value| value.as_str()).unwrap_or(""),
     });
     let tx = conn.unchecked_transaction().map_err(|err| err.to_string())?;
     upsert_message(&tx, chat, key, &message)?;
@@ -619,8 +658,8 @@ fn upsert_message(conn: &Connection, chat: &str, key: &str, message: &Json) -> R
     let text = message.get("text").and_then(|value| value.as_str()).unwrap_or("");
     conn.execute(
         "INSERT INTO messages (
-            chat_id, msg_id, mine, name, picture, body, sealed, time, status, readers, sticker, sticker_fallback, kind, gid, seq, media_id, animated, sender
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+            chat_id, msg_id, mine, name, picture, body, sealed, time, status, readers, sticker, sticker_fallback, kind, gid, seq, media_id, animated, sender, reply_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
          ON CONFLICT(chat_id, msg_id) DO UPDATE SET
             mine = excluded.mine,
             sender = CASE WHEN excluded.sender != '' THEN excluded.sender ELSE messages.sender END,
@@ -637,7 +676,8 @@ fn upsert_message(conn: &Connection, chat: &str, key: &str, message: &Json) -> R
             gid = CASE WHEN excluded.gid != '' THEN excluded.gid ELSE messages.gid END,
             seq = CASE WHEN excluded.seq != 0 THEN excluded.seq ELSE messages.seq END,
             media_id = CASE WHEN excluded.media_id != '' THEN excluded.media_id ELSE messages.media_id END,
-            animated = excluded.animated",
+            animated = excluded.animated,
+            reply_id = CASE WHEN excluded.reply_id != '' THEN excluded.reply_id ELSE messages.reply_id END",
         params![
             chat,
             key,
@@ -657,9 +697,55 @@ fn upsert_message(conn: &Connection, chat: &str, key: &str, message: &Json) -> R
             message.get("mediaId").and_then(|value| value.as_str()).unwrap_or(""),
             if message.get("animated").and_then(|value| value.as_bool()).unwrap_or(false) { 1 } else { 0 },
             message.get("sender").and_then(|value| value.as_str()).unwrap_or(""),
+            message.get("replyId").and_then(|value| value.as_str()).unwrap_or(""),
         ],
     )
     .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn mark_unsent_tx(conn: &Connection, message_id: &str) -> Result<(), String> {
+    if message_id.is_empty() || message_id.len() > 24 || !message_id.chars().all(|ch| ch.is_ascii_digit()) {
+        return Ok(());
+    }
+    let found = conn
+        .query_row(
+            "SELECT chat_id, mine, name, body FROM messages WHERE msg_id = ?1",
+            params![message_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)),
+        )
+        .optional()
+        .map_err(|err| err.to_string())?;
+    let Some((chat, mine, name, body)) = found else {
+        return Ok(());
+    };
+    let sentence = if mine != 0 {
+        "You unsent a message.".to_string()
+    } else if name.is_empty() {
+        "Unsent a message.".to_string()
+    } else {
+        format!("{name} unsent a message.")
+    };
+    conn.execute(
+        "UPDATE messages SET body = ?1, kind = 'unsent', sticker = '', sticker_fallback = '', media_id = '', gid = '', seq = 0, animated = 0 WHERE msg_id = ?2",
+        params![sentence, message_id],
+    )
+    .map_err(|err| err.to_string())?;
+    let latest: Option<String> = conn
+        .query_row("SELECT msg_id FROM messages WHERE chat_id = ?1 ORDER BY time DESC LIMIT 1", params![chat], |row| row.get(0))
+        .optional()
+        .map_err(|err| err.to_string())?;
+    let preview: Option<String> = conn
+        .query_row("SELECT last_message FROM chats WHERE id = ?1", params![chat], |row| row.get(0))
+        .optional()
+        .map_err(|err| err.to_string())?;
+    if latest.as_deref() == Some(message_id) || preview.as_deref() == Some(body.as_str()) {
+        conn.execute(
+            "UPDATE chats SET last_message = ?1, sticker = '', sticker_fallback = '', sealed = 0 WHERE id = ?2",
+            params![sentence, chat],
+        )
+        .map_err(|err| err.to_string())?;
+    }
     Ok(())
 }
 
@@ -806,6 +892,25 @@ mod tests {
         let texts: Vec<&str> = loaded["messages"].as_array().unwrap().iter().filter_map(|item| item.get("text").and_then(|value| value.as_str())).collect();
         assert_eq!(texts, ["one", "three"]);
         assert_eq!(loaded["messages"][0]["sender"], "uAda");
+        save_history_locked(&path, "uMe", &json!({
+            "id": "u1",
+            "messages": [
+                {"id": "1", "mine": false, "name": "Ada", "text": "one", "time": 10, "replyId": "9"},
+                {"id": "2", "mine": true, "name": "", "text": "two", "time": 20}
+            ]
+        })).unwrap();
+        apply_locked(&path, "uMe", &json!({
+            "updates": [{"id": "u1", "lastMessage": "two", "time": 20, "sealed": false}]
+        })).unwrap();
+        apply_locked(&path, "uMe", &json!({
+            "updates": [{"id": "u1", "unsentId": "2", "lastMessage": "", "time": 0, "sealed": false, "keepPreview": true}]
+        })).unwrap();
+        let loaded = history_locked(&path, "uMe", "u1").unwrap().unwrap();
+        assert_eq!(loaded["messages"][0]["replyId"], "9");
+        assert_eq!(loaded["messages"][1]["kind"], "unsent");
+        assert_eq!(loaded["messages"][1]["text"], "You unsent a message.");
+        let rows = rows_locked(&path, "uMe").unwrap();
+        assert_eq!(rows.get("u1").unwrap().last_message, "You unsent a message.");
         assert!(history_locked(&path, "uOther", "u1").unwrap().is_none());
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
