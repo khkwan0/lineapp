@@ -1,5 +1,7 @@
 # lineapp
 
+Line App Client for Linux
+
 **BETA.** This app is an unfinished beta. It is incomplete, it breaks, and it changes without warning. Do not rely on it as a stable LINE client.
 
 ## Implemented
