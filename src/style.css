@@ -1310,8 +1310,32 @@ body.profile.is-friend #profile-actions {
   line-height: 1.45;
 }
 
-#sheet-settings {
+#sheet-settings,
+#sheet-about {
   margin: 0 0 16px;
+}
+
+#sheet-about dl {
+  margin: 0;
+}
+
+#sheet-about div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 0;
+  border-bottom: 1px solid #f2f3f5;
+  font-size: 14px;
+}
+
+#sheet-about dt {
+  color: #666;
+}
+
+#sheet-about dd {
+  margin: 0;
+  color: #222;
+  font-variant-numeric: tabular-nums;
 }
 
 #sheet-list {

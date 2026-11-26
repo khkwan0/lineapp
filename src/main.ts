@@ -109,6 +109,9 @@ const sheet = document.querySelector<HTMLElement>("#sheet")!;
 const sheetTitle = document.querySelector<HTMLElement>("#sheet-title")!;
 const sheetBody = document.querySelector<HTMLElement>("#sheet-body")!;
 const sheetSettings = document.querySelector<HTMLElement>("#sheet-settings")!;
+const sheetAbout = document.querySelector<HTMLElement>("#sheet-about")!;
+const aboutBuild = document.querySelector<HTMLElement>("#about-build")!;
+const aboutTime = document.querySelector<HTMLElement>("#about-time")!;
 const minimizeToTray = document.querySelector<HTMLInputElement>("#minimize-to-tray")!;
 const lightbox = document.querySelector<HTMLElement>("#lightbox")!;
 const lightboxImg = document.querySelector<HTMLImageElement>("#lightbox-img")!;
@@ -1401,6 +1404,7 @@ function showReport(row: HTMLElement): void {
   sheetBody.hidden = false;
   sheetBody.textContent = "Why are you reporting this message?";
   sheetSettings.hidden = true;
+  sheetAbout.hidden = true;
   sheetList.hidden = false;
   sheetList.replaceChildren();
   for (const reason of REPORT_REASONS) {
@@ -1429,6 +1433,7 @@ function showShare(text: string): void {
   sheetTitle.textContent = "Share";
   sheetBody.hidden = true;
   sheetSettings.hidden = true;
+  sheetAbout.hidden = true;
   sheetList.hidden = false;
   sheetList.replaceChildren();
   const choices = rows.filter((row) => row.id && row.name);
@@ -2294,6 +2299,37 @@ function showSheet(title: string, body: string): void {
   sheetBody.hidden = false;
   sheetSettings.hidden = true;
   sheetList.hidden = true;
+  sheetAbout.hidden = true;
+  sheet.hidden = false;
+}
+
+function buildStamp(iso: string): string {
+  if (!iso) {
+    return "—";
+  }
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return iso;
+  }
+  return date.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: "Asia/Bangkok",
+  });
+}
+
+function showAbout(): void {
+  sheetTitle.textContent = "About LINE";
+  aboutBuild.textContent = String(__BUILD_NUMBER__);
+  aboutTime.textContent = buildStamp(__BUILD_TIME__);
+  sheetBody.hidden = true;
+  sheetSettings.hidden = true;
+  sheetList.hidden = true;
+  sheetAbout.hidden = false;
   sheet.hidden = false;
 }
 
@@ -2302,6 +2338,7 @@ async function showSettings(): Promise<void> {
   sheetBody.hidden = true;
   sheetSettings.hidden = false;
   sheetList.hidden = true;
+  sheetAbout.hidden = true;
   sheet.hidden = false;
   minimizeToTray.disabled = true;
   try {
@@ -2331,7 +2368,7 @@ railMenu.addEventListener("click", (event) => {
   } else if (action === "help") {
     showSheet("Help", "Help is not in this window yet.");
   } else if (action === "about") {
-    showSheet("About LINE", "This window uses the LINE desktop protocol. Letter-sealed chats stay sealed.");
+    showAbout();
   } else if (action === "logout") {
     void logout();
   } else if (action === "quit") {
