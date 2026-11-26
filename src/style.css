@@ -348,6 +348,13 @@ input {
   flex: none;
 }
 
+.preview-call {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: #6b7280;
+}
+
 .badge {
   margin-left: auto;
   background: #06c755;
@@ -496,6 +503,16 @@ input {
 .msg-text {
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+.msg-text.call {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.msg-text.call .preview-call {
+  color: currentColor;
 }
 
 .msg-text.clamped {

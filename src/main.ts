@@ -523,9 +523,15 @@ function warmMedia(ids: string[], preview: boolean): Promise<void> {
 const COLLAPSED_LINES = 15;
 
 function appendMessageText(bubble: HTMLElement, text: string): void {
+  const callLabel = callPreviewLabel(text);
   const body = document.createElement("div");
   body.className = "msg-text";
-  body.textContent = text;
+  if (callLabel) {
+    body.classList.add("call");
+    body.append(phoneIcon(), document.createTextNode(callLabel));
+  } else {
+    body.textContent = text;
+  }
   bubble.append(body);
   queueMicrotask(() => clampIfTall(body));
 }
@@ -874,12 +880,15 @@ function renderList(): void {
     top.append(time);
     const bottom = document.createElement("div");
     bottom.className = "row-bottom";
-    if (chat.sticker) {
+    const callLabel = callPreviewLabel(chat.lastMessage);
+    if (callLabel) {
+      bottom.append(phoneIcon());
+    } else if (chat.sticker) {
       bottom.append(stickerImage(chat.sticker, chat.stickerFallback || "", "preview-sticker"));
     }
     const preview = document.createElement("span");
     preview.className = "preview";
-    preview.textContent = previewText(chat.lastMessage);
+    preview.textContent = callLabel ?? previewText(chat.lastMessage);
     bottom.append(preview);
     if (chat.unread !== null && chat.unread > 0) {
       const badge = document.createElement("span");
@@ -902,6 +911,38 @@ function updateLabel(text: string): boolean {
 function previewText(text: string): string {
   const trimmed = text.trim();
   return trimmed && !updateLabel(trimmed) ? trimmed : "No messages";
+}
+
+function callPreviewLabel(text: string): string | null {
+  const trimmed = text.trim();
+  const duration = trimmed.match(/(\d+(?:\.\d+)?)\s*(milli(?:seconds?|secs?)|ms|seconds?)\b/i);
+  const callLog = /call history/i.test(trimmed) || (/\bvideo call\b/i.test(trimmed) && Boolean(duration));
+  if (!callLog) {
+    return null;
+  }
+  const amount = duration ? Number(duration[1]) : 0;
+  const unit = duration?.[2].toLowerCase() ?? "";
+  const total = unit.startsWith("milli") || unit === "ms" ? Math.round(amount / 1000) : Math.round(amount);
+  const safe = Math.max(0, total);
+  const minutes = Math.floor(safe / 60);
+  const seconds = safe % 60;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `Call time ${pad(minutes)}:${pad(seconds)}`;
+}
+
+function phoneIcon(): SVGSVGElement {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.classList.add("preview-call");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("fill", "currentColor");
+  path.setAttribute(
+    "d",
+    "M6.62 10.79a15.05 15.05 0 0 0 6.59 6.59l2.2-2.2a1 1 0 0 1 1.02-.24c1.12.37 2.33.57 3.57.57a1 1 0 0 1 1 1V20a1 1 0 0 1-1 1C10.61 21 3 13.39 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.57 3.57a1 1 0 0 1-.25 1.02l-2.2 2.2z",
+  );
+  svg.append(path);
+  return svg;
 }
 
 function fallback(name: string): HTMLElement {

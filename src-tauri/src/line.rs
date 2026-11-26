@@ -497,7 +497,7 @@ impl Client {
             let prior = saved.get(&mid);
             let activity = box_when.get(&mid).copied().unwrap_or(0);
             let (preview, sealed, sticker, fallback, prior_time) = saved_preview(prior);
-            if preview.is_empty() || activity > prior_time {
+            if needs_fresh_preview(&preview, activity, prior_time) {
                 stale.push(mid.clone());
             }
             rows.push(json!({
@@ -530,7 +530,7 @@ impl Client {
                 .unwrap_or_default();
             let activity = box_when.get(mid).copied().unwrap_or(0);
             let (preview, sealed, sticker, fallback, prior_time) = saved_preview(prior);
-            if preview.is_empty() || activity > prior_time {
+            if needs_fresh_preview(&preview, activity, prior_time) {
                 stale.push(mid.clone());
             }
             rows.push(json!({
@@ -895,17 +895,18 @@ impl Client {
         if let Some(found) = self.groups.get(&cache) {
             return found.clone();
         }
-        let found = self.fetch_group_private(group).and_then(|(id, private)| {
-            if key_id == 0 || id == 0 || id == key_id { Some(private) } else { None }
-        });
+        let found = self.fetch_group_private(group, key_id);
         self.groups.insert(cache, found.clone());
         found
     }
 
-    fn fetch_group_private(&mut self, group: &str) -> Option<(i64, Vec<u8>)> {
-        let value = self.talk("getLastE2EEGroupSharedKey", &[(2, Field::I32(2)), (3, bin(group))]).ok()??;
+    fn fetch_group_private(&mut self, group: &str, key_id: i64) -> Option<Vec<u8>> {
+        let value = self.group_shared_key(group, key_id)?;
         let fields = as_struct(&value).ok()?;
         let group_key = int_field(fields, 2).unwrap_or(0);
+        if key_id > 0 && group_key > 0 && group_key != key_id {
+            return None;
+        }
         let creator = text_field(fields, 3);
         let creator_kid = int_field(fields, 4)?;
         let receiver_kid = int_field(fields, 6)?;
@@ -918,10 +919,24 @@ impl Client {
         keys.sort_by_key(|(_, id)| if *id == receiver_kid { 0 } else { 1 });
         for (private, _) in keys {
             if let Some(secret) = e2ee::open_group_private(&private, &creator_pub, &encrypted) {
-                return Some((group_key, secret));
+                return Some(secret);
             }
         }
         None
+    }
+
+    fn group_shared_key(&mut self, group: &str, key_id: i64) -> Option<Value> {
+        if let Ok(id) = i32::try_from(key_id) {
+            if id > 0 {
+                if let Ok(Some(value)) = self.talk(
+                    "getE2EEGroupSharedKey",
+                    &[(2, Field::I32(2)), (3, bin(group)), (4, Field::I32(id))],
+                ) {
+                    return Some(value);
+                }
+            }
+        }
+        self.talk("getLastE2EEGroupSharedKey", &[(2, Field::I32(2)), (3, bin(group))]).ok().flatten()
     }
 
     pub fn send_for_window(&mut self, to: &str, message: &str) -> Json {
@@ -1873,6 +1888,9 @@ impl Client {
         if let Some(opened) = self.open_sealed_text(message) {
             return (opened, false);
         }
+        if let Some(name) = self.sealed_file_name(message) {
+            return (name, false);
+        }
         if let Some(line) = event_sentence(message, cards, &me) {
             return (line, false);
         }
@@ -1899,14 +1917,26 @@ impl Client {
         }
         let sender = text_field(message, 1);
         let recipient = text_field(message, 2);
-        if !sender.starts_with('u') || !recipient.starts_with('u') {
+        if !sender.starts_with('u') {
             return None;
         }
         let sender_key = u32::from_be_bytes(chunks[3].as_slice().try_into().ok()?) as i64;
         let receiver_key = u32::from_be_bytes(chunks[4].as_slice().try_into().ok()?) as i64;
         let spec = e2ee_spec(message);
         let me = self.session.mid.clone();
-        for (private, own_id) in self.secret_keys() {
+        if recipient.starts_with('c') || recipient.starts_with('r') {
+            let group_priv = self.group_private(&recipient, receiver_key)?;
+            let peer_pub = if sender == me {
+                self.public_for_key(sender_key)?
+            } else {
+                self.peer_public(&sender, sender_key)?
+            };
+            return open_text(&chunks, &group_priv, &peer_pub, &sender, &recipient, spec).ok();
+        }
+        if !recipient.starts_with('u') {
+            return None;
+        }
+        for (private, own_id) in self.owned_keys() {
             let (peer, peer_key) = if sender == me && sender_key == own_id {
                 (recipient.clone(), receiver_key)
             } else if receiver_key == own_id {
@@ -1920,6 +1950,14 @@ impl Client {
             }
         }
         None
+    }
+
+    fn sealed_file_name(&mut self, message: &BTreeMap<i16, Value>) -> Option<String> {
+        if int_field(message, 15) != Some(14) {
+            return None;
+        }
+        let name = self.sealed_payload(message)?.get("fileName")?.as_str()?.trim().to_string();
+        if name.is_empty() { None } else { Some(name) }
     }
 
     fn peer_public(&mut self, mid: &str, key_id: i64) -> Option<Vec<u8>> {
@@ -2592,6 +2630,10 @@ fn sticker_pair(message: Option<&BTreeMap<i16, Value>>) -> (String, String) {
     }
 }
 
+fn needs_fresh_preview(preview: &str, activity: i64, prior_time: i64) -> bool {
+    preview.is_empty() || activity > prior_time || preview.eq_ignore_ascii_case("letter-sealed message")
+}
+
 fn saved_preview(prior: Option<&crate::store::StoredChat>) -> (String, bool, String, String, i64) {
     let Some(prior) = prior else {
         return (String::new(), false, String::new(), String::new(), 0);
@@ -2957,6 +2999,13 @@ fn meta_int(pairs: &[(Value, Value)], name: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn letter_sealed_preview_is_fetched_again() {
+        assert!(needs_fresh_preview("Letter-sealed message", 10, 10));
+        assert!(!needs_fresh_preview("hello", 10, 10));
+        assert!(needs_fresh_preview("hello", 11, 10));
+    }
 
     #[test]
     fn sticker_url_uses_the_shop_path() {
