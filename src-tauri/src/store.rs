@@ -72,6 +72,21 @@ pub fn save_outgoing(chat: &str, sent: &Json) -> Result<(), String> {
     save_outgoing_locked(&db_path(), &account_mid(), chat, sent)
 }
 
+pub fn message_known(message_id: &str) -> bool {
+    if message_id.is_empty() || message_id.len() > 24 || !message_id.chars().all(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    let Ok(conn) = connect(&db_path()) else {
+        return false;
+    };
+    conn.query_row("SELECT 1 FROM messages WHERE msg_id = ?1", params![message_id], |_| Ok(()))
+        .optional()
+        .ok()
+        .flatten()
+        .is_some()
+}
+
 pub fn mark_unsent(message_id: &str) -> Result<(), String> {
     let _guard = LOCK.lock().unwrap_or_else(|err| err.into_inner());
     let conn = connect(&db_path())?;
@@ -631,9 +646,9 @@ fn save_outgoing_locked(path: &Path, mid: &str, chat: &str, sent: &Json) -> Resu
         "sticker": sent.get("sticker").and_then(|value| value.as_str()).unwrap_or(""),
         "stickerFallback": sent.get("stickerFallback").and_then(|value| value.as_str()).unwrap_or(""),
         "kind": sent.get("kind").and_then(|value| value.as_str()).unwrap_or(""),
-        "gid": "",
-        "seq": 0,
-        "mediaId": "",
+        "gid": sent.get("gid").and_then(|value| value.as_str()).unwrap_or(""),
+        "seq": sent.get("seq").and_then(|value| value.as_i64()).unwrap_or(0),
+        "mediaId": sent.get("mediaId").and_then(|value| value.as_str()).unwrap_or(""),
         "animated": sent.get("animated").and_then(|value| value.as_bool()).unwrap_or(false),
         "replyId": sent.get("replyId").and_then(|value| value.as_str()).unwrap_or(""),
     });

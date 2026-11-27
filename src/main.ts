@@ -75,6 +75,8 @@ type SendResult = {
   sticker?: string;
   stickerFallback?: string;
   fileName?: string;
+  gid?: string;
+  seq?: number;
 };
 
 type ReadMark = { end: string };
@@ -114,6 +116,8 @@ const attachFile = document.querySelector<HTMLButtonElement>("#attach-file")!;
 const stickerOpen = document.querySelector<HTMLButtonElement>("#sticker-open")!;
 const stickerPanel = document.querySelector<HTMLElement>("#sticker-panel")!;
 const fileInput = document.querySelector<HTMLInputElement>("#file-input")!;
+const sendButton = document.querySelector<HTMLButtonElement>("#send-message")!;
+const attachPreview = document.querySelector<HTMLElement>("#attach-preview")!;
 const sendError = document.querySelector<HTMLParagraphElement>("#send-error")!;
 const railMore = document.querySelector<HTMLButtonElement>("#rail-more")!;
 const railMenu = document.querySelector<HTMLElement>("#rail-menu")!;
@@ -188,10 +192,23 @@ type Outgoing = {
   previewUrl?: string;
   sticker?: string;
   stickerFallback?: string;
-  file?: { name: string; mime: string; data: string };
+  albumUrls?: string[];
+  file?: { name: string; mime: string; data: string; groupId?: string; groupSeq?: number; groupCount?: number };
   stickerSend?: { packageId: string; stickerId: string; animated: boolean };
 };
+type AttachmentDraft = {
+  chatId: string;
+  file: File;
+  name: string;
+  mime: string;
+  kind: "image" | "video" | "audio" | "file";
+  previewUrl: string;
+};
 let replyDraft: ReplyDraft | null = null;
+const IMAGE_CAP = 10;
+let attachmentDrafts: AttachmentDraft[] = [];
+let attachmentEpoch = 0;
+let sendBusy = false;
 let msgMenuRow: HTMLElement | null = null;
 let shareText = "";
 const outgoing: Outgoing[] = [];
@@ -674,9 +691,11 @@ function showThread(chat: ChatRow | undefined): void {
     composerInput.disabled = true;
     attachFile.disabled = true;
     stickerOpen.disabled = true;
+    discardAttachment();
     sendError.hidden = true;
     threadHead.replaceChildren();
     delete document.body.dataset.sound;
+    refreshSendButton();
     return;
   }
   thread.hidden = false;
@@ -700,6 +719,7 @@ function showThread(chat: ChatRow | undefined): void {
     closeReactionPicker();
     closeMsgMenu();
     clearReply();
+    discardAttachment();
     sendError.hidden = true;
     const token = ++historyToken;
     threadBody.replaceChildren();
@@ -715,6 +735,7 @@ function showThread(chat: ChatRow | undefined): void {
       note.textContent = error instanceof Error ? error.message : String(error);
     });
   }
+  refreshSendButton();
   if (readingChat(chat.id)) {
     dismissUnread(chat.id);
   }
@@ -722,7 +743,7 @@ function showThread(chat: ChatRow | undefined): void {
 
 function historyStamp(payload: HistoryPayload): string {
   return payload.messages
-    .map((message) => [message.id || "", message.sender || "", message.text, message.status || "", message.kind || "", message.sticker || "", message.replyId || "", String(message.readers || 0), String(message.time)].join("\u001f"))
+    .map((message) => [message.id || "", message.sender || "", message.text, message.status || "", message.kind || "", message.mediaId || "", message.gid || "", String(message.seq || 0), message.sticker || "", message.replyId || "", String(message.readers || 0), String(message.time)].join("\u001f"))
     .join("\u001e");
 }
 
@@ -1932,6 +1953,12 @@ async function unsendRow(row: HTMLElement): Promise<void> {
 }
 
 function messageBubble(message: BubbleMessage): HTMLElement {
+  if (!message.media?.length && (message.kind === "image" || message.kind === "video") && message.mediaId) {
+    message = {
+      ...message,
+      media: [{ id: message.mediaId, seq: message.seq || 0, animated: Boolean(message.animated) }],
+    };
+  }
   if (message.kind === "chat update" || message.kind === "unsent") {
     const note = document.createElement("div");
     note.className = "chat-update";
@@ -1981,6 +2008,9 @@ function messageBubble(message: BubbleMessage): HTMLElement {
   const ids = [message.id || "", ...(message.media?.map((slot) => slot.id) || [])].filter((id) => id);
   if (message.id) {
     row.dataset.id = message.id;
+  }
+  if (message.gid) {
+    row.dataset.gid = message.gid;
   }
   if (message.sender) {
     row.dataset.sender = message.sender;
@@ -2177,6 +2207,37 @@ function senderMark(message: BubbleMessage): HTMLElement {
   return button;
 }
 
+function playableVideo(src = ""): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "video-play";
+  const video = document.createElement("video");
+  video.className = "chat-video";
+  video.controls = true;
+  video.playsInline = true;
+  video.preload = "metadata";
+  if (src) {
+    video.src = src;
+  }
+  const play = document.createElement("button");
+  play.type = "button";
+  play.className = "video-play-button";
+  play.setAttribute("aria-label", t("video"));
+  play.textContent = "▶";
+  play.addEventListener("click", (event) => {
+    event.stopPropagation();
+    play.hidden = true;
+    void video.play();
+  });
+  video.addEventListener("play", () => {
+    play.hidden = true;
+  });
+  video.addEventListener("ended", () => {
+    play.hidden = false;
+  });
+  wrap.append(video, play);
+  return wrap;
+}
+
 function showFrame(host: HTMLElement, url: string, mime: string): void {
   if (mime.startsWith("video/")) {
     const video = document.createElement("video");
@@ -2239,24 +2300,23 @@ function videoStack(items: MediaSlot[], token: number): HTMLElement {
   const ids = items.map((item) => item.id);
   void warmMedia(ids, false);
   for (const item of items) {
-    const video = document.createElement("video");
-    video.className = "chat-video";
-    video.controls = true;
-    video.preload = "metadata";
-    video.setAttribute("playsinline", "");
-    stack.append(video);
+    const wrap = playableVideo();
+    const video = wrap.querySelector("video");
+    stack.append(wrap);
     void warmMedia([item.id], false).then(() => {
-      if (token !== historyToken) {
+      if (!video || token !== historyToken) {
         return;
       }
-      const url = mediaUrls.get(mediaKey(item.id, false));
-      if (url) {
+      const key = mediaKey(item.id, false);
+      const url = mediaUrls.get(key);
+      const mime = mediaMimes.get(key) || "";
+      if (url && (mime.startsWith("video/") || mime === "")) {
         video.src = url;
-      } else {
-        const note = document.createElement("div");
-        note.textContent = t("video");
-        video.replaceWith(note);
+        return;
       }
+      const note = document.createElement("div");
+      note.textContent = t("video");
+      wrap.replaceWith(note);
     });
   }
   return stack;
@@ -2709,15 +2769,30 @@ function outgoingBubble(item: Outgoing): HTMLElement {
     replyName: item.reply?.name || "",
     replyPicture: item.reply?.picture || "",
   });
-  if (item.previewUrl) {
-    const bubble = row.querySelector(".bubble");
-    const media = item.kind === "video" ? document.createElement("video") : document.createElement("img");
-    media.className = "outgoing-media";
-    media.src = item.previewUrl;
-    if (media instanceof HTMLVideoElement) {
-      media.muted = true;
-      media.playsInline = true;
-      media.preload = "metadata";
+  const bubble = row.querySelector(".bubble");
+  if (item.albumUrls && item.albumUrls.length > 1) {
+    bubble?.classList.add("rich");
+    bubble?.querySelector(".msg-text")?.remove();
+    const grid = document.createElement("div");
+    grid.className = "media-grid many";
+    for (const url of item.albumUrls) {
+      const thumb = document.createElement("span");
+      thumb.className = "media-thumb";
+      const img = document.createElement("img");
+      img.alt = "";
+      img.src = url;
+      thumb.append(img);
+      grid.append(thumb);
+    }
+    bubble?.prepend(grid);
+    if (item.file?.groupId) {
+      row.dataset.gid = item.file.groupId;
+    }
+  } else if (item.previewUrl) {
+    const media = item.kind === "video" ? playableVideo(item.previewUrl) : document.createElement("img");
+    if (media instanceof HTMLImageElement) {
+      media.className = "outgoing-media";
+      media.src = item.previewUrl;
     }
     const caption = item.kind === "image" || item.kind === "video" ? "" : item.text;
     if (caption) {
@@ -2785,7 +2860,7 @@ function placeOutgoing(chatId: string): boolean {
   }
   let placed = false;
   for (const item of outgoing) {
-    if (item.chatId !== chatId || messageRow(item.localId)) {
+    if (item.chatId !== chatId || messageRow(item.localId) || (item.file?.groupSeq || 0) > 1 || albumHost(item.file?.groupId || "")) {
       continue;
     }
     threadBody.querySelector(".thread-note")?.remove();
@@ -2840,8 +2915,9 @@ function finishOutgoing(localId: string, payload: SendResult): void {
       item.error = note;
     }
     const row = localId ? messageRow(localId) : null;
-    if (row) {
-      setDelivery(row, "failed", item?.time || Date.now(), "", note);
+    const host = row || albumHost(item?.file?.groupId || "");
+    if (host) {
+      setDelivery(host, "failed", item?.time || Date.now(), "", note);
     }
     return;
   }
@@ -2867,7 +2943,13 @@ function finishOutgoing(localId: string, payload: SendResult): void {
     setDelivery(row, "sent", payload.time || item?.time || Date.now(), payload.messageId);
     return;
   }
-  if (serverRow) {
+  if (serverRow || albumHost(payload.gid || item?.file?.groupId || "")) {
+    if (payload.gid) {
+      showAlbum(payload.gid, payload.kind || item?.kind || "");
+    }
+    return;
+  }
+  if (payload.gid && showAlbum(payload.gid, payload.kind || item?.kind || "")) {
     return;
   }
   threadBody.querySelector(".thread-note")?.remove();
@@ -2882,6 +2964,9 @@ function finishOutgoing(localId: string, payload: SendResult): void {
     sticker,
     stickerFallback,
     kind: payload.kind || item?.kind || "",
+    mediaId: payload.mediaId || payload.messageId || "",
+    gid: payload.gid || "",
+    seq: payload.seq || 0,
     replyId: item?.reply?.id || payload.replyId || "",
     replyText: item?.reply?.text || "",
     replyName: item?.reply?.name || "",
@@ -2906,6 +2991,10 @@ function rememberSent(payload: SendResult, item: Outgoing | undefined, sticker: 
     sticker,
     stickerFallback,
     kind: payload.kind || item?.kind || "",
+    mediaId: payload.mediaId || "",
+    animated: Boolean(payload.animated),
+    gid: payload.gid || "",
+    seq: payload.seq || 0,
     replyId: item?.reply?.id || payload.replyId || "",
     replyText: item?.reply?.text || "",
     replyName: item?.reply?.name || "",
@@ -2920,6 +3009,9 @@ function rememberSent(payload: SendResult, item: Outgoing | undefined, sticker: 
       sticker: message.sticker || prior.sticker,
       stickerFallback: message.stickerFallback || prior.stickerFallback,
       kind: message.kind || prior.kind,
+      mediaId: message.mediaId || prior.mediaId,
+      gid: message.gid || prior.gid,
+      seq: message.seq || prior.seq,
     };
     return;
   }
@@ -2927,7 +3019,7 @@ function rememberSent(payload: SendResult, item: Outgoing | undefined, sticker: 
   openHistory.lastMessageId = payload.messageId;
 }
 
-function dispatchSend(item: Outgoing): void {
+function dispatchSend(item: Outgoing): Promise<void> {
   const fail = (error: unknown) => {
     finishOutgoing(item.localId, {
       id: item.chatId,
@@ -2936,31 +3028,32 @@ function dispatchSend(item: Outgoing): void {
     });
   };
   if (item.file) {
-    void invoke("send_media", {
+    return invoke("send_media", {
       id: item.chatId,
       name: item.file.name,
       mime: item.file.mime,
       data: item.file.data,
       localId: item.localId,
-    }).catch(fail);
-    return;
+      groupId: item.file.groupId,
+      groupSeq: item.file.groupSeq,
+      groupCount: item.file.groupCount,
+    }).then(() => undefined, fail);
   }
   if (item.stickerSend) {
-    void invoke("send_sticker", {
+    return invoke("send_sticker", {
       id: item.chatId,
       packageId: item.stickerSend.packageId,
       stickerId: item.stickerSend.stickerId,
       animated: item.stickerSend.animated,
       localId: item.localId,
-    }).catch(fail);
-    return;
+    }).then(() => undefined, fail);
   }
-  void invoke("send_message", {
+  return invoke("send_message", {
     id: item.chatId,
     text: item.text,
     relatedId: item.reply?.id || undefined,
     localId: item.localId,
-  }).catch(fail);
+  }).then(() => undefined, fail);
 }
 
 function startSend(chatId: string, text: string, reply: ReplyDraft | null): void {
@@ -3008,6 +3101,7 @@ function onSent(payload: SendResult): void {
   composerInput.disabled = !openId;
   attachFile.disabled = !openId;
   stickerOpen.disabled = !openId;
+  refreshSendButton();
   finishOutgoing(payload.localId || "", payload);
 }
 
@@ -3074,16 +3168,23 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
-function queueOutgoing(item: Outgoing): void {
+function albumHost(gid: string): HTMLElement | null {
+  if (!gid) {
+    return null;
+  }
+  return threadBody.querySelector<HTMLElement>(`.msg[data-gid="${CSS.escape(gid)}"]`);
+}
+
+function queueOutgoing(item: Outgoing, visible = true): Promise<void> {
   outgoing.push(item);
   bumpChat(item.chatId, item.text, item.time, item.sticker || "", item.stickerFallback || "");
-  if (item.chatId === openId) {
+  if (visible && item.chatId === openId) {
     threadBody.querySelector(".thread-note")?.remove();
     threadBody.append(outgoingBubble(item));
     unreadFocus = "";
     scrollThreadToEnd();
   }
-  dispatchSend(item);
+  return dispatchSend(item);
 }
 
 function startSticker(chatId: string, sticker: { packageId: string; stickerId: string; animated: boolean }): void {
@@ -3105,44 +3206,232 @@ function startSticker(chatId: string, sticker: { packageId: string; stickerId: s
   queueOutgoing(item);
 }
 
-async function startAttachment(chatId: string, file: File): Promise<void> {
-  if (!file || file.size <= 0) {
-    return;
-  }
-  if (file.size > MEDIA_LIMIT) {
-    sendError.hidden = false;
-    sendError.textContent = t("fileTooLarge");
-    return;
-  }
-  sendError.hidden = true;
-  const data = await fileToBase64(file);
-  const mime = file.type || "application/octet-stream";
+function mediaKind(file: File): AttachmentDraft["kind"] {
+  const mime = file.type || "";
   const ext = file.name.split(".").pop()?.toLowerCase() || "";
   const imageExt = ["jpg", "jpeg", "png", "gif", "webp", "heic", "bmp"].includes(ext);
   const videoExt = ["mp4", "mov", "m4v", "webm"].includes(ext);
   const audioExt = ["m4a", "aac", "mp3", "wav"].includes(ext);
-  const kind = mime.startsWith("image/") || imageExt
-    ? "image"
-    : mime.startsWith("audio/") || audioExt
-      ? "audio"
-      : mime.startsWith("video/") || videoExt
-        ? "video"
-        : "file";
-  const preview = kind === "image" || kind === "video";
-  const item: Outgoing = {
-    localId: `local-${Date.now()}-${outgoingSeq += 1}`,
-    chatId,
-    text: preview ? (kind === "image" ? "Image" : "Video") : file.name,
-    reply: null,
-    time: Date.now(),
-    state: "sending",
-    error: "",
-    knownIds: chatId === openId ? paintedIds : "",
-    kind,
-    previewUrl: preview ? URL.createObjectURL(file) : "",
-    file: { name: file.name, mime, data },
-  };
-  queueOutgoing(item);
+  if (mime.startsWith("image/") || imageExt) {
+    return "image";
+  }
+  if (mime.startsWith("audio/") || audioExt) {
+    return "audio";
+  }
+  if (mime.startsWith("video/") || videoExt) {
+    return "video";
+  }
+  return "file";
+}
+
+function refreshSendButton(): void {
+  const hasText = composerInput.value.trim().length > 0;
+  const hasFile = attachmentDrafts.length > 0;
+  sendButton.disabled = sendBusy || composerInput.disabled || (!hasText && !hasFile);
+}
+
+function paintAttachment(): void {
+  attachPreview.replaceChildren();
+  if (attachmentDrafts.length === 0) {
+    attachPreview.hidden = true;
+    refreshSendButton();
+    return;
+  }
+  attachPreview.hidden = false;
+  attachmentDrafts.forEach((draft, index) => {
+    const item = document.createElement("span");
+    item.className = "attach-item";
+    if ((draft.kind === "image" || draft.kind === "video") && draft.previewUrl) {
+      const thumb = document.createElement(draft.kind === "video" ? "video" : "img");
+      thumb.className = "attach-thumb";
+      thumb.src = draft.previewUrl;
+      if (thumb instanceof HTMLImageElement) {
+        thumb.alt = draft.name;
+      } else {
+        thumb.muted = true;
+      }
+      item.append(thumb);
+    } else {
+      const name = document.createElement("span");
+      name.className = "attach-name";
+      name.textContent = draft.name;
+      item.append(name);
+    }
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "attach-remove";
+    remove.setAttribute("aria-label", t("removeAttachment"));
+    remove.textContent = "×";
+    remove.addEventListener("click", () => {
+      removeAttachment(index);
+      composerInput.focus();
+    });
+    item.append(remove);
+    attachPreview.append(item);
+  });
+  refreshSendButton();
+}
+
+function discardAttachment(): void {
+  for (const draft of attachmentDrafts) {
+    if (draft.previewUrl) {
+      URL.revokeObjectURL(draft.previewUrl);
+    }
+  }
+  attachmentDrafts = [];
+  attachmentEpoch += 1;
+  paintAttachment();
+}
+
+function removeAttachment(index: number): void {
+  const draft = attachmentDrafts[index];
+  if (!draft) {
+    return;
+  }
+  if (draft.previewUrl) {
+    URL.revokeObjectURL(draft.previewUrl);
+  }
+  attachmentDrafts.splice(index, 1);
+  attachmentEpoch += 1;
+  paintAttachment();
+}
+
+function stageFiles(chatId: string, files: File[]): void {
+  const picked = files.filter((file) => file && file.size > 0);
+  if (!picked.length || !chatId) {
+    return;
+  }
+  const images = picked.filter((file) => mediaKind(file) === "image");
+  const batch = images.length > 0 && (images.length === picked.length || picked.length > 1) ? images : [picked[0]];
+  const imageBatch = batch.every((file) => mediaKind(file) === "image");
+  let tooLarge = false;
+  const fitting = batch.filter((file) => {
+    if (file.size <= MEDIA_LIMIT) {
+      return true;
+    }
+    tooLarge = true;
+    return false;
+  });
+  if (!fitting.length) {
+    sendError.hidden = false;
+    sendError.textContent = t("fileTooLarge");
+    return;
+  }
+  const prior = imageBatch && attachmentDrafts.every((draft) => draft.kind === "image") ? attachmentDrafts : [];
+  if (prior.length === 0) {
+    for (const draft of attachmentDrafts) {
+      if (draft.previewUrl) {
+        URL.revokeObjectURL(draft.previewUrl);
+      }
+    }
+  }
+  const room = imageBatch ? IMAGE_CAP - prior.length : 1;
+  const taken = fitting.slice(0, Math.max(room, 0));
+  if (!taken.length) {
+    sendError.hidden = false;
+    sendError.textContent = t("tooManyImages", { count: IMAGE_CAP });
+    return;
+  }
+  const added = taken.map((file) => {
+    const kind = mediaKind(file);
+    return {
+      chatId,
+      file,
+      name: file.name,
+      mime: file.type || "application/octet-stream",
+      kind,
+      previewUrl: kind === "image" || kind === "video" ? URL.createObjectURL(file) : "",
+    };
+  });
+  attachmentDrafts = imageBatch ? [...prior, ...added] : added;
+  attachmentEpoch += 1;
+  const overflow = fitting.length > taken.length;
+  sendError.hidden = !(tooLarge || overflow);
+  sendError.textContent = tooLarge ? t("fileTooLarge") : overflow ? t("tooManyImages", { count: IMAGE_CAP }) : "";
+  paintAttachment();
+  composerInput.focus();
+}
+
+function stageAttachment(chatId: string, file: File): void {
+  stageFiles(chatId, [file]);
+}
+
+async function submitComposer(): Promise<void> {
+  if (sendBusy || !openId || composerInput.disabled) {
+    return;
+  }
+  const text = composerInput.value.trim();
+  const drafts = attachmentDrafts.slice();
+  const epoch = attachmentEpoch;
+  if ((!text && drafts.length === 0) || drafts.some((draft) => draft.chatId !== openId)) {
+    return;
+  }
+  const chatId = openId;
+  const reply = replyDraft;
+  sendBusy = true;
+  refreshSendButton();
+  const encoded: string[] = [];
+  if (drafts.length > 0) {
+    try {
+      for (const draft of drafts) {
+        encoded.push(await fileToBase64(draft.file));
+        if (attachmentEpoch !== epoch) {
+          sendBusy = false;
+          refreshSendButton();
+          return;
+        }
+      }
+    } catch (error: unknown) {
+      sendBusy = false;
+      refreshSendButton();
+      sendError.hidden = false;
+      sendError.textContent = error instanceof Error ? error.message : String(error);
+      return;
+    }
+  }
+  replyDraft = null;
+  paintReplyBar();
+  composerInput.value = "";
+  if (drafts.length > 0) {
+    attachmentDrafts = [];
+    attachmentEpoch += 1;
+    paintAttachment();
+  }
+  sendBusy = false;
+  sendError.hidden = true;
+  refreshSendButton();
+  const album = drafts.length > 1 && drafts.every((draft) => draft.kind === "image")
+    ? `${Date.now()}${Math.floor(Math.random() * 100000).toString().padStart(5, "0")}`
+    : "";
+  const albumUrls = album ? drafts.map((draft) => draft.previewUrl) : [];
+  for (let index = 0; index < drafts.length; index += 1) {
+    const draft = drafts[index];
+    const preview = draft.kind === "image" || draft.kind === "video";
+    await queueOutgoing({
+      localId: `local-${Date.now()}-${outgoingSeq += 1}`,
+      chatId,
+      text: preview ? (draft.kind === "image" ? "Image" : "Video") : draft.name,
+      reply: null,
+      time: Date.now(),
+      state: "sending",
+      error: "",
+      knownIds: chatId === openId ? paintedIds : "",
+      kind: draft.kind,
+      previewUrl: draft.previewUrl,
+      albumUrls: index === 0 ? albumUrls : undefined,
+      file: {
+        name: draft.name,
+        mime: draft.mime,
+        data: encoded[index],
+        groupId: album,
+        groupSeq: album ? index + 1 : 0,
+        groupCount: album ? drafts.length : 0,
+      },
+    }, !album || index === 0);
+  }
+  if (text) {
+    startSend(chatId, text, reply);
+  }
 }
 
 composerInput.addEventListener("keydown", (event) => {
@@ -3153,19 +3442,13 @@ composerInput.addEventListener("keydown", (event) => {
   composerInput.form?.requestSubmit();
 });
 
+composerInput.addEventListener("input", () => {
+  refreshSendButton();
+});
+
 document.querySelector<HTMLFormElement>("#composer")!.addEventListener("submit", (event) => {
   event.preventDefault();
-  const text = composerInput.value.trim();
-  if (!text || !openId || composerInput.disabled) {
-    return;
-  }
-  const id = openId;
-  const reply = replyDraft;
-  replyDraft = null;
-  paintReplyBar();
-  composerInput.value = "";
-  sendError.hidden = true;
-  startSend(id, text, reply);
+  void submitComposer();
 });
 
 attachFile.addEventListener("click", () => {
@@ -3177,15 +3460,152 @@ attachFile.addEventListener("click", () => {
 });
 
 fileInput.addEventListener("change", () => {
-  const file = fileInput.files?.[0];
+  const files = Array.from(fileInput.files || []);
   fileInput.value = "";
-  if (!file || !openId || composerInput.disabled) {
+  if (!files.length || !openId || composerInput.disabled) {
     return;
   }
-  void startAttachment(openId, file).catch((error: unknown) => {
+  stageFiles(openId, files);
+});
+
+const composerForm = document.querySelector<HTMLFormElement>("#composer")!;
+
+function dragHasFile(event: DragEvent): boolean {
+  const types = Array.from(event.dataTransfer?.types || []).map((type) => type.toLowerCase());
+  return types.includes("files") || types.includes("text/uri-list") || types.includes("text/x-moz-url") || types.includes("application/x-kde-urilist");
+}
+
+function droppedFilePath(event: DragEvent): string {
+  const list = event.dataTransfer?.getData("text/uri-list") || event.dataTransfer?.getData("text/plain") || "";
+  for (const line of list.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || !trimmed.toLowerCase().startsWith("file:")) {
+      continue;
+    }
+    try {
+      const path = decodeURIComponent(new URL(trimmed).pathname);
+      if (path.startsWith("/")) {
+        return path;
+      }
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+function fileFromDroppedBytes(name: string, mime: string, data: string): File {
+  const binary = atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new File([bytes], name, { type: mime });
+}
+
+async function stageDroppedPaths(paths: string[]): Promise<void> {
+  const files: File[] = [];
+  let failure = "";
+  for (const path of paths) {
+    try {
+      const dropped = await invoke<{ name: string; mime: string; data: string }>("read_dropped_file", { path });
+      files.push(fileFromDroppedBytes(dropped.name, dropped.mime, dropped.data));
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      failure = message.toLowerCase().includes("too large") ? t("fileTooLarge") : message;
+    }
+  }
+  if (files.length > 0) {
+    stageFiles(openId, files);
+    return;
+  }
+  if (failure) {
     sendError.hidden = false;
-    sendError.textContent = error instanceof Error ? error.message : String(error);
-  });
+    sendError.textContent = failure;
+  }
+}
+
+async function stageDroppedFile(event: DragEvent): Promise<void> {
+  const pasted = event.dataTransfer?.getData("text/plain")?.trim() || "";
+  if (pasted.startsWith("file:") && composerInput.value.includes(pasted)) {
+    composerInput.value = composerInput.value.replace(pasted, "");
+    refreshSendButton();
+  }
+  const listed = Array.from(event.dataTransfer?.files || []);
+  if (listed.length > 0) {
+    stageFiles(openId, listed);
+    return;
+  }
+  const path = droppedFilePath(event);
+  if (!path) {
+    return;
+  }
+  await stageDroppedPaths([path]);
+}
+
+type DragPlace = { paths?: string[]; position: { x: number; y: number } };
+
+function dragHitsThread(position: { x: number; y: number }): boolean {
+  const scale = window.devicePixelRatio || 1;
+  const x = position.x / scale;
+  const y = position.y / scale;
+  if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) {
+    return false;
+  }
+  const target = document.elementFromPoint(x, y);
+  return Boolean(target && thread.contains(target) && openId && !composerInput.disabled);
+}
+
+function dragOverThread(event: DragEvent): boolean {
+  return event.target instanceof Node && thread.contains(event.target) && Boolean(openId) && !composerInput.disabled;
+}
+
+window.addEventListener("dragover", (event) => {
+  event.preventDefault();
+  const over = dragOverThread(event);
+  composerForm.classList.toggle("dropping", over);
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = over ? "copy" : "none";
+  }
+}, true);
+
+window.addEventListener("dragleave", (event) => {
+  if (!event.relatedTarget) {
+    composerForm.classList.remove("dropping");
+  }
+}, true);
+
+window.addEventListener("drop", (event) => {
+  event.preventDefault();
+  composerForm.classList.remove("dropping");
+  if (!dragOverThread(event)) {
+    return;
+  }
+  const path = droppedFilePath(event);
+  if (!dragHasFile(event) && !path && !event.dataTransfer?.files?.length) {
+    return;
+  }
+  closeStickerPanel();
+  void stageDroppedFile(event);
+}, true);
+
+void listen<DragPlace>("tauri://drag-enter", (event) => {
+  composerForm.classList.toggle("dropping", dragHitsThread(event.payload.position));
+});
+void listen<DragPlace>("tauri://drag-over", (event) => {
+  composerForm.classList.toggle("dropping", dragHitsThread(event.payload.position));
+});
+void listen("tauri://drag-leave", () => {
+  composerForm.classList.remove("dropping");
+});
+void listen<DragPlace>("tauri://drag-drop", (event) => {
+  composerForm.classList.remove("dropping");
+  const paths = event.payload.paths || [];
+  if (!paths.length || !dragHitsThread(event.payload.position)) {
+    return;
+  }
+  closeStickerPanel();
+  void stageDroppedPaths(paths);
 });
 
 stickerOpen.addEventListener("click", () => {
@@ -3502,6 +3922,63 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+function rememberLive(message: HistoryMessage): void {
+  if (!openHistory || !message.id) {
+    return;
+  }
+  const index = openHistory.messages.findIndex((entry) => entry.id === message.id);
+  if (index >= 0) {
+    const prior = openHistory.messages[index];
+    openHistory.messages[index] = {
+      ...prior,
+      ...message,
+      kind: message.kind || prior.kind,
+      mediaId: message.mediaId || prior.mediaId,
+      gid: message.gid || prior.gid,
+      seq: message.seq || prior.seq,
+    };
+    return;
+  }
+  openHistory.messages.push(message);
+}
+
+function showAlbum(gid: string, kind: string): boolean {
+  if (!openHistory || !gid || (kind !== "image" && kind !== "video")) {
+    return false;
+  }
+  const members = openHistory.messages
+    .filter((entry) => entry.gid === gid && entry.kind === kind && entry.mediaId)
+    .sort((left, right) => (left.seq || 0) - (right.seq || 0) || left.time - right.time);
+  const grouped = groupMessages(members)[0];
+  if (!grouped?.media?.length) {
+    return false;
+  }
+  const bubble = messageBubble(grouped);
+  bubble.dataset.gid = gid;
+  const hosts: HTMLElement[] = [];
+  const seen = new Set<HTMLElement>();
+  const add = (row: HTMLElement | null): void => {
+    if (row && !seen.has(row)) {
+      seen.add(row);
+      hosts.push(row);
+    }
+  };
+  add(albumHost(gid));
+  for (const member of members) {
+    add(member.id ? messageRow(member.id) : null);
+  }
+  threadBody.querySelector(".thread-note")?.remove();
+  if (hosts.length > 0) {
+    hosts[0].replaceWith(bubble);
+    for (const extra of hosts.slice(1)) {
+      extra.remove();
+    }
+  } else {
+    threadBody.append(bubble);
+  }
+  return true;
+}
+
 function appendLiveMessage(update: PollUpdate, followTail: boolean, batch: { focus: string; end: boolean }): void {
   const message = update.thread;
   if (!message?.text || update.id !== openId) {
@@ -3516,7 +3993,14 @@ function appendLiveMessage(update: PollUpdate, followTail: boolean, batch: { foc
     }
     return;
   }
-  if (message.id && threadBody.querySelector(`.msg[data-id="${CSS.escape(message.id)}"]`)) {
+  rememberLive(message);
+  if (message.gid && showAlbum(message.gid, message.kind || "")) {
+    if (message.mine) {
+      batch.end = true;
+    }
+    return;
+  }
+  if (message.id && messageRow(message.id)) {
     return;
   }
   const claimed = message.mine ? takeMatchingOutgoing(update.id, message) : null;
@@ -3809,6 +4293,7 @@ async function logout(): Promise<void> {
   }
   rows = [];
   openId = "";
+  discardAttachment();
   shownUrl = "";
   app.hidden = true;
   login.hidden = false;

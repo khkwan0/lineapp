@@ -5,7 +5,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -344,9 +344,21 @@ impl Client {
         client
     }
 
+    /// Talk treats `seq` as an idempotency key. A fresh client used to send `1`
+    /// every time, so a second send — the text next to a photo — came back as
+    /// the previous photo. Uploading onto that id failed, and the cleanup
+    /// unsend recalled the older photo.
     fn next_seq(&mut self) -> i32 {
-        self.seq += 1;
-        self.seq
+        static NEXT: AtomicI32 = AtomicI32::new(0);
+        if NEXT.load(Ordering::Relaxed) == 0 {
+            let mut bytes = [0u8; 4];
+            rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
+            let seed = (i32::from_ne_bytes(bytes) & 0x7fff_ffff).max(1);
+            let _ = NEXT.compare_exchange(0, seed, Ordering::Relaxed, Ordering::Relaxed);
+        }
+        let seq = NEXT.fetch_add(1, Ordering::Relaxed).max(1);
+        self.seq = seq;
+        seq
     }
 
     fn cancelled(&self) -> bool {
@@ -1129,14 +1141,15 @@ impl Client {
     /// to `obs.line-apps.com/r/talk/m/{message id}`. A chat that rejects that with
     /// letter sealing (TalkException 82) encrypts the file and uploads it under
     /// the `emi` / `emv` / `ema` / `emf` object path before the sealed message.
-    pub fn send_media_for_window(&mut self, to: &str, name: &str, mime: &str, bytes: &[u8]) -> Json {
+    pub fn send_media_for_window(&mut self, to: &str, name: &str, mime: &str, bytes: &[u8], album: Option<Album>) -> Json {
         if bytes.is_empty() || bytes.len() > MEDIA_LIMIT {
             return send_failure(to, &line("that file is too large to send"));
         }
         let kind = classify_media(name, mime);
-        match self.send_plain_media(to, &kind, bytes) {
+        let album = album.filter(|album| kind.kind == "image" && album_ok(album));
+        match self.send_plain_media(to, &kind, bytes, album.as_ref()) {
             Ok(sent) => sent,
-            Err(err) if needs_seal(&err) => match self.send_sealed_media(to, &kind, bytes) {
+            Err(err) if needs_seal(&err) => match self.send_sealed_media(to, &kind, bytes, album.as_ref()) {
                 Ok(sent) => sent,
                 Err(sealed) => send_failure(to, &sealed),
             },
@@ -2114,19 +2127,24 @@ impl Client {
             .map_err(fail_line)
     }
 
-    fn send_plain_media(&mut self, to: &str, kind: &OutgoingMedia, bytes: &[u8]) -> Result<Json, LineError> {
-        let meta = plain_media_meta(kind, bytes.len());
+    fn send_plain_media(&mut self, to: &str, kind: &OutgoingMedia, bytes: &[u8], album: Option<&Album>) -> Result<Json, LineError> {
+        let mut meta = plain_media_meta(kind, bytes.len());
+        push_album(&mut meta, album);
         let sent = self.send_content(to, kind.code, &meta, &[], false)?;
         let id = sent.get("messageId").and_then(|value| value.as_str()).unwrap_or("").to_string();
         if let Err(err) = self.obs_post(&format!("/r/talk/m/{id}"), bytes, &plain_obs_params(kind, &id)) {
-            let _ = self.unsend_message(&id);
+            // A reused request number comes back as an older photo. That photo is
+            // already stored, so a failed upload must not recall it.
+            if !crate::store::message_known(&id) {
+                let _ = self.unsend_message(&id);
+            }
             return Err(err);
         }
         cache_sent_media(&id, kind, bytes);
-        Ok(media_sent(sent, kind))
+        Ok(media_sent(sent, kind, album))
     }
 
-    fn send_sealed_media(&mut self, to: &str, kind: &OutgoingMedia, bytes: &[u8]) -> Result<Json, LineError> {
+    fn send_sealed_media(&mut self, to: &str, kind: &OutgoingMedia, bytes: &[u8], album: Option<&Album>) -> Result<Json, LineError> {
         let (private, sender_key, receiver_public, receiver_key, spec) = self.seal_material(to)?;
         let (material, encrypted) = e2ee::encrypt_file(bytes).map_err(line)?;
         let temp = temp_object_id();
@@ -2174,10 +2192,11 @@ impl Client {
             });
             meta.push((b"MEDIA_CONTENT_INFO".to_vec(), info.to_string().into_bytes()));
         }
+        push_album(&mut meta, album);
         let sent = self.send_content(to, kind.code, &meta, &chunks, false)?;
         let id = sent.get("messageId").and_then(|value| value.as_str()).unwrap_or("").to_string();
         cache_sent_media(&id, kind, bytes);
-        Ok(media_sent(sent, kind))
+        Ok(media_sent(sent, kind, album))
     }
 
     fn send_sealed_content(&mut self, to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], body: &[u8]) -> Result<Json, LineError> {
@@ -3426,7 +3445,27 @@ fn e2ee_meta(spec: i64, content_type: i32) -> Vec<(Vec<u8>, Vec<u8>)> {
     ]
 }
 
-fn media_sent(mut sent: Json, kind: &OutgoingMedia) -> Json {
+pub struct Album {
+    pub id: String,
+    pub seq: i32,
+    pub count: i32,
+}
+
+fn album_ok(album: &Album) -> bool {
+    (2..=10).contains(&album.count)
+        && (1..=album.count).contains(&album.seq)
+        && (1..=20).contains(&album.id.len())
+        && album.id.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn push_album(meta: &mut Vec<(Vec<u8>, Vec<u8>)>, album: Option<&Album>) {
+    let Some(album) = album.filter(|album| album_ok(album)) else { return };
+    meta.push((b"GID".to_vec(), album.id.as_bytes().to_vec()));
+    meta.push((b"GSEQ".to_vec(), album.seq.to_string().into_bytes()));
+    meta.push((b"GTOTAL".to_vec(), album.count.to_string().into_bytes()));
+}
+
+fn media_sent(mut sent: Json, kind: &OutgoingMedia, album: Option<&Album>) -> Json {
     if let Some(object) = sent.as_object_mut() {
         let id = object.get("messageId").cloned().unwrap_or(json!(""));
         object.insert("text".to_string(), json!(kind.label));
@@ -3434,6 +3473,10 @@ fn media_sent(mut sent: Json, kind: &OutgoingMedia) -> Json {
         object.insert("mediaId".to_string(), id);
         object.insert("animated".to_string(), json!(kind.animated));
         object.insert("fileName".to_string(), json!(kind.name));
+        if let Some(album) = album.filter(|album| album_ok(album)) {
+            object.insert("gid".to_string(), json!(album.id));
+            object.insert("seq".to_string(), json!(album.seq));
+        }
     }
     sent
 }
@@ -4773,6 +4816,12 @@ mod tests {
         assert_eq!(classify_media("voice.m4a", "audio/mp4").code, 3);
         assert_eq!(classify_media("notes.pdf", "application/pdf").code, 14);
         let frame = thrift::write_call("sendMessage", &content_fields("uabc", photo.code, &plain_media_meta(&photo, 12), 4, false));
+        let mut grouped = plain_media_meta(&photo, 12);
+        push_album(&mut grouped, Some(&Album { id: "1700000000000".into(), seq: 2, count: 3 }));
+        assert_eq!(grouped.iter().find(|(key, _)| key == b"GID").map(|(_, value)| value.as_slice()), Some(b"1700000000000".as_slice()));
+        assert_eq!(grouped.iter().find(|(key, _)| key == b"GSEQ").map(|(_, value)| value.as_slice()), Some(b"2".as_slice()));
+        assert_eq!(grouped.iter().find(|(key, _)| key == b"GTOTAL").map(|(_, value)| value.as_slice()), Some(b"3".as_slice()));
+        assert!(!album_ok(&Album { id: "1700000000000".into(), seq: 4, count: 3 }));
         let sticker = sticker_meta("11537", "52002734", true);
         assert_eq!(String::from_utf8(sticker.iter().find(|(key, _)| key == b"STKVER").unwrap().1.clone()).unwrap(), "1");
         let sealed = sticker_body(&sticker);

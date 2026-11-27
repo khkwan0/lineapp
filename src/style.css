@@ -1151,6 +1151,8 @@ body.profile.is-friend #profile-actions {
 
 .media-grid.many {
   display: grid;
+  width: 260px;
+  max-width: 100%;
   grid-template-columns: 1fr 1fr;
   gap: 4px;
 }
@@ -1199,6 +1201,33 @@ body.profile.is-friend #profile-actions {
   max-height: 360px;
   border-radius: 8px;
   background: #111;
+}
+
+.video-play {
+  position: relative;
+  display: block;
+  max-width: 240px;
+}
+
+.video-play-button {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 48px;
+  height: 48px;
+  margin: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 18px;
+  line-height: 48px;
+  transform: translate(-50%, -50%);
+  cursor: pointer;
+}
+
+.video-play-button[hidden] {
+  display: none;
 }
 
 #lightbox {
@@ -1360,12 +1389,68 @@ body.profile.is-friend #profile-actions {
   outline: none;
 }
 
-#composer-input:focus {
+#composer-input:focus,
+#composer.dropping #composer-input {
   border-color: #e4e6ea;
+}
+
+#composer.dropping #composer-input {
+  background: #f7f8f9;
 }
 
 #composer-input:disabled {
   color: #8b9098;
+}
+
+#send-message:not(:disabled),
+#send-message:not(:disabled):hover {
+  color: #06c755;
+}
+
+#attach-preview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 8px;
+  padding: 6px;
+  border-radius: 8px;
+  background: #f3f4f6;
+}
+
+.attach-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.attach-thumb {
+  display: block;
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.attach-name {
+  max-width: 240px;
+  overflow: hidden;
+  color: #444;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attach-remove {
+  border: 0;
+  background: transparent;
+  color: #666;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
 }
 
 #sticker-panel:not([hidden]) {

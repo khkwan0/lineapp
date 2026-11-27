@@ -17,6 +17,10 @@ struct LoginState {
     inbox: Mutex<Option<Arc<AtomicBool>>>,
 }
 
+/// One Talk send at a time. Photo upload and the caption share the session,
+/// and overlapping sends used to be answered with an older message.
+static TALK_SEND: Mutex<()> = Mutex::new(());
+
 struct AppPrefs {
     minimize_to_tray: AtomicBool,
     tray_badge: AtomicU32,
@@ -468,8 +472,68 @@ async fn send_reaction(id: String, message_id: String, emoji: String) -> Result<
         .map_err(|err| format!("could not send the reaction: {err}"))?
 }
 
+fn dropped_mime(name: &str) -> String {
+    match name.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "heic" => "image/heic",
+        "bmp" => "image/bmp",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "m4v" => "video/x-m4v",
+        "webm" => "video/webm",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+/// A file-manager drop on Linux arrives as a `file://` path, not a browser File.
 #[tauri::command]
-async fn send_media(app: AppHandle, id: String, name: String, mime: String, data: String, local_id: Option<String>) -> Result<(), String> {
+async fn read_dropped_file(path: String) -> Result<serde_json::Value, String> {
+    let path = path.trim().to_string();
+    if path.contains('\0') || path.len() > 4096 {
+        return Err("that file cannot be attached".to_string());
+    }
+    let path = std::path::PathBuf::from(&path);
+    if !path.is_absolute() {
+        return Err("that file cannot be attached".to_string());
+    }
+    let file = tauri::async_runtime::spawn_blocking(move || {
+        let meta = std::fs::metadata(&path).map_err(|_| "that file cannot be attached".to_string())?;
+        if !meta.is_file() {
+            return Err("that file cannot be attached".to_string());
+        }
+        if meta.len() == 0 {
+            return Err("that file cannot be attached".to_string());
+        }
+        if meta.len() > 40_000_000 {
+            return Err("that file is too large to send".to_string());
+        }
+        let bytes = std::fs::read(&path).map_err(|_| "that file cannot be attached".to_string())?;
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("file").to_string();
+        if name.len() > 240 {
+            return Err("that file cannot be attached".to_string());
+        }
+        use base64::Engine;
+        Ok(serde_json::json!({
+            "name": name,
+            "mime": dropped_mime(&name),
+            "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+        }))
+    })
+    .await
+    .map_err(|_| "that file cannot be attached".to_string())?;
+    file
+}
+
+#[tauri::command]
+async fn send_media(app: AppHandle, id: String, name: String, mime: String, data: String, local_id: Option<String>, group_id: Option<String>, group_seq: Option<i32>, group_count: Option<i32>) -> Result<(), String> {
     chat_id(&id)?;
     let name = name.trim().to_string();
     let mime = mime.trim().to_string();
@@ -485,7 +549,19 @@ async fn send_media(app: AppHandle, id: String, name: String, mime: String, data
     }
     let local_id = local_send_id(local_id.unwrap_or_default().trim());
     let chat = id.clone();
-    let mut value = tauri::async_runtime::spawn_blocking(move || line::Client::new().send_media_for_window(&id, &name, &mime, &bytes))
+    let album = group_id.and_then(|group| {
+        let seq = group_seq.unwrap_or(0);
+        let count = group_count.unwrap_or(0);
+        if group.is_empty() || seq <= 0 || count <= 0 {
+            None
+        } else {
+            Some(line::Album { id: group, seq, count })
+        }
+    });
+    let mut value = tauri::async_runtime::spawn_blocking(move || {
+        let _send = TALK_SEND.lock().unwrap_or_else(|err| err.into_inner());
+        line::Client::new().send_media_for_window(&id, &name, &mime, &bytes, album)
+    })
         .await
         .map_err(|err| format!("could not send: {err}"))?;
     if !local_id.is_empty() {
@@ -509,7 +585,10 @@ async fn send_sticker(app: AppHandle, id: String, package_id: String, sticker_id
     }
     let local_id = local_send_id(local_id.unwrap_or_default().trim());
     let chat = id.clone();
-    let mut value = tauri::async_runtime::spawn_blocking(move || line::Client::new().send_sticker_for_window(&id, &package_id, &sticker_id, animated))
+    let mut value = tauri::async_runtime::spawn_blocking(move || {
+        let _send = TALK_SEND.lock().unwrap_or_else(|err| err.into_inner());
+        line::Client::new().send_sticker_for_window(&id, &package_id, &sticker_id, animated)
+    })
         .await
         .map_err(|err| format!("could not send: {err}"))?;
     if !local_id.is_empty() {
@@ -536,7 +615,10 @@ async fn send_message(app: AppHandle, id: String, text: String, related_id: Opti
     }
     let local_id = local_send_id(local_id.unwrap_or_default().trim());
     let chat = id.clone();
-    let mut value = tauri::async_runtime::spawn_blocking(move || line::Client::new().send_for_window(&id, &body, &related))
+    let mut value = tauri::async_runtime::spawn_blocking(move || {
+        let _send = TALK_SEND.lock().unwrap_or_else(|err| err.into_inner());
+        line::Client::new().send_for_window(&id, &body, &related)
+    })
         .await
         .map_err(|err| format!("could not send: {err}"))?;
     if !local_id.is_empty() {
@@ -557,7 +639,10 @@ async fn unsend_message(id: String, message_id: String) -> Result<(), String> {
         return Err("that message cannot be unsent".to_string());
     }
     let checked = message_id.clone();
-    tauri::async_runtime::spawn_blocking(move || line::Client::new().unsend_message(&checked).map_err(|err| unsend_reason(&err)))
+    tauri::async_runtime::spawn_blocking(move || {
+        let _send = TALK_SEND.lock().unwrap_or_else(|err| err.into_inner());
+        line::Client::new().unsend_message(&checked).map_err(|err| unsend_reason(&err))
+    })
         .await
         .map_err(|err| format!("could not unsend: {err}"))??;
     let _ = store::mark_unsent(&message_id);
@@ -1090,13 +1175,18 @@ pub fn run() {
     line::install_config_dir(&context.config().identifier);
     let minimize_to_tray = load_minimize_to_tray();
     tauri::Builder::default()
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry, ()>::new("keep-page")
+                .on_navigation(|_webview, url| url.scheme() != "file")
+                .build(),
+        )
         .manage(LoginState { cancel: Mutex::new(None), inbox: Mutex::new(None) })
         .manage(AppPrefs { minimize_to_tray: AtomicBool::new(minimize_to_tray), tray_badge: AtomicU32::new(0) })
         .on_permission_request(|_window, kind| match kind {
             tauri::webview::PermissionKind::Microphone | tauri::webview::PermissionKind::Camera => tauri::webview::PermissionResponse::Allow,
             _ => tauri::webview::PermissionResponse::Default,
         })
-        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, send_message, send_media, send_sticker, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_tray_badge, list_media_devices, open_profile, block_profile, add_profile, open_fraud_help, rename_profile, favorite_profile, open_friend_chat, open_members, group_roster, rename_group, set_group_auto_join, invite_into_group, remove_group_member, group_invite_candidates])
+        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, read_dropped_file, send_message, send_media, send_sticker, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_tray_badge, list_media_devices, open_profile, block_profile, add_profile, open_fraud_help, rename_profile, favorite_profile, open_friend_chat, open_members, group_roster, rename_group, set_group_auto_join, invite_into_group, remove_group_member, group_invite_candidates])
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;

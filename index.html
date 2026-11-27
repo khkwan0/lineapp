@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>LINE</title>
     <link rel="stylesheet" href="/src/style.css" />
+    <script>
+      window.addEventListener("dragover", (event) => event.preventDefault(), true);
+      window.addEventListener("drop", (event) => event.preventDefault(), true);
+    </script>
   </head>
   <body>
     <main id="login">
@@ -79,6 +83,7 @@
             <button id="reply-cancel" type="button" data-i18n-aria="cancelReply" aria-label="Cancel reply">×</button>
           </div>
           <div id="sticker-panel" hidden></div>
+          <div id="attach-preview" hidden></div>
           <div id="composer-row">
             <button id="attach-file" type="button" data-i18n-aria="attachFile" aria-label="Attach a file">
               <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -92,7 +97,13 @@
               </svg>
             </button>
             <textarea id="composer-input" rows="2" data-i18n-placeholder="enterMessage" placeholder="Enter a message" disabled></textarea>
-            <input id="file-input" type="file" hidden />
+            <button id="send-message" type="submit" data-i18n-aria="send" aria-label="Send" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4.5 12 19 5.5 14.2 18.5 11.8 13.2 4.5 12Z" />
+                <path d="M11.8 13.2 19 5.5" />
+              </svg>
+            </button>
+            <input id="file-input" type="file" multiple hidden />
           </div>
         </form>
       </section>

@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title data-i18n="members">Members</title>
     <link rel="stylesheet" href="/src/style.css" />
+    <script>
+      window.addEventListener("dragover", (event) => event.preventDefault(), true);
+      window.addEventListener("drop", (event) => event.preventDefault(), true);
+    </script>
   </head>
   <body class="members">
     <header id="members-head">
