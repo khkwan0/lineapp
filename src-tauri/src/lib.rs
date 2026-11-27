@@ -2,6 +2,7 @@ mod e2ee;
 mod h2gate;
 mod legy;
 mod line;
+mod preview;
 mod store;
 mod thrift;
 
@@ -23,6 +24,8 @@ static TALK_SEND: Mutex<()> = Mutex::new(());
 
 struct AppPrefs {
     minimize_to_tray: AtomicBool,
+    always_on_top: AtomicBool,
+    focus_on_message: AtomicBool,
     tray_badge: AtomicU32,
 }
 
@@ -221,6 +224,7 @@ async fn open_profile(app: AppHandle, id: String, name: String, picture: String,
             .inner_size(380.0, 560.0)
             .min_inner_size(320.0, 480.0)
             .resizable(true)
+            .always_on_top(app.state::<AppPrefs>().always_on_top.load(Ordering::Relaxed))
             .center()
             .initialization_script(profile_script(&initial))
             .build()
@@ -312,6 +316,7 @@ async fn open_members(app: AppHandle, id: String, name: String, picture: String)
         .inner_size(380.0, 680.0)
         .min_inner_size(320.0, 520.0)
         .resizable(true)
+        .always_on_top(app.state::<AppPrefs>().always_on_top.load(Ordering::Relaxed))
         .center()
         .initialization_script(members_script(&initial))
         .build()
@@ -373,6 +378,45 @@ async fn remove_group_member(id: String, member: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn list_friends() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| line::Client::new().list_friends().map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not load friends: {err}"))?
+}
+
+#[tauri::command]
+async fn friend_recommendations() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| line::Client::new().friend_recommendations().map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not load recommendations: {err}"))?
+}
+
+#[tauri::command]
+async fn find_person(query: String) -> Result<serde_json::Value, String> {
+    let query = query.trim().to_string();
+    if query.is_empty() || query.chars().count() > 40 {
+        return Err("Enter a LINE ID or phone number.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().find_person(&query).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not search: {err}"))?
+}
+
+#[tauri::command]
+async fn create_group(name: String, targets: Vec<String>) -> Result<serde_json::Value, String> {
+    if targets.len() > 100 {
+        return Err("Choose fewer friends.".into());
+    }
+    for id in &targets {
+        user_mid(id)?;
+    }
+    let label = name.trim().to_string();
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().create_group(&label, &targets).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not create the group: {err}"))?
+}
+
+#[tauri::command]
 async fn group_invite_candidates(id: String) -> Result<serde_json::Value, String> {
     group_mid(&id)?;
     tauri::async_runtime::spawn_blocking(move || line::Client::new().group_invite_candidates(&id).map_err(|err| err.to_string()))
@@ -410,14 +454,19 @@ fn profile_script_call(name: &str, payload: &serde_json::Value) -> String {
 
 #[tauri::command]
 fn open_fraud_help() -> Result<(), String> {
-    std::process::Command::new("xdg-open")
-        .arg("https://help.line.me/line/desktop/?contentId=20011496")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|err| format!("could not open the help page: {err}"))?;
-    Ok(())
+    preview::open_in_browser("https://help.line.me/line/desktop/?contentId=20011496")
+}
+
+#[tauri::command]
+fn open_link(url: String) -> Result<(), String> {
+    preview::open_in_browser(&url)
+}
+
+#[tauri::command]
+async fn link_preview(url: String) -> Result<preview::Card, String> {
+    Ok(tauri::async_runtime::spawn_blocking(move || preview::load(&url))
+        .await
+        .map_err(|_| "could not read that link".to_string())??)
 }
 
 #[tauri::command]
@@ -760,6 +809,8 @@ fn quit(app: AppHandle) {
 #[serde(rename_all = "camelCase")]
 struct Settings {
     minimize_to_tray: bool,
+    always_on_top: bool,
+    focus_on_message: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -975,7 +1026,11 @@ fn enable_capture(window: &tauri::WebviewWindow) {
 
 #[tauri::command]
 fn get_settings(state: State<'_, AppPrefs>) -> Settings {
-    Settings { minimize_to_tray: state.minimize_to_tray.load(Ordering::Relaxed) }
+    Settings {
+        minimize_to_tray: state.minimize_to_tray.load(Ordering::Relaxed),
+        always_on_top: state.always_on_top.load(Ordering::Relaxed),
+        focus_on_message: state.focus_on_message.load(Ordering::Relaxed),
+    }
 }
 
 #[tauri::command]
@@ -988,7 +1043,7 @@ fn set_minimize_to_tray(app: AppHandle, state: State<'_, AppPrefs>, enabled: boo
     if enabled {
         ensure_tray(&app)?;
     }
-    save_minimize_to_tray(enabled)?;
+    save_setting("minimizeToTray", enabled)?;
     state.minimize_to_tray.store(enabled, Ordering::Relaxed);
     if !enabled {
         reveal(&app);
@@ -997,28 +1052,167 @@ fn set_minimize_to_tray(app: AppHandle, state: State<'_, AppPrefs>, enabled: boo
     Ok(())
 }
 
+#[tauri::command]
+fn set_always_on_top(app: AppHandle, state: State<'_, AppPrefs>, enabled: bool) -> Result<(), String> {
+    save_setting("alwaysOnTop", enabled)?;
+    if let Err(err) = apply_always_on_top(&app, enabled) {
+        let _ = save_setting("alwaysOnTop", !enabled);
+        return Err(err);
+    }
+    state.always_on_top.store(enabled, Ordering::Relaxed);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_focus_on_message(state: State<'_, AppPrefs>, enabled: bool) -> Result<(), String> {
+    save_setting("focusOnMessage", enabled)?;
+    state.focus_on_message.store(enabled, Ordering::Relaxed);
+    if !enabled {
+        let _ = kwin_script(&["org.kde.kwin.Scripting.unloadScript", "lineapp-focus"]);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn focus_for_message(app: AppHandle, state: State<'_, AppPrefs>) {
+    if state.focus_on_message.load(Ordering::Relaxed) {
+        reveal(&app);
+        if wayland_session() {
+            let _ = kwin_activate_main();
+        }
+    }
+}
+
+static FOCUS_GEN: AtomicU32 = AtomicU32::new(0);
+
+fn kwin_activate_main() -> Result<(), String> {
+    let path = settings_path().with_file_name("lineapp-focus.js");
+    let body = "function lineappActivate(client) {\n    if (!client) return;\n    if (client.resourceName !== \"lineapp\" && client.resourceClass !== \"lineapp\") return;\n    if (client.caption !== \"LINE\") return;\n    client.minimized = false;\n    try { workspace.raiseWindow(client); } catch (error) {}\n    workspace.activeWindow = client;\n}\nworkspace.windowList().forEach(lineappActivate);\nworkspace.windowAdded.connect(lineappActivate);\n";
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+    }
+    std::fs::write(&path, body).map_err(|err| err.to_string())?;
+    let _ = kwin_script(&["org.kde.kwin.Scripting.unloadScript", "lineapp-focus"]);
+    kwin_script(&["org.kde.kwin.Scripting.loadScript", &path.display().to_string(), "lineapp-focus"])?;
+    kwin_script(&["org.kde.kwin.Scripting.start"])?;
+    let gen = FOCUS_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if FOCUS_GEN.load(Ordering::Relaxed) == gen {
+            let _ = kwin_script(&["org.kde.kwin.Scripting.unloadScript", "lineapp-focus"]);
+        }
+    });
+    Ok(())
+}
+
+fn apply_always_on_top(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    for (_, window) in app.webview_windows() {
+        window.set_always_on_top(enabled).map_err(|err| err.to_string())?;
+    }
+    // GTK's keep-above flag does nothing on Wayland. KDE still honors keepAbove.
+    if wayland_session() {
+        kwin_keep_above(enabled)?;
+    }
+    Ok(())
+}
+
+fn wayland_session() -> bool {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        return true;
+    }
+    std::env::var_os("XDG_SESSION_TYPE").is_some_and(|kind| kind == "wayland")
+}
+
+fn kwin_keep_above(enabled: bool) -> Result<(), String> {
+    let plugin = if enabled { "lineapp-keep-above" } else { "lineapp-clear-above" };
+    let path = settings_path().with_file_name(format!("{plugin}.js"));
+    let body = if enabled {
+        "function lineappKeepAbove(client) {\n    if (client.resourceClass === \"lineapp\" || client.resourceName === \"lineapp\") {\n        client.keepAbove = true;\n    }\n}\nworkspace.windowList().forEach(lineappKeepAbove);\nworkspace.windowAdded.connect(lineappKeepAbove);\n"
+    } else {
+        "workspace.windowList().forEach(function (client) {\n    if (client.resourceClass === \"lineapp\" || client.resourceName === \"lineapp\") {\n        client.keepAbove = false;\n    }\n});\n"
+    };
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+    }
+    std::fs::write(&path, body).map_err(|err| err.to_string())?;
+    kwin_script(&["org.kde.kwin.Scripting.unloadScript", "lineapp-keep-above"])?;
+    kwin_script(&["org.kde.kwin.Scripting.unloadScript", "lineapp-clear-above"])?;
+    kwin_script(&["org.kde.kwin.Scripting.loadScript", &path.display().to_string(), plugin])?;
+    kwin_script(&["org.kde.kwin.Scripting.start"])?;
+    Ok(())
+}
+
+fn kwin_script(args: &[&str]) -> Result<(), String> {
+    let mut last_error = String::from("this desktop cannot keep a window above others");
+    for bin in ["qdbus6", "qdbus"] {
+        match std::process::Command::new(bin)
+            .args(["org.kde.KWin", "/Scripting"])
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(output) => {
+                let err = String::from_utf8_lossy(&output.stderr);
+                let err = err.trim();
+                if !err.is_empty() {
+                    last_error = err.to_string();
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => last_error = err.to_string(),
+        }
+    }
+    Err(last_error)
+}
+
 fn settings_path() -> std::path::PathBuf {
     line::config_path().with_file_name("lineapp.settings.json")
 }
 
-fn load_minimize_to_tray() -> bool {
-    let Ok(text) = std::fs::read_to_string(settings_path()) else {
-        return true;
-    };
-    serde_json::from_str::<serde_json::Value>(&text)
-        .ok()
-        .and_then(|value| value.get("minimizeToTray").and_then(|flag| flag.as_bool()))
-        .unwrap_or(true)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PrefFlags {
+    minimize_to_tray: bool,
+    always_on_top: bool,
+    focus_on_message: bool,
 }
 
-fn save_minimize_to_tray(enabled: bool) -> Result<(), String> {
+fn load_settings() -> PrefFlags {
+    let Ok(text) = std::fs::read_to_string(settings_path()) else {
+        return PrefFlags { minimize_to_tray: true, always_on_top: false, focus_on_message: false };
+    };
+    settings_flags(&text)
+}
+
+fn settings_flags(text: &str) -> PrefFlags {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return PrefFlags { minimize_to_tray: true, always_on_top: false, focus_on_message: false };
+    };
+    PrefFlags {
+        minimize_to_tray: value.get("minimizeToTray").and_then(|flag| flag.as_bool()).unwrap_or(true),
+        always_on_top: value.get("alwaysOnTop").and_then(|flag| flag.as_bool()).unwrap_or(false),
+        focus_on_message: value.get("focusOnMessage").and_then(|flag| flag.as_bool()).unwrap_or(false),
+    }
+}
+
+fn save_setting(key: &str, enabled: bool) -> Result<(), String> {
     let path = settings_path();
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
         }
     }
-    let body = serde_json::to_vec_pretty(&serde_json::json!({ "minimizeToTray": enabled })).map_err(|err| err.to_string())?;
+    let mut value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    value[key] = serde_json::Value::Bool(enabled);
+    let body = serde_json::to_vec_pretty(&value).map_err(|err| err.to_string())?;
     std::fs::write(&path, body).map_err(|err| err.to_string())?;
     #[cfg(unix)]
     {
@@ -1223,7 +1417,9 @@ pub fn run() {
     install_taskbar_icon();
     let context = tauri::generate_context!();
     line::install_config_dir(&context.config().identifier);
-    let minimize_to_tray = load_minimize_to_tray();
+    let prefs = load_settings();
+    let minimize_to_tray = prefs.minimize_to_tray;
+    let always_on_top = prefs.always_on_top;
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(
@@ -1232,12 +1428,17 @@ pub fn run() {
                 .build(),
         )
         .manage(LoginState { cancel: Mutex::new(None), inbox: Mutex::new(None) })
-        .manage(AppPrefs { minimize_to_tray: AtomicBool::new(minimize_to_tray), tray_badge: AtomicU32::new(0) })
+        .manage(AppPrefs {
+            minimize_to_tray: AtomicBool::new(minimize_to_tray),
+            always_on_top: AtomicBool::new(always_on_top),
+            focus_on_message: AtomicBool::new(prefs.focus_on_message),
+            tray_badge: AtomicU32::new(0),
+        })
         .on_permission_request(|_window, kind| match kind {
             tauri::webview::PermissionKind::Microphone | tauri::webview::PermissionKind::Camera => tauri::webview::PermissionResponse::Allow,
             _ => tauri::webview::PermissionResponse::Default,
         })
-        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, save_download, read_dropped_file, send_message, send_media, send_sticker, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_tray_badge, list_media_devices, open_profile, block_profile, add_profile, open_fraud_help, rename_profile, favorite_profile, open_friend_chat, open_members, group_roster, rename_group, set_group_auto_join, invite_into_group, remove_group_member, group_invite_candidates])
+        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, save_download, read_dropped_file, send_message, send_media, send_sticker, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_always_on_top, set_focus_on_message, focus_for_message, set_tray_badge, list_media_devices, open_profile, block_profile, add_profile, open_fraud_help, open_link, link_preview, rename_profile, favorite_profile, open_friend_chat, open_members, group_roster, rename_group, set_group_auto_join, invite_into_group, remove_group_member, group_invite_candidates, list_friends, friend_recommendations, find_person, create_group])
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;
@@ -1252,6 +1453,11 @@ pub fn run() {
         .setup(move |app| {
             if let Some(window) = app.get_webview_window("main") {
                 enable_capture(&window);
+            }
+            if always_on_top {
+                if let Err(err) = apply_always_on_top(app.handle(), true) {
+                    eprintln!("lineapp: {err}");
+                }
             }
             if minimize_to_tray {
                 if let Err(err) = ensure_tray(app.handle()) {
@@ -1279,7 +1485,18 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{badge_image, capture_flags, local_send_id, parse_pulse};
+    use super::{badge_image, capture_flags, local_send_id, parse_pulse, settings_flags, PrefFlags};
+
+    #[test]
+    fn settings_keep_both_flags() {
+        let absent = PrefFlags { minimize_to_tray: true, always_on_top: false, focus_on_message: false };
+        assert_eq!(settings_flags("{"), absent);
+        assert_eq!(settings_flags(r#"{"minimizeToTray": false}"#), PrefFlags { minimize_to_tray: false, ..absent });
+        assert_eq!(
+            settings_flags(r#"{"minimizeToTray": true, "alwaysOnTop": true, "focusOnMessage": true}"#),
+            PrefFlags { minimize_to_tray: true, always_on_top: true, focus_on_message: true }
+        );
+    }
 
     #[test]
     fn unread_badge_sits_on_the_icon() {

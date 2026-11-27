@@ -2153,6 +2153,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "ureq",
+ "url",
  "webkit2gtk",
  "webpki-roots 0.26.11",
  "x25519-dalek",

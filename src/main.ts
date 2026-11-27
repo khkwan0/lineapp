@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import QRCode from "qrcode";
+import { FONT_IDS, fontStack, readAppearance, saveAppearance, type FontId } from "./appearance";
 import { applyI18n, intlLocale, languageName, languagePreference, LOCALES, onLocaleChange, setLanguage, t, type MessageKey } from "./i18n";
 
 type LoginEvent = {
@@ -51,6 +52,8 @@ type HistoryMessage = {
   replyText?: string;
   replyName?: string;
   replyPicture?: string;
+  replyThumb?: string;
+  replyMediaId?: string;
 };
 
 type MediaSlot = { id: string; seq: number; animated?: boolean };
@@ -122,6 +125,31 @@ const sendNote = document.querySelector<HTMLParagraphElement>("#send-note")!;
 const attachPreview = document.querySelector<HTMLElement>("#attach-preview")!;
 const sendError = document.querySelector<HTMLParagraphElement>("#send-error")!;
 const railMore = document.querySelector<HTMLButtonElement>("#rail-more")!;
+const railPeople = document.querySelector<HTMLButtonElement>("#rail-people")!;
+const railChats = document.querySelector<HTMLButtonElement>("#rail-chats")!;
+const railFriends = document.querySelector<HTMLButtonElement>("#rail-friends")!;
+const stage = document.querySelector<HTMLElement>("#stage")!;
+const peoplePane = document.querySelector<HTMLElement>("#people-pane")!;
+const peopleQuery = document.querySelector<HTMLInputElement>("#people-query")!;
+const peopleList = document.querySelector<HTMLUListElement>("#people")!;
+const peopleNote = document.querySelector<HTMLElement>("#people-note")!;
+const addPane = document.querySelector<HTMLElement>("#add-pane")!;
+const addHome = document.querySelector<HTMLElement>("#add-home")!;
+const addSearchView = document.querySelector<HTMLElement>("#add-search-view")!;
+const addGroupView = document.querySelector<HTMLElement>("#add-group-view")!;
+const addRecsToggle = document.querySelector<HTMLButtonElement>("#add-recs-toggle")!;
+const addRecsLabel = document.querySelector<HTMLElement>("#add-recs-label")!;
+const addRecs = document.querySelector<HTMLUListElement>("#add-recs")!;
+const addRecsNote = document.querySelector<HTMLElement>("#add-recs-note")!;
+const addSearchForm = document.querySelector<HTMLFormElement>("#add-search-form")!;
+const addSearchQuery = document.querySelector<HTMLInputElement>("#add-search-query")!;
+const addSearchResult = document.querySelector<HTMLElement>("#add-search-result")!;
+const addSearchNote = document.querySelector<HTMLElement>("#add-search-note")!;
+const addGroupInput = document.querySelector<HTMLInputElement>("#add-group-input")!;
+const addGroupQuery = document.querySelector<HTMLInputElement>("#add-group-query")!;
+const addGroupList = document.querySelector<HTMLUListElement>("#add-group-list")!;
+const addGroupNote = document.querySelector<HTMLElement>("#add-group-note")!;
+const addGroupCreate = document.querySelector<HTMLButtonElement>("#add-group-create")!;
 const railMenu = document.querySelector<HTMLElement>("#rail-menu")!;
 const sheet = document.querySelector<HTMLElement>("#sheet")!;
 const sheetTitle = document.querySelector<HTMLElement>("#sheet-title")!;
@@ -131,6 +159,13 @@ const sheetAbout = document.querySelector<HTMLElement>("#sheet-about")!;
 const aboutBuild = document.querySelector<HTMLElement>("#about-build")!;
 const aboutTime = document.querySelector<HTMLElement>("#about-time")!;
 const minimizeToTray = document.querySelector<HTMLInputElement>("#minimize-to-tray")!;
+const keepOnTop = document.querySelector<HTMLInputElement>("#keep-on-top")!;
+const focusOnMessageBox = document.querySelector<HTMLInputElement>("#focus-on-message")!;
+let focusOnMessage = false;
+const fontFamily = document.querySelector<HTMLSelectElement>("#font-family")!;
+const textSize = document.querySelector<HTMLInputElement>("#text-size")!;
+const textSizeLabel = document.querySelector<HTMLElement>("#text-size-label")!;
+const TEXT_SIZE_KEYS = ["textSmall", "textDefault", "textLarge", "textLarger", "textLargest"] as const satisfies readonly MessageKey[];
 const devicesOutput = document.querySelector<HTMLElement>("#devices-output")!;
 const devicesInput = document.querySelector<HTMLElement>("#devices-input")!;
 const devicesCamera = document.querySelector<HTMLElement>("#devices-camera")!;
@@ -140,11 +175,14 @@ const lightboxImg = document.querySelector<HTMLImageElement>("#lightbox-img")!;
 const lightboxVideo = document.querySelector<HTMLVideoElement>("#lightbox-video")!;
 const lightboxPrev = document.querySelector<HTMLButtonElement>("#lightbox-prev")!;
 const lightboxNext = document.querySelector<HTMLButtonElement>("#lightbox-next")!;
+const lightboxNav = document.querySelector<HTMLElement>("#lightbox-nav")!;
+const lightboxCount = document.querySelector<HTMLElement>("#lightbox-count")!;
 const msgMenu = document.querySelector<HTMLElement>("#msg-menu")!;
 const replyBar = document.querySelector<HTMLElement>("#reply-bar")!;
 const replyAvatar = document.querySelector<HTMLElement>("#reply-avatar")!;
 const replyLabel = document.querySelector<HTMLElement>("#reply-label")!;
 const replyText = document.querySelector<HTMLElement>("#reply-text")!;
+const replyThumb = document.querySelector<HTMLImageElement>("#reply-thumb")!;
 const sheetList = document.querySelector<HTMLElement>("#sheet-list")!;
 const sheetLanguage = document.querySelector<HTMLElement>("#sheet-language")!;
 const languageCurrent = document.querySelector<HTMLElement>("#language-current")!;
@@ -170,9 +208,25 @@ let paintedIds = "";
 let openUnread = 0;
 let unreadFocus = "";
 let placingThread = false;
+let expectedTop = -1;
 let userMoved = false;
 let placeToken = 0;
+let layoutWatch: { token: number; kind: "tail" | "anchor"; stop: () => void } | null = null;
 let signedIn = false;
+type RailMode = "chats" | "friends" | "add";
+type DirectoryPerson = { id: string; name: string; picture: string; favorite?: boolean; friend?: boolean; status?: string };
+type Recommendation = { id: string; name: string; picture: string; reason?: string };
+let railMode: RailMode = "chats";
+let directoryPeople: DirectoryPerson[] = [];
+let peopleToken = 0;
+let peopleReady = false;
+let peopleError = "";
+let recommendations: Recommendation[] = [];
+let recsToken = 0;
+let recsOpen = true;
+let recsReady = false;
+let recsError = "";
+const groupPicked = new Set<string>();
 const mediaUrls = new Map<string, string>();
 const animatedMedia = new Set<string>();
 const mediaMimes = new Map<string, string>();
@@ -181,7 +235,7 @@ let gallery: { ids: string[]; index: number } | null = null;
 let localGallery: { urls: string[]; index: number } | null = null;
 let trayBadge = -1;
 
-type ReplyDraft = { id: string; text: string; name: string; picture: string };
+type ReplyDraft = { id: string; text: string; name: string; picture: string; thumb?: string; mediaId?: string };
 type Outgoing = {
   localId: string;
   chatId: string;
@@ -682,6 +736,7 @@ function catchUpRead(): void {
 }
 
 function showThread(chat: ChatRow | undefined): void {
+  stage.hidden = Boolean(chat) || !signedIn;
   if (!chat) {
     thread.hidden = true;
     openId = "";
@@ -721,6 +776,8 @@ function showThread(chat: ChatRow | undefined): void {
     sendNote.hidden = true;
     unreadFocus = "";
     userMoved = false;
+    stopLayoutWatch();
+    placeToken += 1;
     closeGallery();
     closeReactionPicker();
     closeMsgMenu();
@@ -779,6 +836,7 @@ function renderHistory(payload: HistoryPayload): void {
   paintedIds = payload.messages.map((message) => message.id || "").join("\u001f");
   closeReactionPicker();
   closeMsgMenu();
+  placingThread = true;
   threadBody.replaceChildren();
   if (payload.messages.length === 0 && !outgoing.some((item) => item.chatId === payload.id)) {
     const note = document.createElement("p");
@@ -788,6 +846,8 @@ function renderHistory(payload: HistoryPayload): void {
     threadBody.append(note);
     document.body.dataset.history = "0";
     unreadFocus = "";
+    stopLayoutWatch();
+    placingThread = false;
     markOpenRead(payload.id);
     return;
   }
@@ -796,6 +856,11 @@ function renderHistory(payload: HistoryPayload): void {
   settleThread(payload.messages, previousIds, firstPaint, savedTop);
   if (placed && !userMoved) {
     scrollThreadToEnd();
+  }
+  if (!layoutWatch) {
+    requestAnimationFrame(() => {
+      placingThread = false;
+    });
   }
   document.body.dataset.history = String(payload.messages.length);
   markOpenRead(payload.id);
@@ -843,8 +908,16 @@ function settleThread(messages: HistoryMessage[], previousIds: Set<string>, firs
     return;
   }
   const added = messages.filter((message) => message.id && !previousIds.has(message.id));
-  if (added.length === 0 || userMoved) {
-    threadBody.scrollTop = savedTop;
+  if (userMoved) {
+    assignThreadScroll(savedTop);
+    return;
+  }
+  if (added.length === 0) {
+    if (unreadFocus) {
+      placeThread();
+    } else {
+      scrollThreadToEnd();
+    }
     return;
   }
   const incoming = added.map(incomingId).filter((id) => id);
@@ -1368,6 +1441,207 @@ function imageThumb(url: string, onClick: () => void): HTMLButtonElement {
 
 const COLLAPSED_LINES = 15;
 
+type HttpsLink = { start: number; end: number; open: string };
+type LinkPreview = { url: string; title: string; description: string; image: string; site: string };
+
+const linkPreviewCache = new Map<string, LinkPreview | null>();
+const linkPreviewJobs = new Map<string, Promise<LinkPreview | null>>();
+
+function trimUrlTail(raw: string): string {
+  let text = raw;
+  while (text.length > "https://".length) {
+    const last = text.at(-1) || "";
+    if (last === ")") {
+      const opens = text.split("(").length - 1;
+      const closes = text.split(")").length - 1;
+      if (closes <= opens) {
+        break;
+      }
+      text = text.slice(0, -1);
+      continue;
+    }
+    if (last === "]") {
+      const opens = text.split("[").length - 1;
+      const closes = text.split("]").length - 1;
+      if (closes <= opens) {
+        break;
+      }
+      text = text.slice(0, -1);
+      continue;
+    }
+    if (".,;:!?\"'".includes(last)) {
+      text = text.slice(0, -1);
+      continue;
+    }
+    break;
+  }
+  return text;
+}
+
+function canonicalHttps(raw: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:") {
+    return null;
+  }
+  if (url.username || url.password) {
+    return null;
+  }
+  const host = url.hostname.replace(/\.$/, "").toLowerCase();
+  if (!host || host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) {
+    return null;
+  }
+  if (!host.includes(".") && !host.includes(":")) {
+    return null;
+  }
+  return url.href;
+}
+
+function httpsLinks(text: string): HttpsLink[] {
+  const found: HttpsLink[] = [];
+  const re = /https:\/\/[^\s<>"']+/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    const cleaned = trimUrlTail(match[0]);
+    const open = canonicalHttps(cleaned);
+    if (!open) {
+      continue;
+    }
+    found.push({ start: match.index, end: match.index + cleaned.length, open });
+  }
+  return found;
+}
+
+function soleHttpsUrl(text: string): string | null {
+  const trimmed = text.trim();
+  const links = httpsLinks(trimmed);
+  if (links.length !== 1 || links[0].start !== 0) {
+    return null;
+  }
+  const after = trimmed.slice(links[0].end);
+  if (after && !/^[\s.)\],;:!?'"]+$/.test(after)) {
+    return null;
+  }
+  return links[0].open;
+}
+
+function openHttps(url: string): void {
+  const open = canonicalHttps(url);
+  if (!open) {
+    return;
+  }
+  void invoke("open_link", { url: open }).catch((error: unknown) => {
+    sendError.hidden = false;
+    sendError.textContent = error instanceof Error ? error.message : String(error);
+  });
+}
+
+function bindExternalLink(anchor: HTMLAnchorElement, url: string): void {
+  const open = (event: MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openHttps(url);
+  };
+  anchor.addEventListener("click", open);
+  anchor.addEventListener("auxclick", (event) => {
+    if (event.button === 1) {
+      open(event);
+    }
+  });
+}
+
+function fillMessageText(body: HTMLElement, text: string): void {
+  const links = httpsLinks(text);
+  if (links.length === 0) {
+    body.textContent = text;
+    return;
+  }
+  let cursor = 0;
+  for (const link of links) {
+    if (link.start > cursor) {
+      body.append(document.createTextNode(text.slice(cursor, link.start)));
+    }
+    const anchor = document.createElement("a");
+    anchor.className = "msg-link";
+    anchor.href = link.open;
+    anchor.rel = "noopener noreferrer";
+    anchor.textContent = text.slice(link.start, link.end);
+    bindExternalLink(anchor, link.open);
+    body.append(anchor);
+    cursor = link.end;
+  }
+  if (cursor < text.length) {
+    body.append(document.createTextNode(text.slice(cursor)));
+  }
+}
+
+function paintLinkCard(card: HTMLAnchorElement, preview: LinkPreview): void {
+  card.hidden = false;
+  card.replaceChildren();
+  if (preview.image.startsWith("https://")) {
+    const img = document.createElement("img");
+    img.alt = "";
+    img.src = preview.image;
+    img.addEventListener("error", () => img.remove());
+    card.append(img);
+  }
+  const copy = document.createElement("span");
+  copy.className = "link-card-copy";
+  if (preview.title) {
+    const title = document.createElement("strong");
+    title.className = "link-card-title";
+    title.textContent = preview.title;
+    copy.append(title);
+  }
+  if (preview.description) {
+    const desc = document.createElement("span");
+    desc.className = "link-card-desc";
+    desc.textContent = preview.description;
+    copy.append(desc);
+  }
+  const site = document.createElement("span");
+  site.className = "link-card-site";
+  site.textContent = preview.site || "";
+  copy.append(site);
+  card.append(copy);
+}
+
+function showLinkCard(card: HTMLAnchorElement, url: string): void {
+  const apply = (preview: LinkPreview | null) => {
+    if (!preview || !card.isConnected || (!preview.title && !preview.image)) {
+      return;
+    }
+    paintLinkCard(card, preview);
+  };
+  const cached = linkPreviewCache.get(url);
+  if (cached !== undefined) {
+    apply(cached);
+    return;
+  }
+  let job = linkPreviewJobs.get(url);
+  if (!job) {
+    job = invoke<LinkPreview>("link_preview", { url })
+      .then((preview) => {
+        const stored = preview.title || preview.image ? preview : null;
+        linkPreviewCache.set(url, stored);
+        return stored;
+      })
+      .catch(() => {
+        linkPreviewCache.set(url, null);
+        return null;
+      })
+      .finally(() => {
+        linkPreviewJobs.delete(url);
+      });
+    linkPreviewJobs.set(url, job);
+  }
+  void job.then(apply);
+}
+
 function appendMessageText(bubble: HTMLElement, text: string): void {
   const callLabel = callPreviewLabel(text);
   const body = document.createElement("div");
@@ -1376,9 +1650,20 @@ function appendMessageText(bubble: HTMLElement, text: string): void {
     body.classList.add("call");
     body.append(phoneIcon(), document.createTextNode(callLabel));
   } else {
-    body.textContent = text;
+    fillMessageText(body, text);
   }
   bubble.append(body);
+  const sole = callLabel ? null : soleHttpsUrl(text);
+  if (sole) {
+    const card = document.createElement("a");
+    card.className = "link-card";
+    card.hidden = true;
+    card.href = sole;
+    card.rel = "noopener noreferrer";
+    bindExternalLink(card, sole);
+    bubble.append(card);
+    showLinkCard(card, sole);
+  }
   queueMicrotask(() => clampIfTall(body));
 }
 
@@ -1716,7 +2001,41 @@ function hydrateReplies(messages: HistoryMessage[]): HistoryMessage[] {
       replyText: message.replyText || (source ? quoteFromHistory(source) : t("message")),
       replyName: message.replyName || (source ? (source.mine ? (myName || t("you")) : (source.name || t("message"))) : ""),
       replyPicture: message.replyPicture || (source ? quotedPicture(source) : ""),
+      replyThumb: message.replyThumb || "",
+      replyMediaId: message.replyMediaId || imageReplyId(source),
     };
+  });
+}
+
+function imageReplyId(source: HistoryMessage | undefined): string {
+  if (!source || source.kind !== "image") {
+    return "";
+  }
+  const id = source.mediaId || source.id || "";
+  return messageIdNumber(id) ? id : "";
+}
+
+function showReplyThumb(img: HTMLImageElement, url: string, mediaId: string): void {
+  const show = (src: string) => {
+    if (!src || !img.isConnected) {
+      return;
+    }
+    img.hidden = false;
+    img.src = src;
+  };
+  if (url) {
+    show(url);
+  }
+  if (!mediaId || !messageIdNumber(mediaId)) {
+    return;
+  }
+  void warmMedia([mediaId], true).then(() => {
+    const key = mediaKey(mediaId, true);
+    const mime = mediaMimes.get(key) || "";
+    const found = mediaUrls.get(key) || "";
+    if (found && !mime.startsWith("video/")) {
+      show(found);
+    }
   });
 }
 
@@ -1738,12 +2057,95 @@ function appendReplyQuote(bubble: HTMLElement, message: BubbleMessage): void {
   face.className = "reply-avatar";
   paintSmallAvatar(face, message.replyPicture || "", message.replyName || "");
   quote.append(face, copy);
+  const quotedId = message.replyId;
+  quote.tabIndex = 0;
+  quote.setAttribute("role", "button");
+  const showOriginal = () => revealQuotedMessage(quotedId);
+  quote.addEventListener("click", (event) => {
+    event.stopPropagation();
+    showOriginal();
+  });
+  quote.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    showOriginal();
+  });
+  const thumbUrl = message.replyThumb || "";
+  const thumbId = message.replyMediaId && messageIdNumber(message.replyMediaId) ? message.replyMediaId : "";
+  if (thumbUrl || thumbId) {
+    const img = document.createElement("img");
+    img.className = "reply-thumb";
+    img.alt = "";
+    img.hidden = true;
+    img.addEventListener("error", () => {
+      img.hidden = true;
+      img.removeAttribute("src");
+    });
+    quote.append(img);
+    showReplyThumb(img, thumbUrl, thumbId);
+  }
   const name = bubble.querySelector(".who");
   if (name) {
     name.after(quote);
   } else {
     bubble.prepend(quote);
   }
+}
+
+function quotedMessageRow(id: string): HTMLElement | null {
+  if (!id) {
+    return null;
+  }
+  const direct = messageRow(id);
+  if (direct) {
+    return direct;
+  }
+  const rows = threadBody.querySelectorAll<HTMLElement>(".msg[data-id], .chat-update[data-id]");
+  for (const row of rows) {
+    if (row.dataset.id === id) {
+      return row;
+    }
+    const ids = (row.dataset.ids || "").split(",");
+    if (ids.includes(id)) {
+      return row;
+    }
+  }
+  return null;
+}
+
+function revealQuotedMessage(id: string): void {
+  const row = quotedMessageRow(id);
+  if (!row) {
+    return;
+  }
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  row.scrollIntoView({ block: "center", behavior: reduce ? "auto" : "smooth" });
+  threadBody.querySelectorAll(".jump-target").forEach((item) => item.classList.remove("jump-target"));
+  row.classList.remove("jump-target");
+  void row.offsetWidth;
+  row.classList.add("jump-target");
+  const clear = () => {
+    row.classList.remove("jump-target");
+    row.removeEventListener("animationend", clear);
+  };
+  row.addEventListener("animationend", clear);
+}
+
+function rowImageQuote(row: HTMLElement): { url: string; mediaId: string } {
+  const thumbs = [...row.querySelectorAll<HTMLElement>(".media-thumb")];
+  const preferred = thumbs.find((thumb) => thumb.dataset.id && thumb.dataset.id === row.dataset.id) || thumbs[0];
+  const frame = preferred?.querySelector<HTMLImageElement | HTMLVideoElement>("img, video")
+    || row.querySelector<HTMLImageElement>("img.outgoing-media");
+  if (!frame) {
+    return { url: "", mediaId: "" };
+  }
+  const raw = frame instanceof HTMLImageElement ? (frame.currentSrc || frame.src) : (frame.poster || "");
+  const url = raw && raw !== window.location.href ? raw : "";
+  const mediaId = preferred?.dataset.id || "";
+  return { url, mediaId: messageIdNumber(mediaId) ? mediaId : "" };
 }
 
 function quoteText(row: HTMLElement): string {
@@ -1754,7 +2156,7 @@ function quoteText(row: HTMLElement): string {
   if (row.querySelector(".sticker")) {
     return t("sticker");
   }
-  if (row.querySelector("video")) {
+  if (row.querySelector(".video-stack, .chat-video")) {
     return t("video");
   }
   if (row.querySelector(".media-grid")) {
@@ -1834,11 +2236,16 @@ function paintReplyBar(): void {
     replyAvatar.replaceChildren();
     replyLabel.textContent = "";
     replyText.textContent = "";
+    replyThumb.hidden = true;
+    replyThumb.removeAttribute("src");
     return;
   }
   paintSmallAvatar(replyAvatar, replyDraft.picture, replyDraft.name);
   replyLabel.textContent = replyDraft.name;
   replyText.textContent = replyDraft.text;
+  replyThumb.hidden = true;
+  replyThumb.removeAttribute("src");
+  showReplyThumb(replyThumb, replyDraft.thumb || "", replyDraft.mediaId || "");
   replyBar.hidden = false;
   composerInput.focus();
 }
@@ -2384,6 +2791,7 @@ function imageGrid(items: MediaSlot[], token: number): HTMLElement {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "media-thumb";
+    button.dataset.id = item.id;
     const img = document.createElement("img");
     img.alt = "";
     button.append(img);
@@ -2459,9 +2867,7 @@ function paintLocalGallery(): void {
   if (!localGallery) {
     return;
   }
-  const several = localGallery.urls.length > 1;
-  lightboxPrev.hidden = !several;
-  lightboxNext.hidden = !several;
+  paintLightboxChrome();
   showLightbox(localGallery.urls[localGallery.index] || "", "");
 }
 
@@ -2475,6 +2881,16 @@ function closeGallery(): void {
   delete lightboxVideo.dataset.file;
   lightboxVideo.hidden = true;
   lightboxImg.hidden = false;
+}
+
+function paintLightboxChrome(): void {
+  const count = localGallery?.urls.length ?? gallery?.ids.length ?? 0;
+  const index = localGallery?.index ?? gallery?.index ?? 0;
+  const several = count > 1;
+  lightboxNav.hidden = !several;
+  if (several) {
+    lightboxCount.textContent = t("galleryPosition", { current: index + 1, total: count });
+  }
 }
 
 function showLightbox(url: string, mime: string): void {
@@ -2516,9 +2932,7 @@ function paintGallery(): void {
     return;
   }
   const id = gallery.ids[gallery.index];
-  const several = gallery.ids.length > 1;
-  lightboxPrev.hidden = !several;
-  lightboxNext.hidden = !several;
+  paintLightboxChrome();
   const previewKey = mediaKey(id, true);
   const preview = mediaUrls.get(previewKey);
   if (preview) {
@@ -2609,7 +3023,9 @@ function renderList(): void {
     item.append(main);
     chats.append(item);
   });
-  showThread(shown[selected]);
+  if (railMode === "chats") {
+    showThread(shown[selected]);
+  }
   document.body.dataset.chats = String(rows.length);
 }
 
@@ -2780,11 +3196,558 @@ search.addEventListener("input", () => {
   renderList();
 });
 
-document.querySelector<HTMLButtonElement>("#rail-chats")!.addEventListener("click", () => {
-  document.querySelector<HTMLButtonElement>('#tabs button[data-filter="all"]')!.click();
+function directoryError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("No one was found")) {
+    return t("nobodyFound");
+  }
+  if (message.includes("Could not search") || message.includes("could not search")) {
+    return t("couldNotSearch");
+  }
+  if (message.includes("could not create") || message.includes("LINE could not create")) {
+    return t("couldNotCreateGroup");
+  }
+  return message;
+}
+
+function recommendationText(reason: string | undefined): string {
+  switch (reason) {
+    case "phone":
+      return t("addedByPhone");
+    case "id":
+      return t("addedById");
+    case "qr":
+      return t("addedByQr");
+    case "group":
+      return t("addedByGroup");
+    case "share":
+      return t("addedByShare");
+    case "added":
+      return t("addedYou");
+    default:
+      return "";
+  }
+}
+
+function personFace(name: string, picture: string): HTMLElement {
+  if (!picture) {
+    return fallback(name);
+  }
+  const photo = document.createElement("img");
+  photo.className = "avatar";
+  photo.alt = "";
+  photo.src = picture;
+  photo.addEventListener("error", () => photo.replaceWith(fallback(name)));
+  return photo;
+}
+
+function syncChatTabs(): void {
+  document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach((tab) => {
+    tab.classList.toggle("on", (tab.dataset.filter || "all") === filter);
+  });
+}
+
+function rememberChat(chat: ChatRow): void {
+  if (!rows.some((row) => row.id === chat.id)) {
+    rows.unshift(chat);
+  }
+  search.value = "";
+  filter = "all";
+  syncChatTabs();
+  const index = visibleRows().findIndex((row) => row.id === chat.id);
+  selected = index >= 0 ? index : 0;
+}
+
+function showPersonChat(person: DirectoryPerson): void {
+  let chat = rows.find((row) => row.id === person.id);
+  if (!chat) {
+    chat = {
+      id: person.id,
+      name: person.name || t("directChat"),
+      lastMessage: "",
+      sealed: false,
+      time: Date.now(),
+      members: null,
+      picture: person.picture,
+      muted: false,
+      kind: "friend",
+      unread: null,
+    };
+  } else if (person.name) {
+    chat.name = person.name;
+    if (person.picture) {
+      chat.picture = person.picture;
+    }
+  }
+  rememberChat(chat);
+  showThread(chat);
+  paintPeople();
+  composerInput.focus();
+}
+
+function paintPeople(): void {
+  const needle = peopleQuery.value.trim().toLowerCase();
+  const shown = directoryPeople.filter((person) => !needle || person.name.toLowerCase().includes(needle));
+  peopleList.replaceChildren();
+  peopleNote.hidden = true;
+  if (!peopleReady) {
+    peopleNote.hidden = false;
+    peopleNote.textContent = peopleError || t("loadingFriends");
+    return;
+  }
+  if (directoryPeople.length === 0) {
+    peopleNote.hidden = false;
+    peopleNote.textContent = t("noFriendsYet");
+    return;
+  }
+  if (shown.length === 0) {
+    peopleNote.hidden = false;
+    peopleNote.textContent = t("noFriendsNamed");
+    return;
+  }
+  const favorites = shown.filter((person) => person.favorite);
+  const rest = shown.filter((person) => !person.favorite);
+  if (favorites.length > 0) {
+    peopleList.append(peopleHeading(t("favorites")));
+    favorites.forEach((person) => peopleList.append(peopleItem(person)));
+  }
+  let letter = "";
+  rest.forEach((person) => {
+    const next = (person.name.trim()[0] || "#").toLocaleUpperCase();
+    if (next !== letter) {
+      letter = next;
+      peopleList.append(peopleHeading(next));
+    }
+    peopleList.append(peopleItem(person));
+  });
+}
+
+function peopleHeading(label: string): HTMLElement {
+  const item = document.createElement("li");
+  item.className = "people-letter";
+  item.textContent = label;
+  return item;
+}
+
+function peopleItem(person: DirectoryPerson): HTMLElement {
+  const item = document.createElement("li");
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "people-row";
+  if (person.id === openId) {
+    button.classList.add("selected");
+  }
+  button.append(personFace(person.name, person.picture));
+  const copy = document.createElement("span");
+  copy.className = "people-copy";
+  const name = document.createElement("strong");
+  name.textContent = person.name;
+  copy.append(name);
+  button.append(copy);
+  button.addEventListener("click", () => showPersonChat(person));
+  item.append(button);
+  return item;
+}
+
+async function loadPeople(): Promise<void> {
+  const token = ++peopleToken;
+  peopleError = "";
+  if (!peopleReady) {
+    paintPeople();
+  }
+  try {
+    const loaded = await invoke<DirectoryPerson[]>("list_friends");
+    if (token !== peopleToken) {
+      return;
+    }
+    directoryPeople = Array.isArray(loaded) ? loaded : [];
+    peopleReady = true;
+    peopleError = "";
+    paintPeople();
+    if (!addGroupView.hidden) {
+      paintGroupPicks();
+    }
+  } catch (error) {
+    if (token !== peopleToken || peopleReady) {
+      return;
+    }
+    peopleError = directoryError(error);
+    paintPeople();
+  }
+}
+
+function paintRecommendations(): void {
+  addRecsToggle.classList.toggle("is-shut", !recsOpen);
+  addRecsToggle.setAttribute("aria-expanded", recsOpen ? "true" : "false");
+  addRecs.hidden = !recsOpen;
+  addRecs.replaceChildren();
+  addRecsNote.hidden = true;
+  const count = recsReady && !recsError ? ` ${recommendations.length}` : "";
+  addRecsLabel.textContent = `${t("friendRecommendations")}${count}`;
+  if (!recsOpen) {
+    return;
+  }
+  if (recsError) {
+    addRecsNote.hidden = false;
+    addRecsNote.textContent = recsError;
+    return;
+  }
+  if (!recsReady) {
+    addRecsNote.hidden = false;
+    addRecsNote.textContent = t("loadingRecommendations");
+    return;
+  }
+  if (recommendations.length === 0) {
+    addRecsNote.hidden = false;
+    addRecsNote.textContent = t("noRecommendations");
+    return;
+  }
+  recommendations.forEach((person) => {
+    const item = document.createElement("li");
+    const row = document.createElement("div");
+    row.className = "rec-row";
+    row.append(personFace(person.name, person.picture));
+    const copy = document.createElement("div");
+    copy.className = "rec-copy";
+    const name = document.createElement("strong");
+    name.textContent = person.name;
+    copy.append(name);
+    const reason = recommendationText(person.reason);
+    if (reason) {
+      const sub = document.createElement("span");
+      sub.textContent = reason;
+      copy.append(sub);
+    }
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "rec-add";
+    add.title = t("addFriend");
+    add.setAttribute("aria-label", t("addFriend"));
+    add.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="8" r="3"/><path d="M4.5 18.5c.6-2.6 2.8-4 5.5-4s4.9 1.4 5.5 4"/><path d="M17 8v6M14 11h6"/></svg>';
+    add.addEventListener("click", () => void addRecommended(person, add));
+    row.addEventListener("click", (event) => {
+      if ((event.target as HTMLElement).closest(".rec-add")) {
+        return;
+      }
+      void invoke("open_profile", {
+        id: person.id,
+        name: person.name,
+        picture: person.picture,
+        mine: false,
+        friend: false,
+      }).catch((error: unknown) => {
+        addRecsNote.hidden = false;
+        addRecsNote.textContent = directoryError(error);
+      });
+    });
+    row.append(copy, add);
+    item.append(row);
+    addRecs.append(item);
+  });
+}
+
+async function addRecommended(person: Recommendation, button: HTMLButtonElement): Promise<void> {
+  button.disabled = true;
+  try {
+    await invoke("add_profile", { id: person.id });
+    recommendations = recommendations.filter((item) => item.id !== person.id);
+    directoryPeople = [];
+    paintRecommendations();
+    void loadPeople();
+  } catch (error) {
+    button.disabled = false;
+    addRecsNote.hidden = false;
+    addRecsNote.textContent = directoryError(error);
+  }
+}
+
+async function loadRecommendations(): Promise<void> {
+  const token = ++recsToken;
+  if (!recsReady) {
+    paintRecommendations();
+  }
+  try {
+    const loaded = await invoke<Recommendation[]>("friend_recommendations");
+    if (token !== recsToken) {
+      return;
+    }
+    recommendations = Array.isArray(loaded) ? loaded : [];
+    recsReady = true;
+    recsError = "";
+    paintRecommendations();
+  } catch (error) {
+    if (token !== recsToken) {
+      return;
+    }
+    recsReady = true;
+    recsError = directoryError(error);
+    paintRecommendations();
+  }
+}
+
+function showAddScreen(screen: "home" | "search" | "group"): void {
+  addHome.hidden = screen !== "home";
+  addSearchView.hidden = screen !== "search";
+  addGroupView.hidden = screen !== "group";
+  if (screen === "search") {
+    addSearchNote.hidden = true;
+    addSearchQuery.focus();
+  }
+  if (screen === "group") {
+    addGroupNote.hidden = true;
+    paintGroupPicks();
+    void loadPeople();
+  }
+}
+
+function paintGroupPicks(): void {
+  const needle = addGroupQuery.value.trim().toLowerCase();
+  const shown = directoryPeople.filter((person) => !needle || person.name.toLowerCase().includes(needle));
+  addGroupList.replaceChildren();
+  addGroupCreate.disabled = groupPicked.size === 0;
+  addGroupNote.hidden = shown.length > 0;
+  if (shown.length === 0) {
+    addGroupNote.textContent = directoryPeople.length === 0 ? (peopleReady ? t("noFriendsYet") : t("loadingFriends")) : t("noFriendsNamed");
+  }
+  shown.forEach((person) => {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = groupPicked.has(person.id) ? "group-pick is-on" : "group-pick";
+    button.setAttribute("aria-pressed", groupPicked.has(person.id) ? "true" : "false");
+    button.append(personFace(person.name, person.picture));
+    const name = document.createElement("span");
+    name.textContent = person.name;
+    const box = document.createElement("span");
+    box.className = "pick-box";
+    button.append(name, box);
+    button.addEventListener("click", () => {
+      if (groupPicked.has(person.id)) {
+        groupPicked.delete(person.id);
+      } else {
+        groupPicked.add(person.id);
+      }
+      paintGroupPicks();
+    });
+    item.append(button);
+    addGroupList.append(item);
+  });
+}
+
+function paintSearchHit(person: DirectoryPerson): void {
+  addSearchResult.replaceChildren();
+  const row = document.createElement("div");
+  row.className = "search-hit";
+  row.append(personFace(person.name, person.picture));
+  const copy = document.createElement("div");
+  copy.className = "rec-copy";
+  const name = document.createElement("strong");
+  name.textContent = person.name;
+  copy.append(name);
+  if (person.status) {
+    const status = document.createElement("span");
+    status.textContent = person.status;
+    copy.append(status);
+  }
+  const action = document.createElement("button");
+  action.type = "button";
+  action.className = "rec-add";
+  action.title = person.friend ? t("chat") : t("addFriend");
+  action.setAttribute("aria-label", action.title);
+  action.textContent = person.friend ? t("chat") : "+";
+  action.addEventListener("click", () => {
+    if (person.friend) {
+      showPersonChat(person);
+      setRail("chats");
+      return;
+    }
+    action.disabled = true;
+    void invoke("add_profile", { id: person.id })
+      .then(() => {
+        person.friend = true;
+        addSearchNote.hidden = false;
+        addSearchNote.textContent = t("added");
+        directoryPeople = [];
+        void loadPeople();
+        paintSearchHit(person);
+      })
+      .catch((error: unknown) => {
+        action.disabled = false;
+        addSearchNote.hidden = false;
+        addSearchNote.textContent = directoryError(error);
+      });
+  });
+  row.append(copy, action);
+  addSearchResult.append(row);
+}
+
+function setRail(mode: RailMode): void {
+  railMode = mode;
+  railPeople.classList.toggle("on", mode === "friends");
+  railChats.classList.toggle("on", mode === "chats");
+  railFriends.classList.toggle("on", mode === "add");
+  const chatsOn = mode === "chats";
+  document.querySelector<HTMLElement>("#tabs")!.hidden = !chatsOn;
+  document.querySelector<HTMLElement>("#search-wrap")!.hidden = !chatsOn;
+  chats.hidden = !chatsOn;
+  if (chatsOn) {
+    failures.hidden = failures.textContent.trim().length === 0;
+  } else {
+    failures.hidden = true;
+  }
+  peoplePane.hidden = mode !== "friends";
+  addPane.hidden = mode !== "add";
+  if (mode === "chats") {
+    renderList();
+    return;
+  }
+  showThread(undefined);
+  if (mode === "friends") {
+    void loadPeople();
+    return;
+  }
+  showAddScreen("home");
+  void loadRecommendations();
+}
+
+const LIST_WIDTH_KEY = "lineapp.listWidth";
+const listPane = document.querySelector<HTMLElement>("#list-pane")!;
+const paneSplit = document.querySelector<HTMLElement>("#pane-split")!;
+
+function listWidthBounds(): { min: number; max: number } {
+  const rail = document.querySelector<HTMLElement>("#rail")?.offsetWidth ?? 68;
+  const room = Math.max(0, app.clientWidth - rail - paneSplit.offsetWidth);
+  const min = Math.min(320, Math.max(240, room - 280));
+  const max = Math.max(min, room - 300);
+  return { min, max };
+}
+
+function applyListWidth(width: number, save: boolean): void {
+  const { min, max } = listWidthBounds();
+  const next = Math.round(Math.min(max, Math.max(min, width)));
+  app.style.setProperty("--list-width", `${next}px`);
+  if (save) {
+    localStorage.setItem(LIST_WIDTH_KEY, String(next));
+  }
+}
+
+function fitListWidth(): void {
+  const saved = Number(localStorage.getItem(LIST_WIDTH_KEY));
+  applyListWidth(Number.isFinite(saved) && saved > 0 ? saved : 400, false);
+}
+
+paneSplit.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0) {
+    return;
+  }
+  event.preventDefault();
+  paneSplit.classList.add("is-drag");
+  document.body.classList.add("is-pane-drag");
+  const startX = event.clientX;
+  const start = listPane.getBoundingClientRect().width;
+  const direction = document.documentElement.dir === "rtl" ? -1 : 1;
+  const move = (ev: PointerEvent) => {
+    applyListWidth(start + direction * (ev.clientX - startX), false);
+  };
+  const up = () => {
+    paneSplit.classList.remove("is-drag");
+    document.body.classList.remove("is-pane-drag");
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    applyListWidth(listPane.getBoundingClientRect().width, true);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
 });
-document.querySelector<HTMLButtonElement>("#rail-friends")!.addEventListener("click", () => {
-  document.querySelector<HTMLButtonElement>('#tabs button[data-filter="friend"]')!.click();
+
+paneSplit.addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+    return;
+  }
+  event.preventDefault();
+  const direction = document.documentElement.dir === "rtl" ? -1 : 1;
+  const delta = event.key === "ArrowRight" ? 24 : -24;
+  applyListWidth(listPane.getBoundingClientRect().width + direction * delta, true);
+});
+
+window.addEventListener("resize", fitListWidth);
+fitListWidth();
+
+railPeople.addEventListener("click", () => setRail("friends"));
+railChats.addEventListener("click", () => {
+  filter = "all";
+  syncChatTabs();
+  setRail("chats");
+});
+railFriends.addEventListener("click", () => setRail("add"));
+peopleQuery.addEventListener("input", paintPeople);
+addRecsToggle.addEventListener("click", () => {
+  recsOpen = !recsOpen;
+  paintRecommendations();
+});
+document.querySelector<HTMLButtonElement>("#add-search")!.addEventListener("click", () => showAddScreen("search"));
+document.querySelector<HTMLButtonElement>("#add-group")!.addEventListener("click", () => showAddScreen("group"));
+document.querySelector<HTMLButtonElement>("#add-search-back")!.addEventListener("click", () => showAddScreen("home"));
+document.querySelector<HTMLButtonElement>("#add-group-back")!.addEventListener("click", () => showAddScreen("home"));
+addGroupQuery.addEventListener("input", paintGroupPicks);
+addSearchForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const query = addSearchQuery.value.trim();
+  if (!query) {
+    return;
+  }
+  addSearchNote.hidden = false;
+  addSearchNote.textContent = t("searchLabel");
+  addSearchResult.replaceChildren();
+  void invoke<DirectoryPerson>("find_person", { query })
+    .then((person) => {
+      addSearchNote.hidden = true;
+      if (!person?.id) {
+        addSearchNote.hidden = false;
+        addSearchNote.textContent = t("nobodyFound");
+        return;
+      }
+      paintSearchHit(person);
+    })
+    .catch((error: unknown) => {
+      addSearchNote.hidden = false;
+      addSearchNote.textContent = directoryError(error);
+    });
+});
+addGroupCreate.addEventListener("click", () => {
+  if (groupPicked.size === 0) {
+    return;
+  }
+  const typed = addGroupInput.value.trim();
+  const targets = [...groupPicked];
+  const names = directoryPeople.filter((person) => groupPicked.has(person.id)).map((person) => person.name);
+  addGroupCreate.disabled = true;
+  addGroupNote.hidden = false;
+  addGroupNote.textContent = t("create");
+  void invoke<{ id: string; name: string; members: number }>("create_group", { name: typed, targets })
+    .then((made) => {
+      groupPicked.clear();
+      addGroupInput.value = "";
+      const chat: ChatRow = {
+        id: made.id,
+        name: made.name || typed || names.join(", ") || t("group"),
+        lastMessage: "",
+        sealed: false,
+        time: Date.now(),
+        members: made.members,
+        picture: "",
+        muted: false,
+        kind: "group",
+        unread: null,
+      };
+      rememberChat(chat);
+      setRail("chats");
+    })
+    .catch((error: unknown) => {
+      addGroupCreate.disabled = groupPicked.size === 0;
+      addGroupNote.hidden = false;
+      addGroupNote.textContent = directoryError(error);
+    });
 });
 
 threadBody.addEventListener("click", (event) => {
@@ -2824,7 +3787,15 @@ msgMenu.addEventListener("click", (event) => {
     if (!messageIdNumber(row.dataset.id || "")) {
       return;
     }
-    replyDraft = { id: row.dataset.id || "", text: quoteText(row), name: senderLabel(row), picture: rowPicture(row) };
+    const image = rowImageQuote(row);
+    replyDraft = {
+      id: row.dataset.id || "",
+      text: quoteText(row),
+      name: senderLabel(row),
+      picture: rowPicture(row),
+      thumb: image.url,
+      mediaId: image.mediaId,
+    };
     if (!replyDraft.id) {
       replyDraft = null;
       return;
@@ -2849,6 +3820,21 @@ msgMenu.addEventListener("click", (event) => {
 
 document.querySelector<HTMLButtonElement>("#reply-cancel")!.addEventListener("click", () => {
   clearReply();
+});
+
+replyThumb.addEventListener("error", () => {
+  replyThumb.hidden = true;
+});
+
+syncAppearanceControls();
+
+fontFamily.addEventListener("change", () => {
+  saveAppearance({ font: selectedFont(), scaleIndex: Number(textSize.value) });
+});
+
+textSize.addEventListener("input", () => {
+  saveAppearance({ font: selectedFont(), scaleIndex: Number(textSize.value) });
+  paintTextSize();
 });
 
 await listen<LoginEvent>("login-event", (event) => {
@@ -2913,6 +3899,8 @@ function outgoingBubble(item: Outgoing): HTMLElement {
     replyText: item.reply?.text || "",
     replyName: item.reply?.name || "",
     replyPicture: item.reply?.picture || "",
+    replyThumb: item.reply?.thumb || "",
+    replyMediaId: item.reply?.mediaId || "",
   });
   const bubble = row.querySelector(".bubble");
   if (item.albumUrls && item.albumUrls.length > 1) {
@@ -3143,6 +4131,8 @@ function finishOutgoing(localId: string, payload: SendResult): void {
     replyText: item?.reply?.text || "",
     replyName: item?.reply?.name || "",
     replyPicture: item?.reply?.picture || "",
+    replyThumb: item?.reply?.thumb || "",
+    replyMediaId: item?.reply?.mediaId || "",
   });
   if (item?.silent) {
     sent.dataset.quiet = "1";
@@ -3176,6 +4166,8 @@ function rememberSent(payload: SendResult, item: Outgoing | undefined, sticker: 
     replyText: item?.reply?.text || "",
     replyName: item?.reply?.name || "",
     replyPicture: item?.reply?.picture || "",
+    replyThumb: item?.reply?.thumb || "",
+    replyMediaId: item?.reply?.mediaId || "",
   };
   const existing = openHistory.messages.findIndex((entry) => entry.id === payload.messageId);
   if (existing >= 0) {
@@ -3993,6 +4985,7 @@ function refreshLocale(): void {
       sheetTitle.textContent = t("language");
     } else if (!sheetSettings.hidden) {
       sheetTitle.textContent = t("settings");
+      paintTextSize();
       if (listedDevices) {
         fillDevices(devicesOutput, listedDevices.outputs, t("noSpeakers"));
         fillDevices(devicesInput, listedDevices.inputs, t("noMics"));
@@ -4003,6 +4996,12 @@ function refreshLocale(): void {
       sheetTitle.textContent = t("aboutLine");
     }
   }
+  if (!lightbox.hidden) {
+    paintLightboxChrome();
+  }
+  paintPeople();
+  paintRecommendations();
+  paintGroupPicks();
   if (!signedIn) {
     return;
   }
@@ -4044,10 +5043,35 @@ function fillDevices(list: HTMLElement, devices: ListedDevice[], empty: string):
   }
 }
 
+function selectedFont(): FontId {
+  const value = fontFamily.value;
+  return (FONT_IDS as readonly string[]).includes(value) ? (value as FontId) : "noto";
+}
+
+function paintTextSize(): void {
+  const index = Number(textSize.value);
+  const label = t(TEXT_SIZE_KEYS[index] ?? "textDefault");
+  textSizeLabel.textContent = label;
+  textSize.setAttribute("aria-valuetext", label);
+}
+
+function syncAppearanceControls(): void {
+  const appearance = readAppearance();
+  fontFamily.value = appearance.font;
+  textSize.value = String(appearance.scaleIndex);
+  for (const option of fontFamily.options) {
+    if ((FONT_IDS as readonly string[]).includes(option.value)) {
+      option.style.fontFamily = fontStack(option.value as FontId);
+    }
+  }
+  paintTextSize();
+}
+
 async function showSettings(): Promise<void> {
   sheetTitle.textContent = t("settings");
   sheetBody.hidden = true;
   sheetSettings.hidden = false;
+  syncAppearanceControls();
   sheetList.hidden = true;
   sheetAbout.hidden = true;
   sheetLanguage.hidden = true;
@@ -4058,13 +5082,20 @@ async function showSettings(): Promise<void> {
   fillDevices(devicesInput, [], t("looking"));
   fillDevices(devicesCamera, [], t("looking"));
   minimizeToTray.disabled = true;
+  keepOnTop.disabled = true;
+  focusOnMessageBox.disabled = true;
   try {
-    const settings = await invoke<{ minimizeToTray: boolean }>("get_settings");
+    const settings = await invoke<{ minimizeToTray: boolean; alwaysOnTop: boolean; focusOnMessage: boolean }>("get_settings");
     minimizeToTray.checked = settings.minimizeToTray;
+    keepOnTop.checked = settings.alwaysOnTop;
+    focusOnMessage = settings.focusOnMessage;
+    focusOnMessageBox.checked = settings.focusOnMessage;
   } catch (error) {
     setStatusText(error instanceof Error ? error.message : String(error));
   }
   minimizeToTray.disabled = false;
+  keepOnTop.disabled = false;
+  focusOnMessageBox.disabled = false;
   try {
     const devices = await invoke<DeviceLists>("list_media_devices");
     listedDevices = devices;
@@ -4154,6 +5185,24 @@ minimizeToTray.addEventListener("change", () => {
   const enabled = minimizeToTray.checked;
   void invoke("set_minimize_to_tray", { enabled }).catch((error: unknown) => {
     minimizeToTray.checked = !enabled;
+    setStatusText(error instanceof Error ? error.message : String(error));
+  });
+});
+
+keepOnTop.addEventListener("change", () => {
+  const enabled = keepOnTop.checked;
+  void invoke("set_always_on_top", { enabled }).catch((error: unknown) => {
+    keepOnTop.checked = !enabled;
+    setStatusText(error instanceof Error ? error.message : String(error));
+  });
+});
+
+focusOnMessageBox.addEventListener("change", () => {
+  const enabled = focusOnMessageBox.checked;
+  focusOnMessage = enabled;
+  void invoke("set_focus_on_message", { enabled }).catch((error: unknown) => {
+    focusOnMessage = !enabled;
+    focusOnMessageBox.checked = !enabled;
     setStatusText(error instanceof Error ? error.message : String(error));
   });
 });
@@ -4298,21 +5347,97 @@ function appendLiveMessage(update: PollUpdate, followTail: boolean, batch: { foc
   }
 }
 
+function assignThreadScroll(top: number): void {
+  const max = Math.max(0, threadBody.scrollHeight - threadBody.clientHeight);
+  const next = Math.max(0, Math.min(top, max));
+  expectedTop = next;
+  if (Math.abs(threadBody.scrollTop - next) < 1) {
+    return;
+  }
+  placingThread = true;
+  threadBody.scrollTop = next;
+  requestAnimationFrame(() => {
+    placingThread = false;
+  });
+}
+
+function stopLayoutWatch(): void {
+  layoutWatch?.stop();
+  layoutWatch = null;
+}
+
+function watchThreadLayout(token: number, kind: "tail" | "anchor", pin: () => void): void {
+  stopLayoutWatch();
+  threadBody.classList.add("tail-lock");
+  const observer = new ResizeObserver(() => {
+    if (token !== placeToken) {
+      if (layoutWatch?.token === token) {
+        stopLayoutWatch();
+      }
+      return;
+    }
+    pin();
+  });
+  const observeRows = (): void => {
+    observer.disconnect();
+    for (const child of threadBody.children) {
+      observer.observe(child);
+    }
+  };
+  const onMedia = (event: Event): void => {
+    if (token !== placeToken) {
+      if (layoutWatch?.token === token) {
+        stopLayoutWatch();
+      }
+      return;
+    }
+    if (event.target instanceof Node && threadBody.contains(event.target)) {
+      pin();
+    }
+  };
+  threadBody.addEventListener("load", onMedia, true);
+  threadBody.addEventListener("loadedmetadata", onMedia, true);
+  const mutations = new MutationObserver(() => {
+    if (token !== placeToken) {
+      if (layoutWatch?.token === token) {
+        stopLayoutWatch();
+      }
+      return;
+    }
+    observeRows();
+    pin();
+  });
+  observeRows();
+  mutations.observe(threadBody, { childList: true, subtree: true });
+  layoutWatch = {
+    token,
+    kind,
+    stop: () => {
+      observer.disconnect();
+      mutations.disconnect();
+      threadBody.removeEventListener("load", onMedia, true);
+      threadBody.removeEventListener("loadedmetadata", onMedia, true);
+      threadBody.classList.remove("tail-lock");
+    },
+  };
+}
+
+function pinTail(token: number): void {
+  if (token !== placeToken) {
+    if (layoutWatch?.token === token) {
+      stopLayoutWatch();
+    }
+    return;
+  }
+  assignThreadScroll(threadBody.scrollHeight);
+}
+
 function scrollThreadToEnd(): void {
   const token = ++placeToken;
   userMoved = false;
-  const pin = (): void => {
-    if (token !== placeToken) {
-      return;
-    }
-    placingThread = true;
-    threadBody.scrollTop = threadBody.scrollHeight;
-    requestAnimationFrame(() => {
-      placingThread = false;
-    });
-  };
-  pin();
-  requestAnimationFrame(pin);
+  watchThreadLayout(token, "tail", () => pinTail(token));
+  pinTail(token);
+  requestAnimationFrame(() => pinTail(token));
 }
 
 function placeThread(): void {
@@ -4332,40 +5457,32 @@ function placeThread(): void {
     const delta = target.getBoundingClientRect().top - threadBody.getBoundingClientRect().top - pad;
     const next = Math.max(0, threadBody.scrollTop + delta);
     const tail = threadBody.scrollHeight - next;
-    placingThread = true;
-    threadBody.scrollTop = tail <= threadBody.clientHeight + 1 ? threadBody.scrollHeight : next;
-    requestAnimationFrame(() => {
-      placingThread = false;
-    });
+    const nextTop = tail <= threadBody.clientHeight + 1 ? threadBody.scrollHeight : next;
+    assignThreadScroll(nextTop);
   };
+  watchThreadLayout(token, "anchor", pin);
   pin();
   requestAnimationFrame(pin);
-  threadBody.querySelectorAll("img, video").forEach((node) => {
-    if (node instanceof HTMLImageElement && node.complete) {
-      return;
-    }
-    const refresh = (): void => {
-      if (token === placeToken && unreadFocus === id && target.isConnected) {
-        pin();
-      }
-    };
-    node.addEventListener("load", refresh, { once: true });
-    node.addEventListener("loadedmetadata", refresh, { once: true });
-  });
 }
 
 threadBody.addEventListener("scroll", () => {
   closeReactionPicker();
-  if (placingThread) {
+  if (placingThread || (expectedTop >= 0 && Math.abs(threadBody.scrollTop - expectedTop) < 2)) {
     return;
   }
-  placeToken += 1;
+  expectedTop = -1;
   if (threadNearBottom()) {
     userMoved = false;
     unreadFocus = "";
-  } else {
-    userMoved = true;
+    if (layoutWatch?.kind !== "tail") {
+      const token = ++placeToken;
+      watchThreadLayout(token, "tail", () => pinTail(token));
+    }
+    return;
   }
+  placeToken += 1;
+  stopLayoutWatch();
+  userMoved = true;
 });
 
 function applyServerUnread(chat: ChatRow, count: number, messageId = ""): void {
@@ -4532,6 +5649,9 @@ function applyPoll(payload: PollPayload): void {
   renderList();
   if (shouldChime) {
     playChime();
+    if (focusOnMessage) {
+      void invoke("focus_for_message").catch(() => {});
+    }
   }
   if (openAdvanced && openId) {
     void invoke("load_history", { id: openId });
@@ -4633,5 +5753,11 @@ async function logout(): Promise<void> {
 refresh.addEventListener("click", () => {
   void start();
 });
+
+void invoke<{ focusOnMessage: boolean }>("get_settings")
+  .then((settings) => {
+    focusOnMessage = settings.focusOnMessage;
+  })
+  .catch(() => {});
 
 void start();

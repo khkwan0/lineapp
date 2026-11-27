@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import "./appearance";
 import { applyI18n, onLocaleChange, t, type MessageKey } from "./i18n";
 
 type Member = {

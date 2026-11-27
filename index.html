@@ -24,6 +24,12 @@
       <nav id="rail" aria-label="LINE">
         <img id="rail-photo" alt="" hidden />
         <span id="rail-initial" aria-hidden="true"></span>
+        <button id="rail-people" type="button" data-i18n-aria="friends" aria-label="Friends">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="8" r="3.1" />
+            <path d="M5.2 19.2c.7-3.3 3.1-5.2 6.8-5.2s6.1 1.9 6.8 5.2" />
+          </svg>
+        </button>
         <button id="rail-chats" type="button" data-i18n-aria="chats" aria-label="Chats" class="on">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path
@@ -32,7 +38,7 @@
           </svg>
           <span id="rail-count" hidden></span>
         </button>
-        <button id="rail-friends" type="button" data-i18n-aria="friends" aria-label="Friends">
+        <button id="rail-friends" type="button" data-i18n-aria="addFriends" aria-label="Add friends">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <circle cx="10" cy="8" r="3" />
             <path d="M4.5 18.5c.6-2.6 2.8-4 5.5-4s4.9 1.4 5.5 4" />
@@ -68,6 +74,78 @@
         </label>
         <ul id="chats"></ul>
         <p id="chat-failures" hidden></p>
+        <section id="people-pane" hidden>
+          <label id="people-search">
+            <span aria-hidden="true">⌕</span>
+            <input id="people-query" type="search" data-i18n-placeholder="searchByName" placeholder="Search by display name" />
+          </label>
+          <ul id="people"></ul>
+          <p id="people-note" hidden></p>
+        </section>
+        <section id="add-pane" hidden>
+          <div id="add-home">
+            <button id="add-search" type="button">
+              <span class="add-badge" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><circle cx="10" cy="10" r="5.5" /><path d="M14.5 14.5 19 19" /></svg>
+              </span>
+              <span data-i18n="searchForFriends">Search for friends</span>
+            </button>
+            <button id="add-group" type="button">
+              <span class="add-badge" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><circle cx="9" cy="9" r="3" /><path d="M3.8 18.2c.6-2.6 2.5-4 5.2-4s4.6 1.4 5.2 4" /><circle cx="16.2" cy="9.2" r="2.2" /><path d="M15.2 14.2c1.6.3 3 .9 3.8 2.6" /></svg>
+              </span>
+              <span data-i18n="createGroup">Create a group</span>
+            </button>
+            <button id="add-recs-toggle" type="button" aria-expanded="true">
+              <span id="add-recs-label" data-i18n="friendRecommendations">Friend recommendations</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 14.5 12 8.5l6 6" /></svg>
+            </button>
+            <ul id="add-recs"></ul>
+            <p id="add-recs-note" hidden></p>
+          </div>
+          <div id="add-search-view" hidden>
+            <button id="add-search-back" type="button" class="add-back">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 6 8.5 12l6 6" /></svg>
+              <span data-i18n="back">Back</span>
+            </button>
+            <form id="add-search-form">
+              <input id="add-search-query" type="search" data-i18n-placeholder="lineIdOrPhone" placeholder="LINE ID or phone number" autocomplete="off" />
+              <button type="submit" data-i18n="searchLabel">Search</button>
+            </form>
+            <div id="add-search-result"></div>
+            <p id="add-search-note" hidden></p>
+          </div>
+          <div id="add-group-view" hidden>
+            <button id="add-group-back" type="button" class="add-back">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 6 8.5 12l6 6" /></svg>
+              <span data-i18n="back">Back</span>
+            </button>
+            <label id="add-group-name">
+              <span data-i18n="groupName">Group name</span>
+              <input id="add-group-input" type="text" maxlength="50" data-i18n-placeholder="groupName" placeholder="Group name" />
+            </label>
+            <p id="add-group-hint" data-i18n="chooseFriends">Choose friends</p>
+            <label id="add-group-search">
+              <span aria-hidden="true">⌕</span>
+              <input id="add-group-query" type="search" data-i18n-placeholder="searchByName" placeholder="Search by display name" />
+            </label>
+            <ul id="add-group-list"></ul>
+            <p id="add-group-note" hidden></p>
+            <div id="add-group-bar">
+              <button id="add-group-create" type="button" data-i18n="create" disabled>Create</button>
+            </div>
+          </div>
+        </section>
+      </section>
+      <div id="pane-split" role="separator" aria-orientation="vertical" aria-label="Resize list" tabindex="0"></div>
+      <section id="stage" hidden>
+        <div class="stage-mark" aria-hidden="true">
+          <svg viewBox="0 0 128 108">
+            <path d="M22 10h84a16 16 0 0 1 16 16v42a16 16 0 0 1-16 16H58L36 100V84H22A16 16 0 0 1 6 68V26A16 16 0 0 1 22 10z" />
+            <text x="64" y="52" text-anchor="middle">LINE</text>
+          </svg>
+        </div>
+        <p data-i18n="startConversation">Start a new conversation!</p>
       </section>
       <section id="thread" hidden>
         <header id="thread-head"></header>
@@ -81,6 +159,7 @@
               <strong id="reply-label"></strong>
               <span id="reply-text"></span>
             </div>
+            <img id="reply-thumb" alt="" hidden />
             <button id="reply-cancel" type="button" data-i18n-aria="cancelReply" aria-label="Cancel reply">×</button>
           </div>
           <div id="sticker-panel" hidden></div>
@@ -110,11 +189,16 @@
       </section>
     </div>
     <div id="lightbox" hidden>
-      <button id="lightbox-prev" type="button" data-i18n-aria="previous" aria-label="Previous">‹</button>
       <img id="lightbox-img" alt="" />
       <video id="lightbox-video" hidden autoplay loop muted playsinline></video>
-      <button id="lightbox-next" type="button" data-i18n-aria="next" aria-label="Next">›</button>
-      <button id="lightbox-close" type="button" data-i18n-aria="close" aria-label="Close">×</button>
+      <div id="lightbox-bar">
+        <button id="lightbox-close" type="button" data-i18n="close">Close</button>
+        <div id="lightbox-nav" hidden>
+          <button id="lightbox-prev" type="button" data-i18n="previous">Previous</button>
+          <span id="lightbox-count"></span>
+          <button id="lightbox-next" type="button" data-i18n="next">Next</button>
+        </div>
+      </div>
     </div>
     <div id="sheet" hidden>
       <div id="sheet-card">
@@ -135,7 +219,6 @@
           </dl>
         </div>
         <form id="sheet-settings" hidden>
-          <p class="settings-notice" data-i18n="audioNotice">Audio and visual settings are not currently useful. This app has no way to use the official LINE VoIP or RTC.</p>
           <button id="language-open" type="button" class="language-row">
             <span class="language-label">
               <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -147,6 +230,24 @@
             </span>
             <strong id="language-current"></strong>
           </button>
+          <section class="appearance">
+            <h3 data-i18n="text">Text</h3>
+            <label class="appearance-field">
+              <span data-i18n="font">Font</span>
+              <select id="font-family">
+                <option value="noto" data-i18n="fontNoto">Noto Sans</option>
+                <option value="system" data-i18n="fontSystem">System</option>
+                <option value="serif" data-i18n="fontSerif">Serif</option>
+                <option value="mono" data-i18n="fontMono">Monospace</option>
+              </select>
+            </label>
+            <p class="appearance-hint" data-i18n="fontHint">Characters a font does not include still use Noto Sans.</p>
+            <label class="appearance-field">
+              <span data-i18n="textSize">Text size</span>
+              <input id="text-size" type="range" min="0" max="4" step="1" value="1" />
+              <strong id="text-size-label">Default</strong>
+            </label>
+          </section>
           <label class="setting">
             <input id="minimize-to-tray" type="checkbox" checked />
             <span>
@@ -154,6 +255,21 @@
               <small data-i18n="keepInTrayHint">Closing the window leaves LINE in the tray. Right-click that icon to open it again, or use Quit to exit.</small>
             </span>
           </label>
+          <label class="setting">
+            <input id="keep-on-top" type="checkbox" />
+            <span>
+              <span data-i18n="keepOnTop">Keep on top of other windows</span>
+              <small data-i18n="keepOnTopHint">LINE stays above other windows until you turn this off.</small>
+            </span>
+          </label>
+          <label class="setting">
+            <input id="focus-on-message" type="checkbox" />
+            <span>
+              <span data-i18n="focusOnMessage">Bring LINE to the front for new messages</span>
+              <small data-i18n="focusOnMessageHint">A new message raises this window. Muted chats stay where they are.</small>
+            </span>
+          </label>
+          <p class="settings-notice" data-i18n="audioNotice">Speaker, microphone, and camera settings are not currently useful. This app has no way to use the official LINE VoIP or RTC.</p>
           <section class="device-group">
             <h3 data-i18n="speakers">Speakers</h3>
             <ul id="devices-output"></ul>

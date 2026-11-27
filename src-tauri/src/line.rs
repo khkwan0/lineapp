@@ -26,6 +26,7 @@ const DEFAULT_ENDPOINT: &str = "legy-jp.line-apps.com";
 const LOGIN_PATH: &str = "/acct/lgn/sq/v1";
 const LOGIN_POLL_PATH: &str = "/acct/lp/lgn/sq/v1";
 const TALK_PATH: &str = "/S4";
+const RELATION_PATH: &str = "/RE4";
 const HISTORY_PAGE: i32 = 30;
 const HISTORY_TARGET: usize = 40;
 const MEDIA_LIMIT: usize = 40_000_000;
@@ -3090,6 +3091,195 @@ impl Client {
             .map(|(id, _)| id)
             .collect()
     }
+
+    pub fn list_friends(&mut self) -> Result<Json, LineError> {
+        self.require_token()?;
+        let mine = self.session.mid.clone();
+        let mut ids = self.friend_ids();
+        ids.retain(|id| user_mid_ok(id) && id != &mine);
+        ids.truncate(2000);
+        Ok(Json::Array(friend_rows(&ids, &self.people_cards(&ids))))
+    }
+
+    pub fn friend_recommendations(&mut self) -> Result<Json, LineError> {
+        self.require_token()?;
+        let ids = self.recommendation_ids()?;
+        let friends: HashSet<String> = self.friend_ids().into_iter().collect();
+        let mine = self.session.mid.clone();
+        let ids: Vec<String> = ids.into_iter().filter(|id| user_mid_ok(id) && id != &mine && !friends.contains(id)).take(200).collect();
+        let reasons = self.recommendation_reasons(&ids);
+        let cards = self.people_cards(&ids);
+        let saved = crate::store::cached_rows();
+        let mut people = Vec::new();
+        for id in &ids {
+            let card = cards.get(id);
+            let fallback = saved.get(id).map(|row| row.name.as_str()).unwrap_or("");
+            let name = person_name(card, fallback, "");
+            if name.is_empty() {
+                continue;
+            }
+            people.push(json!({
+                "id": id,
+                "name": name,
+                "picture": person_picture(card, saved.get(id).map(|row| row.picture.as_str()).unwrap_or("")),
+                "reason": reasons.get(id).cloned().unwrap_or_default(),
+            }));
+        }
+        Ok(Json::Array(people))
+    }
+
+    pub fn find_person(&mut self, query: &str) -> Result<Json, LineError> {
+        self.require_token()?;
+        let query = query.trim();
+        if query.is_empty() || query.chars().count() > 40 {
+            return Err(line("Enter a LINE ID or phone number."));
+        }
+        let letters = query.chars().any(|ch| ch.is_ascii_alphabetic() || matches!(ch, '_' | '.' | '@' | '-'));
+        let digits = query.chars().filter(|ch| ch.is_ascii_digit()).count();
+        let phone = !letters && (query.starts_with('+') || digits >= 8);
+        let found = if phone {
+            self.find_by_phone(query)
+        } else if query.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '@' | '-')) {
+            self.find_by_id(query.trim_start_matches('@'))
+        } else {
+            Err(line("Enter a LINE ID or phone number."))
+        };
+        found.map_err(friendly_search)
+    }
+
+    pub fn create_group(&mut self, name: &str, targets: &[String]) -> Result<Json, LineError> {
+        self.require_token()?;
+        let name = name.trim();
+        if name.chars().count() > 50 || name.chars().any(|ch| ch.is_control()) {
+            return Err(line("That name cannot be used."));
+        }
+        if targets.is_empty() {
+            return Err(line("Choose at least one friend."));
+        }
+        if targets.len() > 100 {
+            return Err(line("Choose fewer friends."));
+        }
+        let mine = self.session.mid.clone();
+        if targets.iter().any(|id| !user_mid_ok(id) || id == &mine) {
+            return Err(line("That person cannot be added to the group."));
+        }
+        let seq = self.next_seq();
+        let members: Vec<Field> = targets.iter().map(bin).collect();
+        let created = self
+            .talk(
+                "createChat",
+                &[(
+                    1,
+                    Field::Struct(vec![
+                        (1, Field::I32(seq)),
+                        (2, Field::I32(0)),
+                        (3, bin(name)),
+                        (4, Field::Set(thrift::BINARY, members)),
+                    ]),
+                )],
+            )
+            .map_err(|_| line("LINE could not create that group."))?;
+        let id = created.as_ref().map(first_group_mid).unwrap_or_default();
+        if !group_mid_ok(&id) {
+            return Err(line("LINE created the group, but did not return the chat."));
+        }
+        Ok(json!({
+            "id": id,
+            "name": name,
+            "members": targets.len() as i64 + 1,
+        }))
+    }
+
+    fn recommendation_ids(&mut self) -> Result<Vec<String>, LineError> {
+        let mut last = None;
+        for fields in [vec![(1, Field::I32(4))], Vec::new()] {
+            match self.talk("getRecommendationIds", &fields) {
+                Ok(Some(value)) => return Ok(collect_mids(Some(&value))),
+                Ok(None) => return Ok(Vec::new()),
+                Err(err) => last = Some(err),
+            }
+        }
+        if let Ok(Some(value)) = self.talk("getRecommendationList", &[]) {
+            return Ok(collect_mids(Some(&value)));
+        }
+        Err(last.unwrap_or_else(|| line("Could not load friend recommendations.")))
+    }
+
+    fn recommendation_reasons(&mut self, ids: &[String]) -> HashMap<String, String> {
+        let mut reasons = HashMap::new();
+        for batch in ids.chunks(50) {
+            let targets: Vec<Field> = batch.iter().map(|id| Field::Struct(vec![(1, bin(id.as_str()))])).collect();
+            let request = Field::Struct(vec![
+                (1, Field::List(thrift::STRUCT, targets)),
+                (2, Field::I32(4)),
+            ]);
+            let Ok(Some(value)) = self
+                .call("getRecommendationDetails", &[(1, request)], RELATION_PATH, Duration::from_secs(20), &[], None)
+                .map_err(fail_line)
+            else {
+                continue;
+            };
+            for (id, reason) in recommendation_reason_map(&value) {
+                reasons.entry(id).or_insert(reason);
+            }
+        }
+        reasons
+    }
+
+    fn find_by_id(&mut self, id: &str) -> Result<Json, LineError> {
+        if let Some(card) = self.contact_lookup("findContactByUserid", &[(2, bin(id))], TALK_PATH) {
+            return Ok(card);
+        }
+        self.contact_lookup(
+            "findContactBySearchIdOrTicketV3",
+            &[(1, Field::Struct(vec![(1, Field::Struct(vec![(1, bin(id))]))]))],
+            RELATION_PATH,
+        )
+        .ok_or_else(|| line("No one was found."))
+    }
+
+    fn find_by_phone(&mut self, query: &str) -> Result<Json, LineError> {
+        let digits: String = query.chars().filter(|ch| ch.is_ascii_digit()).collect();
+        let mut phones = Vec::new();
+        if query.starts_with('+') {
+            phones.push(query.to_string());
+        }
+        if !digits.is_empty() {
+            let plus = format!("+{digits}");
+            if !phones.contains(&plus) {
+                phones.push(plus);
+            }
+        }
+        for phone in &phones {
+            if let Some(card) = self.contact_lookup(
+                "findContactsByPhone",
+                &[(2, Field::Set(thrift::BINARY, vec![bin(phone.as_str())]))],
+                TALK_PATH,
+            ) {
+                return Ok(card);
+            }
+            if let Some(card) = self.contact_lookup(
+                "findContactByPhoneV3",
+                &[(1, Field::Struct(vec![(1, bin(phone.as_str()))]))],
+                RELATION_PATH,
+            ) {
+                return Ok(card);
+            }
+        }
+        Err(line("No one was found."))
+    }
+
+    fn contact_lookup(&mut self, method: &str, fields: &[(i16, Field)], path: &str) -> Option<Json> {
+        let value = self.call(method, fields, path, Duration::from_secs(20), &[], None).ok().flatten()?;
+        let fields = first_contact(&value)?;
+        let mid = text_field(&fields, 1);
+        if !user_mid_ok(&mid) {
+            return None;
+        }
+        let mut card = person_card(&fields, mid == self.session.mid);
+        card["id"] = json!(mid);
+        Some(card)
+    }
 }
 
 fn sort_chat_rows(rows: &mut [Json]) {
@@ -4171,6 +4361,174 @@ fn person_picture(card: Option<&Json>, fallback: &str) -> String {
     picture.unwrap_or(fallback).to_string()
 }
 
+fn friend_rows(ids: &[String], cards: &HashMap<String, Json>) -> Vec<Json> {
+    let saved = crate::store::cached_rows();
+    let mut people: Vec<Json> = ids
+        .iter()
+        .filter_map(|id| {
+            let card = cards.get(id);
+            let fallback = saved.get(id).map(|row| row.name.as_str()).unwrap_or("");
+            let name = person_name(card, fallback, "");
+            if name.is_empty() {
+                return None;
+            }
+            Some(json!({
+                "id": id,
+                "name": name,
+                "picture": person_picture(card, saved.get(id).map(|row| row.picture.as_str()).unwrap_or("")),
+                "favorite": card.and_then(|item| item.get("favorite")).and_then(|value| value.as_bool()).unwrap_or(false),
+            }))
+        })
+        .collect();
+    people.sort_by(|left, right| {
+        let left_favorite = left.get("favorite").and_then(|value| value.as_bool()).unwrap_or(false);
+        let right_favorite = right.get("favorite").and_then(|value| value.as_bool()).unwrap_or(false);
+        right_favorite.cmp(&left_favorite).then_with(|| {
+            let left_name = left.get("name").and_then(|value| value.as_str()).unwrap_or("");
+            let right_name = right.get("name").and_then(|value| value.as_str()).unwrap_or("");
+            left_name.to_lowercase().cmp(&right_name.to_lowercase())
+        })
+    });
+    people
+}
+
+fn friendly_search(err: LineError) -> LineError {
+    let blob = format!("{} {}", err.reason, err.message).to_uppercase();
+    if blob.contains("NOT_FOUND") || blob.contains("NOT FOUND") || err.code == Some(5) || err.message == "No one was found." {
+        return line("No one was found.");
+    }
+    if err.message == "Enter a LINE ID or phone number." {
+        return err;
+    }
+    line("Could not search for that person.")
+}
+
+fn first_group_mid(value: &Value) -> String {
+    match value {
+        Value::Struct(fields) => {
+            let mid = text_field(fields, 2);
+            if group_mid_ok(&mid) {
+                return mid;
+            }
+            let mid = text_field(fields, 1);
+            if group_mid_ok(&mid) {
+                return mid;
+            }
+            for child in fields.values() {
+                let found = first_group_mid(child);
+                if !found.is_empty() {
+                    return found;
+                }
+            }
+        }
+        Value::List(items) => {
+            for item in items {
+                let found = first_group_mid(item);
+                if !found.is_empty() {
+                    return found;
+                }
+            }
+        }
+        _ => {}
+    }
+    String::new()
+}
+
+fn first_contact(value: &Value) -> Option<BTreeMap<i16, Value>> {
+    match value {
+        Value::Struct(fields) => {
+            if user_mid_ok(&text_field(fields, 1)) {
+                return Some(fields.clone());
+            }
+            for child in fields.values() {
+                if let Some(found) = first_contact(child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::List(items) => items.iter().find_map(first_contact),
+        Value::Map(pairs) => pairs.iter().find_map(|(_, child)| first_contact(child)),
+        _ => None,
+    }
+}
+
+fn recommendation_reason_map(value: &Value) -> HashMap<String, String> {
+    let mut reasons = HashMap::new();
+    harvest_recommendation(value, "", &mut reasons);
+    reasons
+}
+
+fn harvest_recommendation(value: &Value, mid: &str, reasons: &mut HashMap<String, String>) {
+    match value {
+        Value::Struct(fields) => {
+            let here = fields
+                .values()
+                .find_map(|child| match child {
+                    Value::Bytes(raw) => {
+                        let id = String::from_utf8_lossy(raw).into_owned();
+                        user_mid_ok(&id).then_some(id)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| mid.to_string());
+            if !here.is_empty() {
+                if let Some(reason) = recommendation_union(fields) {
+                    reasons.entry(here.clone()).or_insert(reason);
+                }
+            }
+            for child in fields.values() {
+                harvest_recommendation(child, &here, reasons);
+            }
+        }
+        Value::List(items) => {
+            for item in items {
+                harvest_recommendation(item, mid, reasons);
+            }
+        }
+        Value::Map(pairs) => {
+            for (_, child) in pairs {
+                harvest_recommendation(child, mid, reasons);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn recommendation_union(fields: &BTreeMap<i16, Value>) -> Option<String> {
+    if let Some(reason) = union_reason(fields) {
+        return Some(reason);
+    }
+    for child in fields.values() {
+        if let Value::Struct(inner) = child {
+            if let Some(reason) = union_reason(inner) {
+                return Some(reason);
+            }
+        }
+    }
+    None
+}
+
+fn union_reason(fields: &BTreeMap<i16, Value>) -> Option<String> {
+    if fields.is_empty() || fields.keys().any(|id| !matches!(id, 1 | 2 | 3 | 4 | 5 | 12 | 21)) {
+        return None;
+    }
+    let hit = [2, 3, 4, 5, 12, 21].into_iter().filter(|id| matches!(fields.get(id), Some(Value::Struct(_)))).collect::<Vec<_>>();
+    if hit.len() != 1 {
+        return None;
+    }
+    Some(match hit[0] {
+        2 => "phone",
+        3 => "id",
+        4 => "qr",
+        5 => "group",
+        12 => "share",
+        21 => "added",
+        _ => return None,
+    }
+    .to_string())
+}
+
 fn collect_mids(value: Option<&Value>) -> Vec<String> {
     let mut ids = Vec::new();
     match value {
@@ -4744,6 +5102,20 @@ fn meta_int(pairs: &[(Value, Value)], name: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_phone_recommendation_keeps_its_reason() {
+        let mid = "u0123456789abcdef0123456789abcdef";
+        let phone = Value::Struct(BTreeMap::from([(1, Value::Bytes(b"+8190".to_vec()))]));
+        let union = Value::Struct(BTreeMap::from([(2, phone)]));
+        let person = Value::Struct(BTreeMap::from([
+            (1, Value::Bytes(mid.as_bytes().to_vec())),
+            (2, union),
+        ]));
+        let value = Value::Struct(BTreeMap::from([(1, Value::List(vec![person]))]));
+        let reasons = recommendation_reason_map(&value);
+        assert_eq!(reasons.get(mid).map(String::as_str), Some("phone"));
+    }
 
     #[test]
     fn session_file_lives_in_the_app_config_directory() {
