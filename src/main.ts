@@ -117,6 +117,8 @@ const stickerOpen = document.querySelector<HTMLButtonElement>("#sticker-open")!;
 const stickerPanel = document.querySelector<HTMLElement>("#sticker-panel")!;
 const fileInput = document.querySelector<HTMLInputElement>("#file-input")!;
 const sendButton = document.querySelector<HTMLButtonElement>("#send-message")!;
+const sendMenu = document.querySelector<HTMLElement>("#send-menu")!;
+const sendNote = document.querySelector<HTMLParagraphElement>("#send-note")!;
 const attachPreview = document.querySelector<HTMLElement>("#attach-preview")!;
 const sendError = document.querySelector<HTMLParagraphElement>("#send-error")!;
 const railMore = document.querySelector<HTMLButtonElement>("#rail-more")!;
@@ -176,6 +178,7 @@ const animatedMedia = new Set<string>();
 const mediaMimes = new Map<string, string>();
 const mediaJobs = new Map<string, Promise<void>>();
 let gallery: { ids: string[]; index: number } | null = null;
+let localGallery: { urls: string[]; index: number } | null = null;
 let trayBadge = -1;
 
 type ReplyDraft = { id: string; text: string; name: string; picture: string };
@@ -195,6 +198,7 @@ type Outgoing = {
   albumUrls?: string[];
   file?: { name: string; mime: string; data: string; groupId?: string; groupSeq?: number; groupCount?: number };
   stickerSend?: { packageId: string; stickerId: string; animated: boolean };
+  silent?: boolean;
 };
 type AttachmentDraft = {
   chatId: string;
@@ -693,6 +697,7 @@ function showThread(chat: ChatRow | undefined): void {
     stickerOpen.disabled = true;
     discardAttachment();
     sendError.hidden = true;
+    sendNote.hidden = true;
     threadHead.replaceChildren();
     delete document.body.dataset.sound;
     refreshSendButton();
@@ -713,6 +718,7 @@ function showThread(chat: ChatRow | undefined): void {
     paintedHistory = "";
     paintedIds = "";
     openUnread = chat.unread && chat.unread > 0 ? chat.unread : 0;
+    sendNote.hidden = true;
     unreadFocus = "";
     userMoved = false;
     closeGallery();
@@ -1265,6 +1271,101 @@ function warmMedia(ids: string[], preview: boolean): Promise<void> {
   return job;
 }
 
+function downloadName(name: string, mime: string): string {
+  const cleaned = name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+  if (cleaned && !/^letter-sealed\b/i.test(cleaned) && cleaned.toLowerCase() !== "file") {
+    return cleaned;
+  }
+  const subtype = mime.split("/")[1]?.split(";")[0]?.replace(/[^a-z0-9]/gi, "") || "bin";
+  return `download.${subtype || "bin"}`;
+}
+
+async function saveDownload(name: string, mime: string, data: string, button?: HTMLButtonElement): Promise<void> {
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    const path = await invoke<string | null>("save_download", { name: downloadName(name, mime), data, title: t("save") });
+    if (!path) {
+      return;
+    }
+    sendError.hidden = true;
+    sendNote.hidden = false;
+    sendNote.textContent = t("savedFile", { path });
+  } catch (error) {
+    sendError.hidden = false;
+    sendError.textContent = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
+async function downloadMessageFile(id: string, name: string, button?: HTMLButtonElement): Promise<void> {
+  if (!openId || !messageIdNumber(id)) {
+    return;
+  }
+  if (button) {
+    button.disabled = true;
+  }
+  try {
+    const files = await invoke<MediaFile[]>("load_media", { id: openId, messageIds: [id], preview: false, animatedIds: [] });
+    const file = files.find((item) => item.id === id) || files[0];
+    if (!file?.data) {
+      throw new Error(file?.error || t("couldNotDownload"));
+    }
+    await saveDownload(name, file.mime || "", file.data, button);
+  } catch (error) {
+    sendError.hidden = false;
+    sendError.textContent = error instanceof Error ? error.message : String(error);
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
+function fileIcon(): SVGSVGElement {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("fill", "currentColor");
+  path.setAttribute("d", "M6 2.5h7.2L19.5 8.8V20a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 20V4A1.5 1.5 0 0 1 6 2.5zm6.8 1.6V9h4.9l-4.9-4.9zM11 13.2v4.1l-1.4-1.4-1.1 1.1 3 3 3-3-1.1-1.1-1.4 1.4v-4.1H11z");
+  svg.append(path);
+  return svg;
+}
+
+function fileCard(label: string, onClick: (button: HTMLButtonElement) => void): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "file-card";
+  const name = document.createElement("span");
+  name.className = "file-name";
+  name.textContent = label.trim() || t("message");
+  button.append(fileIcon(), name);
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    onClick(button);
+  });
+  return button;
+}
+
+function imageThumb(url: string, onClick: () => void): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "media-thumb";
+  const img = document.createElement("img");
+  img.alt = "";
+  img.src = url;
+  button.append(img);
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    onClick();
+  });
+  return button;
+}
+
 const COLLAPSED_LINES = 15;
 
 function appendMessageText(bubble: HTMLElement, text: string): void {
@@ -1659,6 +1760,10 @@ function quoteText(row: HTMLElement): string {
   if (row.querySelector(".media-grid")) {
     return t("photo");
   }
+  const file = row.querySelector(".file-name")?.textContent?.trim() || "";
+  if (file) {
+    return file;
+  }
   return text || t("message");
 }
 
@@ -1752,6 +1857,7 @@ function openMsgMenu(event: MouseEvent, row: HTMLElement): void {
   event.preventDefault();
   event.stopPropagation();
   closeMenu();
+  closeSendMenu();
   closeReactionPicker();
   menuOpenedAt = Date.now();
   msgMenuRow = row;
@@ -1999,6 +2105,12 @@ function messageBubble(message: BubbleMessage): HTMLElement {
     bubble.append(stickerImage(message.sticker, message.stickerFallback || "", "sticker", () => {
       appendMessageText(bubble, message.text || t("sticker"));
     }, message.id || ""));
+  } else if (message.kind === "file" && message.id) {
+    const name = message.text;
+    const id = message.id;
+    bubble.append(fileCard(name, (button) => {
+      void downloadMessageFile(id, name, button);
+    }));
   } else {
     appendMessageText(bubble, message.text);
   }
@@ -2275,7 +2387,10 @@ function imageGrid(items: MediaSlot[], token: number): HTMLElement {
     const img = document.createElement("img");
     img.alt = "";
     button.append(img);
-    button.addEventListener("click", () => openGallery(ids, index));
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openGallery(ids, index);
+    });
     grid.append(button);
     const thumb = !item.animated;
     void warmMedia([item.id], thumb).then(() => {
@@ -2323,13 +2438,36 @@ function videoStack(items: MediaSlot[], token: number): HTMLElement {
 }
 
 function openGallery(ids: string[], index: number): void {
+  localGallery = null;
   gallery = { ids, index };
   lightbox.hidden = false;
   paintGallery();
 }
 
+function openLocalGallery(urls: string[], index: number): void {
+  const shown = urls.filter((url) => url);
+  if (shown.length === 0) {
+    return;
+  }
+  gallery = null;
+  localGallery = { urls: shown, index: Math.min(Math.max(index, 0), shown.length - 1) };
+  lightbox.hidden = false;
+  paintLocalGallery();
+}
+
+function paintLocalGallery(): void {
+  if (!localGallery) {
+    return;
+  }
+  const several = localGallery.urls.length > 1;
+  lightboxPrev.hidden = !several;
+  lightboxNext.hidden = !several;
+  showLightbox(localGallery.urls[localGallery.index] || "", "");
+}
+
 function closeGallery(): void {
   gallery = null;
+  localGallery = null;
   lightbox.hidden = true;
   lightboxImg.removeAttribute("src");
   lightboxVideo.pause();
@@ -2359,6 +2497,12 @@ function showLightbox(url: string, mime: string): void {
 }
 
 function stepGallery(delta: number): void {
+  if (localGallery && localGallery.urls.length > 1) {
+    const count = localGallery.urls.length;
+    localGallery.index = (localGallery.index + delta + count) % count;
+    paintLocalGallery();
+    return;
+  }
   if (!gallery || gallery.ids.length < 2) {
     return;
   }
@@ -2665,6 +2809,7 @@ threadBody.addEventListener("contextmenu", (event) => {
 
 threadBody.addEventListener("scroll", () => {
   closeMsgMenu();
+  closeSendMenu();
 });
 
 msgMenu.addEventListener("click", (event) => {
@@ -2775,19 +2920,28 @@ function outgoingBubble(item: Outgoing): HTMLElement {
     bubble?.querySelector(".msg-text")?.remove();
     const grid = document.createElement("div");
     grid.className = "media-grid many";
-    for (const url of item.albumUrls) {
-      const thumb = document.createElement("span");
-      thumb.className = "media-thumb";
-      const img = document.createElement("img");
-      img.alt = "";
-      img.src = url;
-      thumb.append(img);
-      grid.append(thumb);
-    }
+    const urls = item.albumUrls;
+    urls.forEach((url, index) => {
+      grid.append(imageThumb(url, () => openLocalGallery(urls, index)));
+    });
     bubble?.prepend(grid);
     if (item.file?.groupId) {
       row.dataset.gid = item.file.groupId;
     }
+  } else if (item.previewUrl && item.kind === "image") {
+    bubble?.classList.add("rich");
+    bubble?.querySelector(".msg-text")?.remove();
+    const grid = document.createElement("div");
+    grid.className = "media-grid one";
+    const url = item.previewUrl;
+    grid.append(imageThumb(url, () => openLocalGallery([url], 0)));
+    bubble?.prepend(grid);
+  } else if (item.kind === "file" && item.file) {
+    const file = item.file;
+    bubble?.querySelector(".msg-text")?.remove();
+    bubble?.append(fileCard(file.name, (button) => {
+      void saveDownload(file.name, file.mime, file.data, button);
+    }));
   } else if (item.previewUrl) {
     const media = item.kind === "video" ? playableVideo(item.previewUrl) : document.createElement("img");
     if (media instanceof HTMLImageElement) {
@@ -2809,11 +2963,26 @@ function outgoingBubble(item: Outgoing): HTMLElement {
   }
   row.dataset.localId = item.localId;
   row.dataset.state = item.state;
+  if (item.silent) {
+    row.dataset.quiet = "1";
+    markQuiet(row);
+  }
   const retry = row.querySelector<HTMLButtonElement>(".msg-retry");
   if (retry && item.error) {
     retry.title = item.error;
   }
   return row;
+}
+
+function markQuiet(row: HTMLElement): void {
+  const meta = row.classList.contains("msg-meta") ? row : row.querySelector(".msg-meta");
+  if (!meta || meta.querySelector(".msg-quiet")) {
+    return;
+  }
+  const mark = document.createElement("span");
+  mark.className = "msg-quiet";
+  mark.textContent = t("sentQuiet");
+  meta.prepend(mark);
 }
 
 function setDelivery(row: HTMLElement, state: "sending" | "failed" | "sent", time: number, serverId = "", error = ""): void {
@@ -2843,6 +3012,9 @@ function setDelivery(row: HTMLElement, state: "sending" | "failed" | "sent", tim
   if (!next) {
     current?.remove();
     return;
+  }
+  if (row.dataset.quiet === "1") {
+    markQuiet(next);
   }
   if (current) {
     current.replaceWith(next);
@@ -2953,7 +3125,7 @@ function finishOutgoing(localId: string, payload: SendResult): void {
     return;
   }
   threadBody.querySelector(".thread-note")?.remove();
-  threadBody.append(messageBubble({
+  const sent = messageBubble({
     id: payload.messageId,
     mine: true,
     name: "",
@@ -2971,7 +3143,12 @@ function finishOutgoing(localId: string, payload: SendResult): void {
     replyText: item?.reply?.text || "",
     replyName: item?.reply?.name || "",
     replyPicture: item?.reply?.picture || "",
-  }));
+  });
+  if (item?.silent) {
+    sent.dataset.quiet = "1";
+    markQuiet(sent);
+  }
+  threadBody.append(sent);
   unreadFocus = "";
   scrollThreadToEnd();
 }
@@ -3037,6 +3214,7 @@ function dispatchSend(item: Outgoing): Promise<void> {
       groupId: item.file.groupId,
       groupSeq: item.file.groupSeq,
       groupCount: item.file.groupCount,
+      silent: item.silent === true,
     }).then(() => undefined, fail);
   }
   if (item.stickerSend) {
@@ -3053,10 +3231,11 @@ function dispatchSend(item: Outgoing): Promise<void> {
     text: item.text,
     relatedId: item.reply?.id || undefined,
     localId: item.localId,
+    silent: item.silent === true,
   }).then(() => undefined, fail);
 }
 
-function startSend(chatId: string, text: string, reply: ReplyDraft | null): void {
+function startSend(chatId: string, text: string, reply: ReplyDraft | null, silent = false): void {
   const body = text.trim();
   if (!body || !chatId) {
     return;
@@ -3070,6 +3249,7 @@ function startSend(chatId: string, text: string, reply: ReplyDraft | null): void
     state: "sending",
     error: "",
     knownIds: chatId === openId ? paintedIds : "",
+    silent,
   };
   outgoing.push(item);
   bumpChat(chatId, body, item.time);
@@ -3356,10 +3536,11 @@ function stageAttachment(chatId: string, file: File): void {
   stageFiles(chatId, [file]);
 }
 
-async function submitComposer(): Promise<void> {
+async function submitComposer(silent = false): Promise<void> {
   if (sendBusy || !openId || composerInput.disabled) {
     return;
   }
+  sendNote.hidden = true;
   const text = composerInput.value.trim();
   const drafts = attachmentDrafts.slice();
   const epoch = attachmentEpoch;
@@ -3427,10 +3608,11 @@ async function submitComposer(): Promise<void> {
         groupSeq: album ? index + 1 : 0,
         groupCount: album ? drafts.length : 0,
       },
+      silent,
     }, !album || index === 0);
   }
   if (text) {
-    startSend(chatId, text, reply);
+    startSend(chatId, text, reply, silent);
   }
 }
 
@@ -3446,9 +3628,91 @@ composerInput.addEventListener("input", () => {
   refreshSendButton();
 });
 
+let sendHold: number | null = null;
+let suppressSendClick = false;
+
+function closeSendMenu(): void {
+  sendMenu.hidden = true;
+}
+
+function openSendMenu(): void {
+  if (sendButton.disabled) {
+    return;
+  }
+  closeMsgMenu();
+  sendMenu.hidden = false;
+  const button = sendButton.getBoundingClientRect();
+  const width = sendMenu.offsetWidth;
+  const height = sendMenu.offsetHeight;
+  let left = button.right - width;
+  let top = button.top - height - 8;
+  if (left < 8) {
+    left = 8;
+  }
+  if (top < 8) {
+    top = button.bottom + 8;
+  }
+  sendMenu.style.left = `${left}px`;
+  sendMenu.style.top = `${top}px`;
+}
+
+function cancelSendHold(): void {
+  if (sendHold !== null) {
+    window.clearTimeout(sendHold);
+    sendHold = null;
+  }
+}
+
+sendButton.addEventListener("pointerdown", (event) => {
+  if (sendButton.disabled || event.button !== 0) {
+    return;
+  }
+  cancelSendHold();
+  sendHold = window.setTimeout(() => {
+    sendHold = null;
+    suppressSendClick = true;
+    openSendMenu();
+  }, 450);
+});
+sendButton.addEventListener("pointerup", () => {
+  cancelSendHold();
+  queueMicrotask(() => {
+    suppressSendClick = false;
+  });
+});
+sendButton.addEventListener("pointerleave", cancelSendHold);
+sendButton.addEventListener("pointercancel", cancelSendHold);
+sendButton.addEventListener("contextmenu", (event) => {
+  event.preventDefault();
+  cancelSendHold();
+  if (sendButton.disabled) {
+    return;
+  }
+  openSendMenu();
+});
+
+sendMenu.addEventListener("click", (event) => {
+  event.stopPropagation();
+  const choice = (event.target as HTMLElement).closest("button")?.dataset.send;
+  closeSendMenu();
+  if (choice === "quiet") {
+    sendError.hidden = false;
+    sendError.textContent = t("sendQuietUnsupported");
+    return;
+  }
+  if (choice === "normal") {
+    void submitComposer(false);
+  }
+});
+
 document.querySelector<HTMLFormElement>("#composer")!.addEventListener("submit", (event) => {
   event.preventDefault();
-  void submitComposer();
+  if (suppressSendClick) {
+    suppressSendClick = false;
+    return;
+  }
+  closeSendMenu();
+  void submitComposer(false);
 });
 
 attachFile.addEventListener("click", () => {
@@ -3871,10 +4135,15 @@ document.addEventListener("click", (event) => {
   if (Date.now() - menuOpenedAt < 400) {
     return;
   }
-  if (msgMenu.contains(event.target as Node)) {
+  const target = event.target as Node;
+  if (msgMenu.contains(target)) {
     return;
   }
   closeMsgMenu();
+  if (sendMenu.contains(target) || sendButton.contains(target)) {
+    return;
+  }
+  closeSendMenu();
 });
 
 document.querySelector<HTMLButtonElement>("#sheet-close")!.addEventListener("click", () => {

@@ -493,6 +493,55 @@ fn dropped_mime(name: &str) -> String {
     .to_string()
 }
 
+fn safe_download_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("").trim();
+    let cleaned: String = base
+        .chars()
+        .filter(|ch| !ch.is_control() && !matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        .take(120)
+        .collect();
+    let cleaned = cleaned.trim().trim_matches('.').to_string();
+    if cleaned.is_empty() { "download".to_string() } else { cleaned }
+}
+
+fn decode_download(data: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.trim())
+        .map_err(|_| "could not save that file".to_string())?;
+    if bytes.is_empty() || bytes.len() > 40_000_000 {
+        return Err("that file is too large to save".to_string());
+    }
+    Ok(bytes)
+}
+
+/// Ask where to save a chat attachment, then write the chosen name.
+#[tauri::command]
+async fn save_download(app: AppHandle, name: String, data: String, title: Option<String>) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let bytes = decode_download(&data)?;
+    let name = safe_download_name(&name);
+    let title = title.unwrap_or_default();
+    let title: String = title.chars().filter(|ch| !ch.is_control()).take(80).collect();
+    let title = if title.trim().is_empty() { "Save".to_string() } else { title };
+    let mut dialog = app.dialog().file().set_title(&title).set_file_name(&name);
+    if let Some(dir) = dirs::download_dir().or_else(dirs::home_dir) {
+        dialog = dialog.set_directory(dir);
+    }
+    let Some(picked) = dialog.blocking_save_file() else {
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(|err| err.to_string())?;
+    if path.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    let saved = path.clone();
+    tauri::async_runtime::spawn_blocking(move || std::fs::write(&path, bytes).map_err(|_| "could not save that file".to_string()))
+        .await
+        .map_err(|_| "could not save that file".to_string())??;
+    Ok(Some(saved.display().to_string()))
+}
+
 /// A file-manager drop on Linux arrives as a `file://` path, not a browser File.
 #[tauri::command]
 async fn read_dropped_file(path: String) -> Result<serde_json::Value, String> {
@@ -533,7 +582,7 @@ async fn read_dropped_file(path: String) -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-async fn send_media(app: AppHandle, id: String, name: String, mime: String, data: String, local_id: Option<String>, group_id: Option<String>, group_seq: Option<i32>, group_count: Option<i32>) -> Result<(), String> {
+async fn send_media(app: AppHandle, id: String, name: String, mime: String, data: String, local_id: Option<String>, group_id: Option<String>, group_seq: Option<i32>, group_count: Option<i32>, silent: Option<bool>) -> Result<(), String> {
     chat_id(&id)?;
     let name = name.trim().to_string();
     let mime = mime.trim().to_string();
@@ -549,6 +598,7 @@ async fn send_media(app: AppHandle, id: String, name: String, mime: String, data
     }
     let local_id = local_send_id(local_id.unwrap_or_default().trim());
     let chat = id.clone();
+    let silent = silent.unwrap_or(false);
     let album = group_id.and_then(|group| {
         let seq = group_seq.unwrap_or(0);
         let count = group_count.unwrap_or(0);
@@ -560,7 +610,7 @@ async fn send_media(app: AppHandle, id: String, name: String, mime: String, data
     });
     let mut value = tauri::async_runtime::spawn_blocking(move || {
         let _send = TALK_SEND.lock().unwrap_or_else(|err| err.into_inner());
-        line::Client::new().send_media_for_window(&id, &name, &mime, &bytes, album)
+        line::Client::new().send_media_for_window(&id, &name, &mime, &bytes, album, silent)
     })
         .await
         .map_err(|err| format!("could not send: {err}"))?;
@@ -603,7 +653,7 @@ async fn send_sticker(app: AppHandle, id: String, package_id: String, sticker_id
 }
 
 #[tauri::command]
-async fn send_message(app: AppHandle, id: String, text: String, related_id: Option<String>, local_id: Option<String>) -> Result<(), String> {
+async fn send_message(app: AppHandle, id: String, text: String, related_id: Option<String>, local_id: Option<String>, silent: Option<bool>) -> Result<(), String> {
     chat_id(&id)?;
     let body = text.trim().to_string();
     if body.is_empty() || body.len() > 5000 {
@@ -617,7 +667,7 @@ async fn send_message(app: AppHandle, id: String, text: String, related_id: Opti
     let chat = id.clone();
     let mut value = tauri::async_runtime::spawn_blocking(move || {
         let _send = TALK_SEND.lock().unwrap_or_else(|err| err.into_inner());
-        line::Client::new().send_for_window(&id, &body, &related)
+        line::Client::new().send_for_window(&id, &body, &related, silent.unwrap_or(false))
     })
         .await
         .map_err(|err| format!("could not send: {err}"))?;
@@ -1175,6 +1225,7 @@ pub fn run() {
     line::install_config_dir(&context.config().identifier);
     let minimize_to_tray = load_minimize_to_tray();
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri::plugin::Builder::<tauri::Wry, ()>::new("keep-page")
                 .on_navigation(|_webview, url| url.scheme() != "file")
@@ -1186,7 +1237,7 @@ pub fn run() {
             tauri::webview::PermissionKind::Microphone | tauri::webview::PermissionKind::Camera => tauri::webview::PermissionResponse::Allow,
             _ => tauri::webview::PermissionResponse::Default,
         })
-        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, read_dropped_file, send_message, send_media, send_sticker, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_tray_badge, list_media_devices, open_profile, block_profile, add_profile, open_fraud_help, rename_profile, favorite_profile, open_friend_chat, open_members, group_roster, rename_group, set_group_auto_join, invite_into_group, remove_group_member, group_invite_candidates])
+        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, save_download, read_dropped_file, send_message, send_media, send_sticker, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_tray_badge, list_media_devices, open_profile, block_profile, add_profile, open_fraud_help, rename_profile, favorite_profile, open_friend_chat, open_members, group_roster, rename_group, set_group_auto_join, invite_into_group, remove_group_member, group_invite_candidates])
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;

@@ -533,7 +533,8 @@ button.thread-title {
   opacity: 0.85;
 }
 
-#msg-menu {
+#msg-menu,
+#send-menu {
   position: fixed;
   z-index: 36;
   min-width: 148px;
@@ -545,7 +546,8 @@ button.thread-title {
   box-shadow: 0 8px 24px rgba(20, 24, 33, 0.18);
 }
 
-#msg-menu button {
+#msg-menu button,
+#send-menu button {
   display: block;
   width: 100%;
   margin: 0;
@@ -558,8 +560,13 @@ button.thread-title {
   cursor: pointer;
 }
 
-#msg-menu button:hover {
+#msg-menu button:hover,
+#send-menu button:hover {
   background: #f3f4f6;
+}
+
+#send-menu {
+  min-width: 240px;
 }
 
 #msg-menu hr {
@@ -1189,6 +1196,46 @@ body.profile.is-friend #profile-actions {
   background: #1c1c1c;
 }
 
+.file-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 280px;
+  margin: 0;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: start;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.file-card svg {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 4px;
+  border-radius: 6px;
+  background: #06c755;
+  color: #fff;
+  box-sizing: border-box;
+}
+
+.file-card:hover .file-name {
+  text-decoration: underline;
+}
+
+.file-card:disabled {
+  cursor: progress;
+}
+
+.file-name {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+}
+
 .video-stack {
   display: flex;
   flex-direction: column;
@@ -1487,10 +1534,23 @@ body.profile.is-friend #profile-actions {
   border-radius: 8px;
 }
 
-.send-error {
+.send-error,
+.send-note {
   margin: 0 0 8px;
-  color: #b42318;
   font-size: 13px;
+}
+
+.send-error {
+  color: #b42318;
+}
+
+.send-note {
+  color: #4b5563;
+}
+
+.msg-quiet {
+  color: #8b9098;
+  font-size: 11px;
 }
 
 #sheet {

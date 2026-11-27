@@ -1119,12 +1119,12 @@ impl Client {
         self.talk("getLastE2EEGroupSharedKey", &[(2, Field::I32(2)), (3, bin(group))]).ok().flatten()
     }
 
-    pub fn send_for_window(&mut self, to: &str, message: &str, related_id: &str) -> Json {
-        match self.send_text(to, message, related_id) {
+    pub fn send_for_window(&mut self, to: &str, message: &str, related_id: &str, silent: bool) -> Json {
+        match self.send_text(to, message, related_id, silent) {
             Ok(sent) => sent,
             Err(err) => {
                 if to.starts_with('u') && (err.code == Some(82) || invalid_sender_key(&err)) {
-                    match self.send_sealed_text(to, message, related_id) {
+                    match self.send_sealed_text(to, message, related_id, silent) {
                         Ok(sent) => sent,
                         Err(sealed) => send_failure(to, &sealed),
                     }
@@ -1141,15 +1141,15 @@ impl Client {
     /// to `obs.line-apps.com/r/talk/m/{message id}`. A chat that rejects that with
     /// letter sealing (TalkException 82) encrypts the file and uploads it under
     /// the `emi` / `emv` / `ema` / `emf` object path before the sealed message.
-    pub fn send_media_for_window(&mut self, to: &str, name: &str, mime: &str, bytes: &[u8], album: Option<Album>) -> Json {
+    pub fn send_media_for_window(&mut self, to: &str, name: &str, mime: &str, bytes: &[u8], album: Option<Album>, silent: bool) -> Json {
         if bytes.is_empty() || bytes.len() > MEDIA_LIMIT {
             return send_failure(to, &line("that file is too large to send"));
         }
         let kind = classify_media(name, mime);
         let album = album.filter(|album| kind.kind == "image" && album_ok(album));
-        match self.send_plain_media(to, &kind, bytes, album.as_ref()) {
+        match self.send_plain_media(to, &kind, bytes, album.as_ref(), silent) {
             Ok(sent) => sent,
-            Err(err) if needs_seal(&err) => match self.send_sealed_media(to, &kind, bytes, album.as_ref()) {
+            Err(err) if needs_seal(&err) => match self.send_sealed_media(to, &kind, bytes, album.as_ref(), silent) {
                 Ok(sent) => sent,
                 Err(sealed) => send_failure(to, &sealed),
             },
@@ -1165,7 +1165,7 @@ impl Client {
             return send_failure(to, &line("that sticker cannot be sent"));
         }
         let meta = sticker_meta(package_id, sticker_id, animated);
-        match self.send_content(to, 7, &meta, &[], true) {
+        match self.send_content(to, 7, &meta, &[], true, false) {
             Ok(sent) => self.finish_sticker(sent, package_id, sticker_id, animated),
             Err(err) if needs_seal(&err) => {
                 let raw = sticker_body(&meta);
@@ -2127,10 +2127,10 @@ impl Client {
             .map_err(fail_line)
     }
 
-    fn send_plain_media(&mut self, to: &str, kind: &OutgoingMedia, bytes: &[u8], album: Option<&Album>) -> Result<Json, LineError> {
+    fn send_plain_media(&mut self, to: &str, kind: &OutgoingMedia, bytes: &[u8], album: Option<&Album>, silent: bool) -> Result<Json, LineError> {
         let mut meta = plain_media_meta(kind, bytes.len());
         push_album(&mut meta, album);
-        let sent = self.send_content(to, kind.code, &meta, &[], false)?;
+        let sent = self.send_content(to, kind.code, &meta, &[], false, silent)?;
         let id = sent.get("messageId").and_then(|value| value.as_str()).unwrap_or("").to_string();
         if let Err(err) = self.obs_post(&format!("/r/talk/m/{id}"), bytes, &plain_obs_params(kind, &id)) {
             // A reused request number comes back as an older photo. That photo is
@@ -2144,7 +2144,7 @@ impl Client {
         Ok(media_sent(sent, kind, album))
     }
 
-    fn send_sealed_media(&mut self, to: &str, kind: &OutgoingMedia, bytes: &[u8], album: Option<&Album>) -> Result<Json, LineError> {
+    fn send_sealed_media(&mut self, to: &str, kind: &OutgoingMedia, bytes: &[u8], album: Option<&Album>, silent: bool) -> Result<Json, LineError> {
         let (private, sender_key, receiver_public, receiver_key, spec) = self.seal_material(to)?;
         let (material, encrypted) = e2ee::encrypt_file(bytes).map_err(line)?;
         let temp = temp_object_id();
@@ -2193,7 +2193,7 @@ impl Client {
             meta.push((b"MEDIA_CONTENT_INFO".to_vec(), info.to_string().into_bytes()));
         }
         push_album(&mut meta, album);
-        let sent = self.send_content(to, kind.code, &meta, &chunks, false)?;
+        let sent = self.send_content(to, kind.code, &meta, &chunks, false, silent)?;
         let id = sent.get("messageId").and_then(|value| value.as_str()).unwrap_or("").to_string();
         cache_sent_media(&id, kind, bytes);
         Ok(media_sent(sent, kind, album))
@@ -2215,16 +2215,16 @@ impl Client {
         .map_err(|err| line_code(err, Some(82), "E2EE_RETRY_ENCRYPT"))?;
         let mut full = e2ee_meta(spec, content_type);
         full.extend(meta.iter().cloned());
-        self.send_content(to, content_type, &full, &chunks, true)
+        self.send_content(to, content_type, &full, &chunks, true, false)
     }
 
-    fn send_content(&mut self, to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], chunks: &[Vec<u8>], has_content: bool) -> Result<Json, LineError> {
+    fn send_content(&mut self, to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], chunks: &[Vec<u8>], has_content: bool, silent: bool) -> Result<Json, LineError> {
         self.require_token()?;
         let seq = self.next_seq();
         let call = if chunks.is_empty() {
-            content_fields(to, content_type, meta, seq, has_content)
+            content_fields(to, content_type, meta, seq, has_content, silent)
         } else {
-            sealed_content_fields(to, content_type, meta, chunks, seq, has_content)
+            sealed_content_fields(to, content_type, meta, chunks, seq, has_content, silent)
         };
         let success = self.talk("sendMessage", &call)?.ok_or_else(|| line("empty send response"))?;
         let fields = as_struct(&success)?;
@@ -2313,10 +2313,10 @@ impl Client {
         Ok(oid)
     }
 
-    fn send_text(&mut self, to: &str, message: &str, related_id: &str) -> Result<Json, LineError> {
+    fn send_text(&mut self, to: &str, message: &str, related_id: &str, silent: bool) -> Result<Json, LineError> {
         self.require_token()?;
         let seq = self.next_seq();
-        let success = self.talk("sendMessage", &send_fields(to, message, seq, related_id))?.ok_or_else(|| line("empty send response"))?;
+        let success = self.talk("sendMessage", &send_fields(to, message, seq, related_id, silent))?.ok_or_else(|| line("empty send response"))?;
         let fields = as_struct(&success)?;
         let when = message_time(fields);
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
@@ -2325,7 +2325,7 @@ impl Client {
         Ok(sent_payload(to, &text_field(fields, 4), &text, if when == 0 { now } else { when }, related_id))
     }
 
-    fn send_sealed_text(&mut self, to: &str, message: &str, related_id: &str) -> Result<Json, LineError> {
+    fn send_sealed_text(&mut self, to: &str, message: &str, related_id: &str, silent: bool) -> Result<Json, LineError> {
         self.require_token()?;
         if !to.starts_with('u') || self.session.mid.is_empty() {
             return Err(line_code("letter sealing is not available for this chat", Some(82), "E2EE_RETRY_ENCRYPT"));
@@ -2356,7 +2356,7 @@ impl Client {
             ));
         };
         let chunks = self.seal_for(to, message, &private, sender_key_id, &receiver_public, receiver_key_id, spec_version)?;
-        self.post_sealed(to, message, &chunks, spec_version, related_id)
+        self.post_sealed(to, message, &chunks, spec_version, related_id, silent)
     }
 
     fn seal_for(
@@ -2373,10 +2373,10 @@ impl Client {
             .map_err(|err| line_code(err, Some(82), "E2EE_RETRY_ENCRYPT"))
     }
 
-    fn post_sealed(&mut self, to: &str, message: &str, chunks: &[Vec<u8>], spec_version: i64, related_id: &str) -> Result<Json, LineError> {
+    fn post_sealed(&mut self, to: &str, message: &str, chunks: &[Vec<u8>], spec_version: i64, related_id: &str, silent: bool) -> Result<Json, LineError> {
         let seq = self.next_seq();
         let success = self
-            .talk("sendMessage", &sealed_fields(to, chunks, spec_version, seq, related_id))?
+            .talk("sendMessage", &sealed_fields(to, chunks, spec_version, seq, related_id, silent))?
             .ok_or_else(|| line("empty send response"))?;
         let fields = as_struct(&success)?;
         let when = message_time(fields);
@@ -3482,7 +3482,14 @@ fn media_sent(mut sent: Json, kind: &OutgoingMedia, album: Option<&Album>) -> Js
 }
 
 fn cache_sent_media(id: &str, kind: &OutgoingMedia, bytes: &[u8]) {
-    if !message_id_ok(id) || (kind.kind != "image" && kind.kind != "video") {
+    if !message_id_ok(id) {
+        return;
+    }
+    if kind.kind == "file" || kind.kind == "audio" {
+        write_media_cache(id, false, false, &kind.mime, bytes);
+        return;
+    }
+    if kind.kind != "image" && kind.kind != "video" {
         return;
     }
     if kind.animated {
@@ -3529,12 +3536,18 @@ fn sticker_body(meta: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
     serde_json::to_vec(&Json::Object(map)).unwrap_or_default()
 }
 
+/// `notificationDisabled` is the Messaging API name for a send that arrives
+fn meta_with_quiet(meta: &[(Vec<u8>, Vec<u8>)], _silent: bool) -> Vec<(Vec<u8>, Vec<u8>)> {
+    // TalkService ignores a notificationDisabled metadata entry and still pushes.
+    meta.to_vec()
+}
+
 fn sticker_shop_url(sticker_id: &str, animated: bool) -> String {
     let asset = if animated { "sticker_animation.png" } else { "sticker.png" };
     format!("https://stickershop.line-scdn.net/stickershop/v1/sticker/{sticker_id}/android/{asset}")
 }
 
-fn content_fields(to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], seq: i32, has_content: bool) -> Vec<(i16, Field)> {
+fn content_fields(to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], seq: i32, has_content: bool, silent: bool) -> Vec<(i16, Field)> {
     let mut message = vec![
         (2, bin(to)),
         (5, Field::I64(0)),
@@ -3542,7 +3555,7 @@ fn content_fields(to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], seq:
         (10, bin("")),
         (14, Field::Bool(has_content)),
         (15, Field::I32(content_type)),
-        (18, Field::MapBin(meta.to_vec())),
+        (18, Field::MapBin(meta_with_quiet(meta, silent))),
         (19, Field::Byte(0)),
     ];
     if let Some(kind) = mid_type(to) {
@@ -3551,7 +3564,7 @@ fn content_fields(to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], seq:
     vec![(1, Field::I32(seq)), (2, Field::Struct(message))]
 }
 
-fn sealed_content_fields(to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], chunks: &[Vec<u8>], seq: i32, has_content: bool) -> Vec<(i16, Field)> {
+fn sealed_content_fields(to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], chunks: &[Vec<u8>], seq: i32, has_content: bool, silent: bool) -> Vec<(i16, Field)> {
     let mut message = vec![
         (2, bin(to)),
         (5, Field::I64(0)),
@@ -3559,7 +3572,7 @@ fn sealed_content_fields(to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)
         (10, bin("")),
         (14, Field::Bool(has_content)),
         (15, Field::I32(content_type)),
-        (18, Field::MapBin(meta.to_vec())),
+        (18, Field::MapBin(meta_with_quiet(meta, silent))),
         (19, Field::Byte(0)),
         (20, Field::List(thrift::BINARY, chunks.iter().cloned().map(Field::Bin).collect())),
     ];
@@ -3569,7 +3582,7 @@ fn sealed_content_fields(to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)
     vec![(1, Field::I32(seq)), (2, Field::Struct(message))]
 }
 
-fn send_fields(to: &str, text_body: &str, seq: i32, related_id: &str) -> Vec<(i16, Field)> {
+fn send_fields(to: &str, text_body: &str, seq: i32, related_id: &str, silent: bool) -> Vec<(i16, Field)> {
     let mut message = vec![
         (2, bin(to)),
         (5, Field::I64(0)),
@@ -3577,7 +3590,7 @@ fn send_fields(to: &str, text_body: &str, seq: i32, related_id: &str) -> Vec<(i1
         (10, bin(text_body)),
         (14, Field::Bool(false)),
         (15, Field::I32(0)),
-        (18, Field::MapBin(vec![])),
+        (18, Field::MapBin(meta_with_quiet(&[], silent))),
         (19, Field::Byte(0)),
     ];
     if let Some(kind) = mid_type(to) {
@@ -3587,12 +3600,15 @@ fn send_fields(to: &str, text_body: &str, seq: i32, related_id: &str) -> Vec<(i1
     vec![(1, Field::I32(seq)), (2, Field::Struct(message))]
 }
 
-fn sealed_fields(to: &str, chunks: &[Vec<u8>], spec_version: i64, seq: i32, related_id: &str) -> Vec<(i16, Field)> {
-    let meta = vec![
-        (b"e2eeVersion".to_vec(), spec_version.to_string().into_bytes()),
-        (b"contentType".to_vec(), b"0".to_vec()),
-        (b"e2eeMark".to_vec(), b"2".to_vec()),
-    ];
+fn sealed_fields(to: &str, chunks: &[Vec<u8>], spec_version: i64, seq: i32, related_id: &str, silent: bool) -> Vec<(i16, Field)> {
+    let meta = meta_with_quiet(
+        &[
+            (b"e2eeVersion".to_vec(), spec_version.to_string().into_bytes()),
+            (b"contentType".to_vec(), b"0".to_vec()),
+            (b"e2eeMark".to_vec(), b"2".to_vec()),
+        ],
+        silent,
+    );
     let mut message = vec![
         (2, bin(to)),
         (3, Field::I32(0)),
@@ -4791,14 +4807,14 @@ mod tests {
 
     #[test]
     fn reply_and_unsend_match_the_desktop_calls() {
-        let frame = thrift::write_call("sendMessage", &send_fields("uabc", "Xo", 4, "1500"));
+        let frame = thrift::write_call("sendMessage", &send_fields("uabc", "Xo", 4, "1500", false));
         let parsed = thrift::read_message(&frame).unwrap();
         let Value::Struct(message) = parsed.fields.get(&2).unwrap() else { panic!("message") };
         assert_eq!(text_field(message, 10), "Xo");
         assert_eq!(text_field(message, 21), "1500");
         assert_eq!(int_field(message, 22), Some(3));
         assert_eq!(int_field(message, 24), Some(1));
-        let plain = thrift::write_call("sendMessage", &send_fields("uabc", "Xo", 4, ""));
+        let plain = thrift::write_call("sendMessage", &send_fields("uabc", "Xo", 4, "", false));
         let plain = thrift::read_message(&plain).unwrap();
         let Value::Struct(message) = plain.fields.get(&2).unwrap() else { panic!("message") };
         assert!(message.get(&21).is_none());
@@ -4815,7 +4831,11 @@ mod tests {
         assert_eq!(gif.sid, "emi");
         assert_eq!(classify_media("voice.m4a", "audio/mp4").code, 3);
         assert_eq!(classify_media("notes.pdf", "application/pdf").code, 14);
-        let frame = thrift::write_call("sendMessage", &content_fields("uabc", photo.code, &plain_media_meta(&photo, 12), 4, false));
+        let frame = thrift::write_call("sendMessage", &content_fields("uabc", photo.code, &plain_media_meta(&photo, 12), 4, false, false));
+        let quiet = thrift::write_call("sendMessage", &send_fields("uabc", "Xo", 4, "", true));
+        let quiet = thrift::read_message(&quiet).unwrap();
+        let Value::Struct(message) = quiet.fields.get(&2).unwrap() else { panic!("message") };
+        assert_eq!(meta_value(message, "notificationDisabled"), "");
         let mut grouped = plain_media_meta(&photo, 12);
         push_album(&mut grouped, Some(&Album { id: "1700000000000".into(), seq: 2, count: 3 }));
         assert_eq!(grouped.iter().find(|(key, _)| key == b"GID").map(|(_, value)| value.as_slice()), Some(b"1700000000000".as_slice()));

@@ -73,6 +73,7 @@
         <header id="thread-head"></header>
         <div id="thread-body"></div>
         <form id="composer">
+          <p id="send-note" class="send-note" hidden></p>
           <p id="send-error" class="send-error" hidden></p>
           <div id="reply-bar" hidden>
             <span id="reply-avatar" aria-hidden="true"></span>
@@ -186,6 +187,10 @@
         </div>
         <button id="sheet-close" type="button" data-i18n="close">Close</button>
       </div>
+    </div>
+    <div id="send-menu" role="menu" hidden>
+      <button type="button" data-send="normal" data-i18n="send" role="menuitem">Send</button>
+      <button type="button" data-send="quiet" data-i18n="sendQuiet" role="menuitem">Send without notification</button>
     </div>
     <div id="msg-menu" role="menu" hidden>
       <button type="button" data-action="reply" data-i18n="reply" role="menuitem">Reply</button>

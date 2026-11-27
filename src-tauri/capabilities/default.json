@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "LINE login window",
   "windows": ["*"],
-  "permissions": ["core:default", "core:event:default"]
+  "permissions": ["core:default", "core:event:default", "dialog:allow-save"]
 }
