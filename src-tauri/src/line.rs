@@ -15,7 +15,7 @@ use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
 
-use crate::e2ee::{self, open_text, seal_text};
+use crate::e2ee::{self, open_text, seal_raw, seal_text};
 use crate::legy::{needs_legy, LegyTransport, LEGY_HOST, LEGY_LAP, LEGY_PATH};
 use crate::thrift::{self, bin, Field, Value};
 
@@ -28,6 +28,7 @@ const LOGIN_POLL_PATH: &str = "/acct/lp/lgn/sq/v1";
 const TALK_PATH: &str = "/S4";
 const HISTORY_PAGE: i32 = 30;
 const HISTORY_TARGET: usize = 40;
+const MEDIA_LIMIT: usize = 40_000_000;
 const POLL_HOLD: Duration = Duration::from_secs(12);
 const POLL_PROBE: Duration = Duration::from_secs(25);
 const FALLBACK_EVERY: Duration = Duration::from_secs(25);
@@ -1122,6 +1123,48 @@ impl Client {
         }
     }
 
+    /// Send a photo, video, voice clip, or file the way the desktop client does.
+    ///
+    /// A plain chat gets a content-typed `sendMessage`, then the bytes are posted
+    /// to `obs.line-apps.com/r/talk/m/{message id}`. A chat that rejects that with
+    /// letter sealing (TalkException 82) encrypts the file and uploads it under
+    /// the `emi` / `emv` / `ema` / `emf` object path before the sealed message.
+    pub fn send_media_for_window(&mut self, to: &str, name: &str, mime: &str, bytes: &[u8]) -> Json {
+        if bytes.is_empty() || bytes.len() > MEDIA_LIMIT {
+            return send_failure(to, &line("that file is too large to send"));
+        }
+        let kind = classify_media(name, mime);
+        match self.send_plain_media(to, &kind, bytes) {
+            Ok(sent) => sent,
+            Err(err) if needs_seal(&err) => match self.send_sealed_media(to, &kind, bytes) {
+                Ok(sent) => sent,
+                Err(sealed) => send_failure(to, &sealed),
+            },
+            Err(err) => send_failure(to, &err),
+        }
+    }
+
+    /// `contentType` 7. Package and sticker ids are the ones LINE publishes for
+    /// sticker messages. `STKVER` is 1 so phones load stickershop, and animated
+    /// packs set `STKOPT` to `A`. `hasContent` is set, which a sticker message requires.
+    pub fn send_sticker_for_window(&mut self, to: &str, package_id: &str, sticker_id: &str, animated: bool) -> Json {
+        if !sticker_id_ok(package_id) || !sticker_id_ok(sticker_id) {
+            return send_failure(to, &line("that sticker cannot be sent"));
+        }
+        let meta = sticker_meta(package_id, sticker_id, animated);
+        match self.send_content(to, 7, &meta, &[], true) {
+            Ok(sent) => self.finish_sticker(sent, package_id, sticker_id, animated),
+            Err(err) if needs_seal(&err) => {
+                let raw = sticker_body(&meta);
+                match self.send_sealed_content(to, 7, &meta, &raw) {
+                    Ok(sent) => self.finish_sticker(sent, package_id, sticker_id, animated),
+                    Err(sealed) => send_failure(to, &sealed),
+                }
+            }
+            Err(err) => send_failure(to, &err),
+        }
+    }
+
     /// `TalkService.unsendMessage`: seq plus the message id. LINE recalls that
     /// message for everyone and follows up with operation 64 or 65.
     pub fn unsend_message(&mut self, message_id: &str) -> Result<(), LineError> {
@@ -2071,6 +2114,186 @@ impl Client {
             .map_err(fail_line)
     }
 
+    fn send_plain_media(&mut self, to: &str, kind: &OutgoingMedia, bytes: &[u8]) -> Result<Json, LineError> {
+        let meta = plain_media_meta(kind, bytes.len());
+        let sent = self.send_content(to, kind.code, &meta, &[], false)?;
+        let id = sent.get("messageId").and_then(|value| value.as_str()).unwrap_or("").to_string();
+        if let Err(err) = self.obs_post(&format!("/r/talk/m/{id}"), bytes, &plain_obs_params(kind, &id)) {
+            let _ = self.unsend_message(&id);
+            return Err(err);
+        }
+        cache_sent_media(&id, kind, bytes);
+        Ok(media_sent(sent, kind))
+    }
+
+    fn send_sealed_media(&mut self, to: &str, kind: &OutgoingMedia, bytes: &[u8]) -> Result<Json, LineError> {
+        let (private, sender_key, receiver_public, receiver_key, spec) = self.seal_material(to)?;
+        let (material, encrypted) = e2ee::encrypt_file(bytes).map_err(line)?;
+        let temp = temp_object_id();
+        let mut params = json!({"ver": "2.0", "name": kind.name, "type": "file"});
+        if kind.animated {
+            params["cat"] = json!("original");
+        }
+        let oid = self.obs_post(&format!("/r/talk/{}/{temp}", kind.sid), &encrypted, &params)?;
+        if oid.is_empty() {
+            return Err(line("LINE did not accept that file"));
+        }
+        if kind.code == 1 || kind.code == 2 {
+            let preview = self.obs_post(&format!("/r/talk/{}/{oid}__ud-preview", kind.sid), &encrypted, &params);
+            if preview.is_err() && kind.code == 1 {
+                return Err(line("LINE did not accept that photo"));
+            }
+        }
+        let body = serde_json::json!({"keyMaterial": material, "fileName": kind.name});
+        let raw = serde_json::to_vec(&body).map_err(|err| line(err.to_string()))?;
+        let chunks = seal_raw(
+            &private,
+            sender_key,
+            &receiver_public,
+            receiver_key,
+            &self.session.mid,
+            to,
+            &raw,
+            spec,
+            i64::from(kind.code),
+        )
+        .map_err(|err| line_code(err, Some(82), "E2EE_RETRY_ENCRYPT"))?;
+        let mut meta = e2ee_meta(spec, kind.code);
+        meta.push((b"SID".to_vec(), kind.sid.as_bytes().to_vec()));
+        meta.push((b"OID".to_vec(), oid.into_bytes()));
+        meta.push((b"FILE_SIZE".to_vec(), encrypted.len().to_string().into_bytes()));
+        if kind.code == 14 || kind.code == 3 {
+            meta.push((b"FILE_NAME".to_vec(), kind.name.as_bytes().to_vec()));
+        }
+        if kind.code == 1 || kind.code == 2 {
+            let info = serde_json::json!({
+                "category": "original",
+                "fileSize": encrypted.len(),
+                "extension": kind.extension,
+                "animated": kind.animated,
+            });
+            meta.push((b"MEDIA_CONTENT_INFO".to_vec(), info.to_string().into_bytes()));
+        }
+        let sent = self.send_content(to, kind.code, &meta, &chunks, false)?;
+        let id = sent.get("messageId").and_then(|value| value.as_str()).unwrap_or("").to_string();
+        cache_sent_media(&id, kind, bytes);
+        Ok(media_sent(sent, kind))
+    }
+
+    fn send_sealed_content(&mut self, to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], body: &[u8]) -> Result<Json, LineError> {
+        let (private, sender_key, receiver_public, receiver_key, spec) = self.seal_material(to)?;
+        let chunks = seal_raw(
+            &private,
+            sender_key,
+            &receiver_public,
+            receiver_key,
+            &self.session.mid,
+            to,
+            body,
+            spec,
+            i64::from(content_type),
+        )
+        .map_err(|err| line_code(err, Some(82), "E2EE_RETRY_ENCRYPT"))?;
+        let mut full = e2ee_meta(spec, content_type);
+        full.extend(meta.iter().cloned());
+        self.send_content(to, content_type, &full, &chunks, true)
+    }
+
+    fn send_content(&mut self, to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], chunks: &[Vec<u8>], has_content: bool) -> Result<Json, LineError> {
+        self.require_token()?;
+        let seq = self.next_seq();
+        let call = if chunks.is_empty() {
+            content_fields(to, content_type, meta, seq, has_content)
+        } else {
+            sealed_content_fields(to, content_type, meta, chunks, seq, has_content)
+        };
+        let success = self.talk("sendMessage", &call)?.ok_or_else(|| line("empty send response"))?;
+        let fields = as_struct(&success)?;
+        let when = message_time(fields);
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+        let id = text_field(fields, 4);
+        if !message_id_ok(&id) {
+            return Err(line("LINE did not accept that message"));
+        }
+        Ok(sent_payload(to, &id, "", if when == 0 { now } else { when }, ""))
+    }
+
+    fn seal_material(&mut self, to: &str) -> Result<(Vec<u8>, i64, Vec<u8>, i64, i64), LineError> {
+        let missing = || line_code("letter sealing key is missing", Some(82), "E2EE_RETRY_ENCRYPT");
+        if to.starts_with('u') {
+            let negotiated = self.talk("negotiateE2EEPublicKey", &[(2, bin(to))])?.ok_or_else(missing)?;
+            let negotiated = as_struct(&negotiated)?;
+            let spec = int_field(negotiated, 3).unwrap_or(-1);
+            if spec == -1 {
+                return Err(line_code("letter sealing is not available for this chat", Some(82), "E2EE_RETRY_ENCRYPT"));
+            }
+            let spec_version = if spec > 0 { spec } else { 2 };
+            let public = match negotiated.get(&2) {
+                Some(Value::Struct(fields)) => fields,
+                _ => return Err(missing()),
+            };
+            let receiver_key_id = int_field(public, 2).ok_or_else(missing)?;
+            let receiver_public = bytes_field(public, 4);
+            if receiver_public.len() != 32 {
+                return Err(missing());
+            }
+            let Some((private, sender_key_id)) = self.sender_key() else {
+                return Err(line_code("this window has no letter-sealing key", Some(82), "letter sealing key is missing"));
+            };
+            return Ok((private, sender_key_id, receiver_public, receiver_key_id, spec_version));
+        }
+        if to.starts_with('c') || to.starts_with('r') {
+            let Some(shared) = self.group_shared_key(to, 0) else { return Err(missing()) };
+            let fields = as_struct(&shared)?;
+            let group_key = int_field(fields, 2).filter(|id| *id > 0).ok_or_else(missing)?;
+            let Some(group_private) = self.group_private(to, group_key) else { return Err(missing()) };
+            let Some((_, sender_key_id)) = self.sender_key() else {
+                return Err(line_code("this window has no letter-sealing key", Some(82), "letter sealing key is missing"));
+            };
+            let Some(public) = self.public_for_key(sender_key_id) else { return Err(missing()) };
+            return Ok((group_private, sender_key_id, public, group_key, 2));
+        }
+        Err(line_code("letter sealing is not available for this chat", Some(82), "E2EE_RETRY_ENCRYPT"))
+    }
+
+    fn finish_sticker(&self, sent: Json, package_id: &str, sticker_id: &str, animated: bool) -> Json {
+        let image = sticker_shop_url(sticker_id, animated);
+        let fallback = format!("https://stickershop.line-scdn.net/stickershop/v1/product/{package_id}/android/stickers/{sticker_id}.png");
+        let mut sent = sent;
+        if let Some(object) = sent.as_object_mut() {
+            object.insert("text".to_string(), json!("Sticker"));
+            object.insert("kind".to_string(), json!("sticker"));
+            object.insert("sticker".to_string(), json!(image));
+            object.insert("stickerFallback".to_string(), json!(fallback));
+        }
+        sent
+    }
+
+    fn obs_post(&self, path: &str, body: &[u8], params: &Json) -> Result<String, LineError> {
+        let encoded = STANDARD.encode(params.to_string().as_bytes());
+        let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(120)).build();
+        let mut request = agent
+            .post(&format!("https://obs.line-apps.com{path}"))
+            .set("x-line-access", &self.session.access_token)
+            .set("x-line-application", &application_header())
+            .set("user-agent", &user_agent())
+            .set("content-type", "application/octet-stream")
+            .set("x-obs-params", &encoded);
+        if !self.session.mid.is_empty() {
+            request = request.set("x-line-mid", &self.session.mid);
+        }
+        let response = match request.send_bytes(body) {
+            Ok(response) => response,
+            Err(ureq::Error::Status(code, response)) if code == 200 || code == 201 => response,
+            Err(ureq::Error::Status(code, _)) => return Err(line(format!("upload failed ({code})"))),
+            Err(err) => return Err(line(format!("upload failed: {err}"))),
+        };
+        let oid = response.header("x-obs-oid").unwrap_or("").trim().to_string();
+        let mut sink = Vec::new();
+        let _ = response.into_reader().take(4096).read_to_end(&mut sink);
+        Ok(oid)
+    }
+
     fn send_text(&mut self, to: &str, message: &str, related_id: &str) -> Result<Json, LineError> {
         self.require_token()?;
         let seq = self.next_seq();
@@ -2273,7 +2496,8 @@ impl Client {
     }
 
     fn sealed_file_name(&mut self, message: &BTreeMap<i16, Value>) -> Option<String> {
-        if int_field(message, 15) != Some(14) {
+        let kind = int_field(message, 15);
+        if kind != Some(14) && kind != Some(3) {
             return None;
         }
         let name = self.sealed_payload(message)?.get("fileName")?.as_str()?.trim().to_string();
@@ -3098,6 +3322,210 @@ fn sent_payload(to: &str, message_id: &str, text: &str, when: i64, related_id: &
     })
 }
 
+struct OutgoingMedia {
+    code: i32,
+    obs: &'static str,
+    sid: &'static str,
+    kind: &'static str,
+    label: String,
+    name: String,
+    extension: String,
+    mime: String,
+    animated: bool,
+}
+
+fn classify_media(name: &str, mime: &str) -> OutgoingMedia {
+    let mime_l = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let raw_ext = name.rsplit('.').next().unwrap_or("").trim().to_ascii_lowercase();
+    let ext = if !raw_ext.is_empty() && raw_ext.len() <= 8 && raw_ext.chars().all(|ch| ch.is_ascii_alphanumeric()) && !name.eq_ignore_ascii_case(&raw_ext) {
+        raw_ext
+    } else {
+        String::new()
+    };
+    let animated = mime_l == "image/gif" || ext == "gif";
+    let image_ext = matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp" | "heic" | "bmp");
+    let video_ext = matches!(ext.as_str(), "mp4" | "mov" | "m4v" | "webm");
+    let audio_ext = matches!(ext.as_str(), "m4a" | "aac" | "mp3" | "wav");
+    let (code, obs, sid, kind, fallback_ext, fallback_mime) = if animated || mime_l.starts_with("image/") || (mime_l.is_empty() && image_ext) || (!mime_l.starts_with("video/") && !mime_l.starts_with("audio/") && image_ext) {
+        (1, "image", "emi", "image", "jpg", "image/jpeg")
+    } else if mime_l.starts_with("video/") || (mime_l.is_empty() && video_ext) {
+        (2, "video", "emv", "video", "mp4", "video/mp4")
+    } else if mime_l.starts_with("audio/") || audio_ext {
+        (3, "audio", "ema", "audio", "m4a", "audio/mp4")
+    } else if video_ext {
+        (2, "video", "emv", "video", "mp4", "video/mp4")
+    } else {
+        (14, "file", "emf", "file", "bin", "application/octet-stream")
+    };
+    let extension = if animated { "gif".to_string() } else if ext.is_empty() { fallback_ext.to_string() } else { ext };
+    let file_name = media_name(name, &extension);
+    let label = match kind {
+        "image" => "Image".to_string(),
+        "video" => "Video".to_string(),
+        _ => file_name.clone(),
+    };
+    let mime = if mime_l.is_empty() { fallback_mime.to_string() } else { mime_l };
+    OutgoingMedia { code, obs, sid, kind, label, name: file_name, extension, mime, animated }
+}
+
+fn media_name(raw: &str, ext: &str) -> String {
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or("").trim();
+    let name: String = base.chars().filter(|ch| !ch.is_control()).take(120).collect();
+    if name.is_empty() || name == "." || name == ".." {
+        format!("line.{ext}")
+    } else {
+        name
+    }
+}
+
+fn plain_media_meta(kind: &OutgoingMedia, size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut meta = vec![(b"FILE_SIZE".to_vec(), size.to_string().into_bytes())];
+    if kind.code == 14 || kind.code == 3 {
+        meta.push((b"FILE_NAME".to_vec(), kind.name.as_bytes().to_vec()));
+    }
+    if kind.code == 2 {
+        meta.push((b"VIDLEN".to_vec(), b"1000".to_vec()));
+        meta.push((b"DURATION".to_vec(), b"1000".to_vec()));
+    }
+    if kind.code == 3 {
+        meta.push((b"AUDLEN".to_vec(), b"1000".to_vec()));
+    }
+    if kind.code == 1 || kind.code == 2 {
+        let info = serde_json::json!({
+            "category": "original",
+            "fileSize": size,
+            "extension": kind.extension,
+            "animated": kind.animated,
+        });
+        meta.push((b"MEDIA_CONTENT_INFO".to_vec(), info.to_string().into_bytes()));
+    }
+    meta
+}
+
+fn plain_obs_params(kind: &OutgoingMedia, oid: &str) -> Json {
+    let mut params = json!({
+        "ver": "2.0",
+        "name": kind.name,
+        "type": if kind.animated { "image" } else { kind.obs },
+        "oid": oid,
+    });
+    if kind.code == 1 || kind.animated {
+        params["cat"] = json!("original");
+    }
+    if kind.code == 2 || kind.code == 3 {
+        params["duration"] = json!("1000");
+    }
+    params
+}
+
+fn e2ee_meta(spec: i64, content_type: i32) -> Vec<(Vec<u8>, Vec<u8>)> {
+    vec![
+        (b"e2eeVersion".to_vec(), spec.to_string().into_bytes()),
+        (b"contentType".to_vec(), content_type.to_string().into_bytes()),
+        (b"e2eeMark".to_vec(), b"2".to_vec()),
+    ]
+}
+
+fn media_sent(mut sent: Json, kind: &OutgoingMedia) -> Json {
+    if let Some(object) = sent.as_object_mut() {
+        let id = object.get("messageId").cloned().unwrap_or(json!(""));
+        object.insert("text".to_string(), json!(kind.label));
+        object.insert("kind".to_string(), json!(kind.kind));
+        object.insert("mediaId".to_string(), id);
+        object.insert("animated".to_string(), json!(kind.animated));
+        object.insert("fileName".to_string(), json!(kind.name));
+    }
+    sent
+}
+
+fn cache_sent_media(id: &str, kind: &OutgoingMedia, bytes: &[u8]) {
+    if !message_id_ok(id) || (kind.kind != "image" && kind.kind != "video") {
+        return;
+    }
+    if kind.animated {
+        write_media_cache(id, false, true, &kind.mime, bytes);
+        return;
+    }
+    write_media_cache(id, true, false, &kind.mime, bytes);
+    write_media_cache(id, false, false, &kind.mime, bytes);
+}
+
+fn temp_object_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("reqid-{hex}")
+}
+
+fn sticker_id_ok(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 16 && id.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn sticker_meta(package_id: &str, sticker_id: &str, animated: bool) -> Vec<(Vec<u8>, Vec<u8>)> {
+    // STKVER 1 is the current stickershop. Version 100 is the retired
+    // dl.stickershop.line.naver.jp layout, and a phone that still honors it
+    // cannot find these packs.
+    let mut meta = vec![
+        (b"STKVER".to_vec(), b"1".to_vec()),
+        (b"STKPKGID".to_vec(), package_id.as_bytes().to_vec()),
+        (b"STKID".to_vec(), sticker_id.as_bytes().to_vec()),
+    ];
+    if animated {
+        meta.push((b"STKOPT".to_vec(), b"A".to_vec()));
+    }
+    meta
+}
+
+fn sticker_body(meta: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+    let mut map = serde_json::Map::new();
+    for (key, value) in meta {
+        let Ok(label) = std::str::from_utf8(key) else { continue };
+        let Ok(text) = std::str::from_utf8(value) else { continue };
+        map.insert(label.to_string(), Json::String(text.to_string()));
+    }
+    serde_json::to_vec(&Json::Object(map)).unwrap_or_default()
+}
+
+fn sticker_shop_url(sticker_id: &str, animated: bool) -> String {
+    let asset = if animated { "sticker_animation.png" } else { "sticker.png" };
+    format!("https://stickershop.line-scdn.net/stickershop/v1/sticker/{sticker_id}/android/{asset}")
+}
+
+fn content_fields(to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], seq: i32, has_content: bool) -> Vec<(i16, Field)> {
+    let mut message = vec![
+        (2, bin(to)),
+        (5, Field::I64(0)),
+        (6, Field::I64(0)),
+        (10, bin("")),
+        (14, Field::Bool(has_content)),
+        (15, Field::I32(content_type)),
+        (18, Field::MapBin(meta.to_vec())),
+        (19, Field::Byte(0)),
+    ];
+    if let Some(kind) = mid_type(to) {
+        message.push((3, Field::I32(kind)));
+    }
+    vec![(1, Field::I32(seq)), (2, Field::Struct(message))]
+}
+
+fn sealed_content_fields(to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], chunks: &[Vec<u8>], seq: i32, has_content: bool) -> Vec<(i16, Field)> {
+    let mut message = vec![
+        (2, bin(to)),
+        (5, Field::I64(0)),
+        (6, Field::I64(0)),
+        (10, bin("")),
+        (14, Field::Bool(has_content)),
+        (15, Field::I32(content_type)),
+        (18, Field::MapBin(meta.to_vec())),
+        (19, Field::Byte(0)),
+        (20, Field::List(thrift::BINARY, chunks.iter().cloned().map(Field::Bin).collect())),
+    ];
+    if let Some(kind) = mid_type(to) {
+        message.push((3, Field::I32(kind)));
+    }
+    vec![(1, Field::I32(seq)), (2, Field::Struct(message))]
+}
+
 fn send_fields(to: &str, text_body: &str, seq: i32, related_id: &str) -> Vec<(i16, Field)> {
     let mut message = vec![
         (2, bin(to)),
@@ -3814,6 +4242,10 @@ fn invalid_sender_key(err: &LineError) -> bool {
     format!("{} {}", err.reason, err.message).to_ascii_lowercase().contains("invalid sender key")
 }
 
+fn needs_seal(err: &LineError) -> bool {
+    err.code == Some(82) || invalid_sender_key(err)
+}
+
 fn needs_fresh_preview(preview: &str, activity: i64, prior_time: i64) -> bool {
     preview.is_empty() || activity > prior_time || preview.eq_ignore_ascii_case("letter-sealed message")
 }
@@ -4104,6 +4536,12 @@ fn message_preview(message: &BTreeMap<i16, Value>) -> (String, bool) {
     if !body.is_empty() {
         return (body, false);
     }
+    if matches!(kind, "file" | "audio") {
+        let name = meta_value(message, "FILE_NAME").trim().to_string();
+        if !name.is_empty() {
+            return (name, false);
+        }
+    }
     if kind != "message" {
         let mut chars = kind.chars();
         let Some(first) = chars.next() else { return (String::new(), false) };
@@ -4325,6 +4763,26 @@ mod tests {
         let unsend = thrift::read_message(&unsend).unwrap();
         assert_eq!(unsend.name, "unsendMessage");
         assert_eq!(unsend.fields.get(&1), Some(&Value::Int(9)));
+        let photo = classify_media("cat.PNG", "image/png");
+        assert_eq!(photo.code, 1);
+        assert_eq!(photo.extension, "png");
+        assert!(!photo.animated);
+        let gif = classify_media("loop.gif", "image/gif");
+        assert!(gif.animated);
+        assert_eq!(gif.sid, "emi");
+        assert_eq!(classify_media("voice.m4a", "audio/mp4").code, 3);
+        assert_eq!(classify_media("notes.pdf", "application/pdf").code, 14);
+        let frame = thrift::write_call("sendMessage", &content_fields("uabc", photo.code, &plain_media_meta(&photo, 12), 4, false));
+        let sticker = sticker_meta("11537", "52002734", true);
+        assert_eq!(String::from_utf8(sticker.iter().find(|(key, _)| key == b"STKVER").unwrap().1.clone()).unwrap(), "1");
+        let sealed = sticker_body(&sticker);
+        let parsed_body: Json = serde_json::from_slice(&sealed).unwrap();
+        assert_eq!(parsed_body["STKOPT"], "A");
+        assert!(parsed_body.get("STKTXT").is_none());
+        let parsed = thrift::read_message(&frame).unwrap();
+        let Value::Struct(message) = parsed.fields.get(&2).unwrap() else { panic!("message") };
+        assert_eq!(int_field(message, 15), Some(1));
+        assert_eq!(meta_value(message, "FILE_SIZE"), "12");
         assert_eq!(unsend.fields.get(&2), Some(&Value::Bytes(b"1500".to_vec())));
         let mut op = BTreeMap::new();
         op.insert(10, Value::Bytes(b"uabcdefghij".to_vec()));

@@ -1,7 +1,7 @@
 :root {
   color: #222;
   background: #e8eaee;
-  font-family: "Noto Sans", "Segoe UI", sans-serif;
+  font-family: "Noto Sans", "Noto Sans Thai", "Noto Sans CJK JP", "Noto Sans CJK KR", "Noto Sans CJK SC", "Noto Sans CJK TC", "Noto Naskh Arabic", "Noto Sans Arabic", "Noto Sans Devanagari", "Segoe UI", sans-serif;
 }
 
 body {
@@ -1125,11 +1125,23 @@ body.profile.is-friend #profile-actions {
   text-align: left;
 }
 
-.bubble img.sticker {
+.bubble img.sticker,
+.bubble canvas.sticker {
   display: block;
   width: 140px;
   height: 140px;
   object-fit: contain;
+}
+
+.bubble .sticker-play {
+  display: block;
+}
+
+.bubble:has(img.sticker),
+.bubble:has(canvas.sticker) {
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
 }
 
 .bubble.rich {
@@ -1289,17 +1301,105 @@ body.profile.is-friend #profile-actions {
   cursor: pointer;
 }
 
-#composer input {
-  width: 100%;
-  box-sizing: border-box;
-  border: 0;
-  background: transparent;
-  color: #1c1c1c;
-  font-size: 14px;
+#composer-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
-#composer input:disabled {
+#composer-row > button {
+  display: grid;
+  flex: 0 0 32px;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #6b7280;
+  cursor: pointer;
+}
+
+#composer-row > button:hover,
+#composer-row > button[aria-expanded="true"] {
+  background: #f3f4f6;
+  color: #111;
+}
+
+#composer-row > button:disabled {
+  color: #c5c8ce;
+  cursor: default;
+}
+
+#composer-row svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+#composer-input {
+  flex: 1;
+  min-width: 0;
+  box-sizing: border-box;
+  height: calc(2 * 1.4em + 16px);
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #1c1c1c;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.4;
+  resize: none;
+  outline: none;
+}
+
+#composer-input:focus {
+  border-color: #e4e6ea;
+}
+
+#composer-input:disabled {
   color: #8b9098;
+}
+
+#sticker-panel:not([hidden]) {
+  display: grid;
+  grid-template-columns: repeat(8, 44px);
+  gap: 4px;
+  margin: 0 0 8px;
+}
+
+#sticker-panel button {
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+
+#sticker-panel button:hover {
+  background: #f3f4f6;
+}
+
+#sticker-panel img {
+  display: block;
+  width: 44px;
+  height: 44px;
+  object-fit: contain;
+}
+
+.bubble img.outgoing-media,
+.bubble video.outgoing-media {
+  display: block;
+  max-width: 240px;
+  max-height: 240px;
+  border-radius: 8px;
 }
 
 .send-error {
@@ -1463,8 +1563,7 @@ body.profile.is-friend #profile-actions {
   color: #666;
   font-size: 12px;
   font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  letter-spacing: 0.02em;
 }
 
 .device-group ul {
@@ -1509,7 +1608,93 @@ body.profile.is-friend #profile-actions {
   line-height: 1.4;
 }
 
+.language-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid #eceff3;
+  border-radius: 8px;
+  background: #fff;
+  color: #222;
+  font-size: 14px;
+  text-align: start;
+  cursor: pointer;
+}
+
+.language-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.language-row svg,
+#language-save svg,
+#language-cancel svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.language-row strong {
+  color: #06c755;
+  font-weight: 600;
+}
+
+#language-list {
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+  max-height: min(420px, calc(100vh - 190px));
+  overflow: auto;
+  border: 1px solid #eceff3;
+  border-radius: 8px;
+}
+
+#language-list label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #f2f3f5;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+#language-list li:last-child label {
+  border-bottom: 0;
+}
+
+#language-list input {
+  width: auto;
+  height: auto;
+  margin: 0;
+  accent-color: #06c755;
+}
+
+.language-actions {
+  display: flex;
+  gap: 12px;
+}
+
+#sheet-card:has(#sheet-language:not([hidden])) #sheet-close {
+  display: none;
+}
+
+#language-save,
+#language-cancel,
 #sheet-close {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border: 0;
   border-radius: 8px;
   background: #06c755;

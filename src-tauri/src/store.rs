@@ -628,13 +628,13 @@ fn save_outgoing_locked(path: &Path, mid: &str, chat: &str, sent: &Json) -> Resu
         "time": sent.get("time").and_then(|value| value.as_i64()).unwrap_or(0),
         "status": "sent",
         "readers": 0,
-        "sticker": "",
-        "stickerFallback": "",
-        "kind": "",
+        "sticker": sent.get("sticker").and_then(|value| value.as_str()).unwrap_or(""),
+        "stickerFallback": sent.get("stickerFallback").and_then(|value| value.as_str()).unwrap_or(""),
+        "kind": sent.get("kind").and_then(|value| value.as_str()).unwrap_or(""),
         "gid": "",
         "seq": 0,
         "mediaId": "",
-        "animated": false,
+        "animated": sent.get("animated").and_then(|value| value.as_bool()).unwrap_or(false),
         "replyId": sent.get("replyId").and_then(|value| value.as_str()).unwrap_or(""),
     });
     let tx = conn.unchecked_transaction().map_err(|err| err.to_string())?;

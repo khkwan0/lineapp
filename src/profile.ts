@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { applyI18n, onLocaleChange, t, type MessageKey } from "./i18n";
 
 type ProfileCard = {
   id: string;
@@ -87,10 +88,15 @@ function paintCover(banner: string): void {
   };
 }
 
-function say(text: string, warn = false): void {
+function say(text: string, warn = false, key = ""): void {
   note.hidden = text.length === 0;
   note.textContent = text;
+  note.dataset.key = key;
   note.classList.toggle("warn", warn);
+}
+
+function sayKey(key: MessageKey, warn = false): void {
+  say(t(key), warn, key);
 }
 
 function layout(): void {
@@ -109,8 +115,8 @@ function layout(): void {
   favorite.hidden = !friend;
   favorite.classList.toggle("is-on", Boolean(card.favorite));
   favorite.setAttribute("aria-pressed", card.favorite ? "true" : "false");
-  favorite.setAttribute("aria-label", card.favorite ? "Remove favorite" : "Favorite");
-  block.setAttribute("aria-label", card.blocked ? "Unblock" : "Block");
+  favorite.setAttribute("aria-label", card.favorite ? t("removeFavorite") : t("favorite"));
+  block.setAttribute("aria-label", card.blocked ? t("unblock") : t("block"));
 }
 
 function apply(next: ProfileCard): void {
@@ -149,7 +155,7 @@ if (queued) {
 }
 
 report.addEventListener("click", () => {
-  say("Reporting isn't available in this window yet.", true);
+  sayKey("reportingUnavailable", true);
 });
 
 learn.addEventListener("click", () => {
@@ -159,8 +165,8 @@ learn.addEventListener("click", () => {
 });
 
 function askBlock(): void {
-  confirmText.textContent = card.blocked ? "Unblock this user?" : "Block this user?";
-  confirmYes.textContent = card.blocked ? "Unblock" : "Block";
+  confirmText.textContent = card.blocked ? t("unblockUser") : t("blockUser");
+  confirmYes.textContent = card.blocked ? t("unblock") : t("block");
   confirmBox.hidden = false;
 }
 
@@ -183,7 +189,7 @@ confirmYes.addEventListener("click", () => {
       }
       confirmBox.hidden = true;
       layout();
-      say(blocked ? "Blocked." : "Unblocked.");
+      sayKey(blocked ? "blocked" : "unblocked");
     })
     .catch((error: unknown) => {
       say(error instanceof Error ? error.message : String(error), true);
@@ -205,11 +211,11 @@ add.addEventListener("click", () => {
     return;
   }
   if (card.friend) {
-    say("Already a friend.");
+    sayKey("alreadyFriend");
     return;
   }
   if (card.blocked) {
-    say("Unblock this user before adding them.", true);
+    sayKey("unblockBeforeAdd", true);
     return;
   }
   busy = true;
@@ -265,7 +271,7 @@ nameInput.addEventListener("blur", () => {
     return;
   }
   if (next.length > 20) {
-    say("That name is too long.", true);
+    sayKey("nameTooLong", true);
     stopEditing();
     return;
   }
@@ -312,4 +318,18 @@ chat.addEventListener("click", () => {
   void invoke("open_friend_chat", { id: card.id, name: card.name, picture: card.picture }).catch((error: unknown) => {
     say(error instanceof Error ? error.message : String(error), true);
   });
+});
+
+applyI18n();
+onLocaleChange(() => {
+  applyI18n();
+  layout();
+  if (!confirmBox.hidden) {
+    confirmText.textContent = card.blocked ? t("unblockUser") : t("blockUser");
+    confirmYes.textContent = card.blocked ? t("unblock") : t("block");
+  }
+  const key = note.dataset.key || "";
+  if (key && !note.hidden) {
+    say(t(key as MessageKey), note.classList.contains("warn"), key);
+  }
 });

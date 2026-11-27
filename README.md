@@ -18,6 +18,7 @@ Chats:
 - The chat list covers friends, groups, rooms, and official accounts. Tabs and a name search filter that list. New activity arrives while the window is open.
 - Opening a chat loads the latest 40 messages and marks the chat read. Your own messages show Read, or Read and a count when more than one person has read them.
 - The composer sends text, including a reply that quotes another message. A failed send can be retried.
+- Photos, videos, audio, and other files can be attached. The send follows the desktop object-storage flow: a content-typed message, then the bytes uploaded to LINE. A chat that requires letter sealing encrypts the file first. A sticker button sends stickers from LINE's published sticker list.
 - One-to-one text that LINE refuses with `E2EE_RETRY_ENCRYPT` is sent with letter sealing. Text sealed to a key this client holds opens in the thread. Text sealed to another device's key stays labeled "Letter-sealed message."
 - Stickers, photos, videos, and short animated images already in a chat are shown. Photos and videos open in a viewer.
 - A call that already happened shows as a duration. The app does not place the call.
@@ -36,7 +37,7 @@ People and groups:
 
 Sending and history:
 
-- You can send text only. Photos, videos, voice messages, files, stickers, locations, and contact cards cannot be sent. Received stickers, photos, and videos are shown. Voice messages, files, locations, and contact cards are only a label in the thread.
+- Locations and contact cards cannot be sent. Received voice messages, files, locations, and contact cards are a label in the thread, plus the file name when LINE includes one. Photos and videos you send show in the thread. The sticker button is a short published set, not the full sticker shop.
 - There is no search inside a chat or across message text. Search covers chat names.
 - History stops at the latest 40 messages.
 - Letter sealing on send is one-to-one text. A message this client cannot unseal stays a label.
@@ -61,7 +62,8 @@ TCompact POSTed to `legy-jp.line-apps.com`. This is not the public Bot /
 Messaging API.
 
 The window is a TypeScript Tauri app. Login, the chat list, history, send,
-letter sealing, stickers, and the rail menu actions run in Rust. A v3 access
+letter sealing, photos, videos, audio, files, stickers, and the rail menu
+actions run in Rust. A v3 access
 token is a JWT and talks to `/S4` in the clear. Older `mid:secret` tokens go
 through LINE's encrypted LEGY gateway (`gf.line.naver.jp/enc`).
 

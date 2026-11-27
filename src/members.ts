@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { applyI18n, onLocaleChange, t, type MessageKey } from "./i18n";
 
 type Member = {
   id: string;
@@ -81,16 +82,26 @@ function paintFace(host: HTMLElement, label: string, picture: string, keep: HTML
   }
 }
 
-function say(text: string, quiet = false): void {
+function say(text: string, quiet = false, kind = ""): void {
   note.hidden = !text;
   note.textContent = text;
+  note.dataset.kind = kind;
   note.classList.toggle("is-quiet", quiet);
 }
 
-function inviteSay(text: string, quiet = false): void {
+function sayKey(key: MessageKey, quiet = true): void {
+  say(t(key), quiet, key);
+}
+
+function inviteSay(text: string, quiet = false, kind = ""): void {
   inviteNote.hidden = !text;
   inviteNote.textContent = text;
+  inviteNote.dataset.kind = kind;
   inviteNote.classList.toggle("is-quiet", quiet);
+}
+
+function inviteSayKey(key: MessageKey, quiet = true): void {
+  inviteSay(t(key), quiet, key);
 }
 
 function visibleMembers(): Member[] {
@@ -115,10 +126,10 @@ function paintList(): void {
   }
   const shown = visibleMembers();
   if (shown.length === 0 && query.value.trim()) {
-    say("No members with that name.", true);
+    sayKey("noMembersNamed");
     return;
   }
-  if (!note.hidden && note.classList.contains("is-quiet") && note.textContent === "No members with that name.") {
+  if (note.dataset.kind === "noMembersNamed") {
     say("");
   }
   shown.forEach((member) => {
@@ -151,7 +162,7 @@ function paintList(): void {
       const remove = document.createElement("button");
       remove.type = "button";
       remove.className = "member-remove";
-      remove.setAttribute("aria-label", `Remove ${member.name}`);
+      remove.setAttribute("aria-label", t("removeNamed", { name: member.name }));
       const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       icon.setAttribute("viewBox", "0 0 16 16");
       icon.setAttribute("aria-hidden", "true");
@@ -175,7 +186,7 @@ function paintList(): void {
 
 function askRemove(member: Member): void {
   pendingRemoval = member;
-  removeText.textContent = `Remove ${member.name} from the group?`;
+  removeText.textContent = t("removeFromGroup", { name: member.name });
   removeError.hidden = true;
   removeError.textContent = "";
   removeYes.disabled = false;
@@ -189,19 +200,19 @@ function closeRemove(): void {
 }
 
 function paint(): void {
-  paintFace(photo, card.name || "Group", card.picture, document.querySelector("#members-camera"));
+  paintFace(photo, card.name || t("group"), card.picture, document.querySelector("#members-camera"));
   if (!editing) {
     nameEl.hidden = false;
     rename.hidden = false;
     nameInput.hidden = true;
-    nameEl.textContent = card.name || "Group";
+    nameEl.textContent = card.name || t("group");
   }
   foot.hidden = !loaded;
   autoJoin.setAttribute("aria-checked", card.autoJoin ? "true" : "false");
   if (!loaded) {
     list.hidden = false;
-    say("Loading members…", true);
-  } else if (note.textContent === "Loading members…") {
+    sayKey("loadingMembers");
+  } else if (note.dataset.kind === "loadingMembers") {
     say("");
   }
   paintList();
@@ -305,7 +316,7 @@ nameInput.addEventListener("blur", () => {
     return;
   }
   if (next.length > 50) {
-    say("That name is too long.");
+    sayKey("nameTooLong", false);
     stopEditing();
     paint();
     return;
@@ -364,18 +375,18 @@ function paintInvite(): void {
   const shown = friends.filter((friend) => !needle || friend.name.toLowerCase().includes(needle));
   inviteList.replaceChildren();
   inviteSend.disabled = picked.size === 0 || busy || inviteLoading;
-  inviteSend.textContent = picked.size > 0 ? `Invite ${picked.size}` : "Invite";
+  inviteSend.textContent = picked.size > 0 ? t("inviteCount", { count: picked.size }) : t("invite");
   if (inviteLoading) {
     return;
   }
   if (friends.length === 0) {
     if (inviteNote.hidden || inviteNote.classList.contains("is-quiet")) {
-      inviteSay("No friends to invite.", true);
+      inviteSayKey("noFriendsToInvite");
     }
     return;
   }
   if (shown.length === 0) {
-    inviteSay("No friends with that name.", true);
+    inviteSayKey("noFriendsNamed");
     return;
   }
   if (inviteNote.classList.contains("is-quiet")) {
@@ -420,7 +431,7 @@ inviteOpen.addEventListener("click", () => {
   const token = ++inviteToken;
   const id = card.id;
   inviteQuery.value = "";
-  inviteSay("Loading friends…", true);
+  inviteSayKey("loadingFriends");
   paintInvite();
   void invoke<Friend[]>("group_invite_candidates", { id })
     .then((rows) => {
@@ -465,7 +476,7 @@ inviteSend.addEventListener("click", () => {
       picked.clear();
       inviteView.hidden = true;
       inviteSay("");
-      say(card.autoJoin ? "Invited." : "Invited. They need to accept before joining.", true);
+      sayKey(card.autoJoin ? "invited" : "invitedNeedAccept");
       const token = ++loadToken;
       const id = card.id;
       return invoke<MembersCard>("group_roster", { id }).then((roster) => {
@@ -551,3 +562,23 @@ removeYes.addEventListener("click", () => {
       removeYes.disabled = false;
     });
 });
+
+function refreshLocale(): void {
+  applyI18n();
+  document.title = t("members");
+  paint();
+  if (!inviteView.hidden) {
+    paintInvite();
+  }
+  if (pendingRemoval) {
+    askRemove(pendingRemoval);
+  }
+  const kind = note.dataset.kind || "";
+  if (kind && !note.hidden && kind !== "noMembersNamed" && kind !== "loadingMembers") {
+    say(t(kind as MessageKey), note.classList.contains("is-quiet"), kind);
+  }
+}
+
+applyI18n();
+document.title = t("members");
+onLocaleChange(refreshLocale);

@@ -469,6 +469,61 @@ async fn send_reaction(id: String, message_id: String, emoji: String) -> Result<
 }
 
 #[tauri::command]
+async fn send_media(app: AppHandle, id: String, name: String, mime: String, data: String, local_id: Option<String>) -> Result<(), String> {
+    chat_id(&id)?;
+    let name = name.trim().to_string();
+    let mime = mime.trim().to_string();
+    if name.len() > 240 || mime.len() > 160 {
+        return Err("that file cannot be sent".to_string());
+    }
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.trim())
+        .map_err(|_| "that file cannot be sent".to_string())?;
+    if bytes.is_empty() || bytes.len() > 40_000_000 {
+        return Err("that file is too large to send".to_string());
+    }
+    let local_id = local_send_id(local_id.unwrap_or_default().trim());
+    let chat = id.clone();
+    let mut value = tauri::async_runtime::spawn_blocking(move || line::Client::new().send_media_for_window(&id, &name, &mime, &bytes))
+        .await
+        .map_err(|err| format!("could not send: {err}"))?;
+    if !local_id.is_empty() {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("localId".to_string(), serde_json::Value::String(local_id));
+        }
+    }
+    let _ = store::save_outgoing(&chat, &value);
+    let payload = serde_json::to_vec(&value).map_err(|err| format!("could not read the send result: {err}"))?;
+    deliver(&app, "__lineSentBuf", "__lineSent", &payload);
+    Ok(())
+}
+
+#[tauri::command]
+async fn send_sticker(app: AppHandle, id: String, package_id: String, sticker_id: String, animated: bool, local_id: Option<String>) -> Result<(), String> {
+    chat_id(&id)?;
+    let package_id = package_id.trim().to_string();
+    let sticker_id = sticker_id.trim().to_string();
+    if package_id.len() > 16 || sticker_id.len() > 16 || !package_id.chars().all(|ch| ch.is_ascii_digit()) || !sticker_id.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err("that sticker cannot be sent".to_string());
+    }
+    let local_id = local_send_id(local_id.unwrap_or_default().trim());
+    let chat = id.clone();
+    let mut value = tauri::async_runtime::spawn_blocking(move || line::Client::new().send_sticker_for_window(&id, &package_id, &sticker_id, animated))
+        .await
+        .map_err(|err| format!("could not send: {err}"))?;
+    if !local_id.is_empty() {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("localId".to_string(), serde_json::Value::String(local_id));
+        }
+    }
+    let _ = store::save_outgoing(&chat, &value);
+    let payload = serde_json::to_vec(&value).map_err(|err| format!("could not read the send result: {err}"))?;
+    deliver(&app, "__lineSentBuf", "__lineSent", &payload);
+    Ok(())
+}
+
+#[tauri::command]
 async fn send_message(app: AppHandle, id: String, text: String, related_id: Option<String>, local_id: Option<String>) -> Result<(), String> {
     chat_id(&id)?;
     let body = text.trim().to_string();
@@ -1041,7 +1096,7 @@ pub fn run() {
             tauri::webview::PermissionKind::Microphone | tauri::webview::PermissionKind::Camera => tauri::webview::PermissionResponse::Allow,
             _ => tauri::webview::PermissionResponse::Default,
         })
-        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, send_message, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_tray_badge, list_media_devices, open_profile, block_profile, add_profile, open_fraud_help, rename_profile, favorite_profile, open_friend_chat, open_members, group_roster, rename_group, set_group_auto_join, invite_into_group, remove_group_member, group_invite_candidates])
+        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, send_message, send_media, send_sticker, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_tray_badge, list_media_devices, open_profile, block_profile, add_profile, open_fraud_help, rename_profile, favorite_profile, open_friend_chat, open_members, group_roster, rename_group, set_group_auto_join, invite_into_group, remove_group_member, group_invite_candidates])
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;

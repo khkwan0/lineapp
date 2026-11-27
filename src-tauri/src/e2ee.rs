@@ -62,12 +62,38 @@ pub fn seal_text(
     text: &str,
     spec_version: i64,
 ) -> Result<Vec<Vec<u8>>, String> {
+    seal_raw(
+        private_key,
+        sender_key_id,
+        receiver_public,
+        receiver_key_id,
+        sender,
+        recipient,
+        &payload(text),
+        spec_version,
+        0,
+    )
+}
+
+/// Letter-seal an arbitrary JSON body. `content_type` is the Talk content type
+/// and is part of the associated data, so a photo is sealed as type 1, not as text.
+pub fn seal_raw(
+    private_key: &[u8],
+    sender_key_id: i64,
+    receiver_public: &[u8],
+    receiver_key_id: i64,
+    sender: &str,
+    recipient: &str,
+    body: &[u8],
+    spec_version: i64,
+    content_type: i64,
+) -> Result<Vec<Vec<u8>>, String> {
     let secret = shared_secret(private_key, receiver_public)?;
     let mut salt = vec![0u8; 16];
     let mut nonce = vec![0u8; 12];
     rand::thread_rng().fill_bytes(&mut salt);
     rand::thread_rng().fill_bytes(&mut nonce);
-    let extra = aad(recipient, sender, sender_key_id, receiver_key_id, spec_version, 0);
+    let extra = aad(recipient, sender, sender_key_id, receiver_key_id, spec_version, content_type);
     let encrypted = if spec_version >= 2 {
         let mut material = secret.to_vec();
         material.extend_from_slice(&salt);
@@ -75,13 +101,10 @@ pub fn seal_text(
         let gcm_key = Sha256::digest(&material);
         let cipher = Aes256Gcm::new_from_slice(&gcm_key).map_err(|err| err.to_string())?;
         cipher
-            .encrypt(
-                Nonce::from_slice(&nonce),
-                Payload { msg: &payload(text), aad: &extra },
-            )
+            .encrypt(Nonce::from_slice(&nonce), Payload { msg: body, aad: &extra })
             .map_err(|_| "could not seal the message".to_string())?
     } else {
-        seal_cbc(&secret, &salt, &payload(text))?
+        seal_cbc(&secret, &salt, body)?
     };
     Ok(vec![
         salt,
@@ -90,6 +113,34 @@ pub fn seal_text(
         int32_bytes(sender_key_id).to_vec(),
         int32_bytes(receiver_key_id).to_vec(),
     ])
+}
+
+/// Encrypt a file the way LINE object storage expects a letter-sealed attachment.
+///
+/// HKDF-SHA256 with info `FileEncryption` yields the AES-256-CTR key, the HMAC
+/// key, and a 12-byte nonce. The blob is ciphertext followed by HMAC-SHA256.
+pub fn encrypt_file(plain: &[u8]) -> Result<(String, Vec<u8>), String> {
+    let mut key_material = vec![0u8; 32];
+    rand::thread_rng().fill_bytes(&mut key_material);
+    let body = encrypt_file_with(&key_material, plain)?;
+    Ok((STANDARD.encode(&key_material), body))
+}
+
+fn encrypt_file_with(key_material: &[u8], plain: &[u8]) -> Result<Vec<u8>, String> {
+    let mut okm = [0u8; 76];
+    Hkdf::<Sha256>::new(None, key_material)
+        .expand(b"FileEncryption", &mut okm)
+        .map_err(|_| "could not derive the file key".to_string())?;
+    let mut iv = [0u8; 16];
+    iv[..12].copy_from_slice(&okm[64..76]);
+    let mut body = plain.to_vec();
+    let mut cipher = Ctr32BE::<Aes256>::new_from_slices(&okm[..32], &iv).map_err(|_| "could not seal the file".to_string())?;
+    cipher.apply_keystream(&mut body);
+    let mut signer = <Hmac<Sha256> as Mac>::new_from_slice(&okm[32..64]).map_err(|err| err.to_string())?;
+    signer.update(&body);
+    let mac = signer.finalize().into_bytes();
+    body.extend_from_slice(&mac);
+    Ok(body)
 }
 
 pub fn open_text(
@@ -369,6 +420,8 @@ mod tests {
         body.extend_from_slice(&signer.finalize().into_bytes());
         let encoded = STANDARD.encode(material);
         assert_eq!(decrypt_file(&body, &encoded).unwrap(), plain);
+        let (fresh, sealed) = encrypt_file(plain).unwrap();
+        assert_eq!(decrypt_file(&sealed, &fresh).unwrap(), plain);
     }
 
     #[test]

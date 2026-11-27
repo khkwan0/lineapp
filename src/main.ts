@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import QRCode from "qrcode";
+import { applyI18n, intlLocale, languageName, languagePreference, LOCALES, onLocaleChange, setLanguage, t, type MessageKey } from "./i18n";
 
 type LoginEvent = {
   type: string;
@@ -68,6 +69,12 @@ type SendResult = {
   code?: number | null;
   error?: string;
   replyId?: string;
+  kind?: string;
+  mediaId?: string;
+  animated?: boolean;
+  sticker?: string;
+  stickerFallback?: string;
+  fileName?: string;
 };
 
 type ReadMark = { end: string };
@@ -102,7 +109,11 @@ const threadBody = document.querySelector<HTMLElement>("#thread-body")!;
 const railPhoto = document.querySelector<HTMLImageElement>("#rail-photo")!;
 const railInitial = document.querySelector<HTMLElement>("#rail-initial")!;
 const railCount = document.querySelector<HTMLElement>("#rail-count")!;
-const composerInput = document.querySelector<HTMLInputElement>("#composer-input")!;
+const composerInput = document.querySelector<HTMLTextAreaElement>("#composer-input")!;
+const attachFile = document.querySelector<HTMLButtonElement>("#attach-file")!;
+const stickerOpen = document.querySelector<HTMLButtonElement>("#sticker-open")!;
+const stickerPanel = document.querySelector<HTMLElement>("#sticker-panel")!;
+const fileInput = document.querySelector<HTMLInputElement>("#file-input")!;
 const sendError = document.querySelector<HTMLParagraphElement>("#send-error")!;
 const railMore = document.querySelector<HTMLButtonElement>("#rail-more")!;
 const railMenu = document.querySelector<HTMLElement>("#rail-menu")!;
@@ -129,7 +140,14 @@ const replyAvatar = document.querySelector<HTMLElement>("#reply-avatar")!;
 const replyLabel = document.querySelector<HTMLElement>("#reply-label")!;
 const replyText = document.querySelector<HTMLElement>("#reply-text")!;
 const sheetList = document.querySelector<HTMLElement>("#sheet-list")!;
+const sheetLanguage = document.querySelector<HTMLElement>("#sheet-language")!;
+const languageCurrent = document.querySelector<HTMLElement>("#language-current")!;
+const languageList = document.querySelector<HTMLUListElement>("#language-list")!;
+const languageOpen = document.querySelector<HTMLButtonElement>("#language-open")!;
+const languageSave = document.querySelector<HTMLButtonElement>("#language-save")!;
+const languageCancel = document.querySelector<HTMLButtonElement>("#language-cancel")!;
 
+let statusKey: MessageKey | "" = "";
 let shownUrl = "";
 let myName = "";
 let myPicture = "";
@@ -141,6 +159,7 @@ let openId = "";
 let openLastId = "";
 let historyToken = 0;
 let paintedHistory = "";
+let openHistory: HistoryPayload | null = null;
 let paintedIds = "";
 let openUnread = 0;
 let unreadFocus = "";
@@ -165,6 +184,12 @@ type Outgoing = {
   state: "sending" | "failed";
   error: string;
   knownIds: string;
+  kind?: string;
+  previewUrl?: string;
+  sticker?: string;
+  stickerFallback?: string;
+  file?: { name: string; mime: string; data: string };
+  stickerSend?: { packageId: string; stickerId: string; animated: boolean };
 };
 let replyDraft: ReplyDraft | null = null;
 let msgMenuRow: HTMLElement | null = null;
@@ -214,6 +239,16 @@ async function drawQr(url: string): Promise<void> {
   document.body.dataset.qr = "ready";
 }
 
+function setStatus(key: MessageKey): void {
+  statusKey = key;
+  status.textContent = t(key);
+}
+
+function setStatusText(text: string): void {
+  statusKey = "";
+  status.textContent = text;
+}
+
 async function onEvent(event: LoginEvent): Promise<void> {
   if (event.type === "qr" && event.url) {
     if (event.url === shownUrl) {
@@ -221,27 +256,27 @@ async function onEvent(event: LoginEvent): Promise<void> {
     }
     shownUrl = event.url;
     await drawQr(event.url);
-    status.textContent = "Scan this QR with the LINE app on your phone.";
+    setStatus("scanQr");
     return;
   }
   if (event.type === "pin" && event.pin) {
     pin.hidden = false;
     pin.textContent = event.pin;
-    status.textContent = "Confirm this PIN in the LINE app on your phone.";
+    setStatus("confirmPin");
     return;
   }
   if (event.type === "status" && event.message) {
-    status.textContent = event.message;
+    setStatusText(event.message);
     return;
   }
   if (event.type === "saved") {
-    status.textContent = "Signed in. Loading chats…";
+    setStatus("signedIn");
     refresh.hidden = true;
     await showChats();
     return;
   }
   if (event.type === "error" && event.message) {
-    status.textContent = event.message;
+    setStatusText(event.message);
   }
 }
 
@@ -251,12 +286,12 @@ function clock(ms: number): string {
   }
   const date = new Date(ms);
   const now = new Date();
-  const day = date.toLocaleDateString("en-US", { timeZone: "Asia/Bangkok" });
-  const today = now.toLocaleDateString("en-US", { timeZone: "Asia/Bangkok" });
+  const day = date.toLocaleDateString(intlLocale(), { timeZone: "Asia/Bangkok" });
+  const today = now.toLocaleDateString(intlLocale(), { timeZone: "Asia/Bangkok" });
   const yesterdayDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  const yesterday = yesterdayDate.toLocaleDateString("en-US", { timeZone: "Asia/Bangkok" });
+  const yesterday = yesterdayDate.toLocaleDateString(intlLocale(), { timeZone: "Asia/Bangkok" });
   if (day === today) {
-    return date.toLocaleTimeString("en-US", {
+    return date.toLocaleTimeString(intlLocale(), {
       hour: "numeric",
       minute: "2-digit",
       hour12: true,
@@ -264,9 +299,9 @@ function clock(ms: number): string {
     });
   }
   if (day === yesterday) {
-    return "Yesterday";
+    return t("yesterday");
   }
-  return date.toLocaleDateString("en-US", {
+  return date.toLocaleDateString(intlLocale(), {
     month: "short",
     day: "numeric",
     timeZone: "Asia/Bangkok",
@@ -394,13 +429,13 @@ function paintThreadHead(chat: ChatRow): void {
   const muted = soundMuted(chat);
   threadHead.replaceChildren();
   const count = chat.members === null ? "" : ` (${chat.members})`;
-  const label = `${chat.name}${count}`;
+  const label = `${displayName(chat.name)}${count}`;
   if (chat.kind === "group") {
     const title = document.createElement("button");
     title.type = "button";
     title.className = "thread-title";
     title.textContent = label;
-    title.setAttribute("aria-label", `Members of ${chat.name}`);
+    title.setAttribute("aria-label", t("membersOf", { name: chat.name }));
     title.addEventListener("click", () => openMembers(chat));
     threadHead.append(title);
   } else if (chat.kind === "friend" && chat.id.startsWith("u")) {
@@ -408,7 +443,7 @@ function paintThreadHead(chat: ChatRow): void {
     title.type = "button";
     title.className = "thread-title";
     title.textContent = label;
-    title.setAttribute("aria-label", chat.name ? `Profile of ${chat.name}` : "Profile");
+    title.setAttribute("aria-label", chat.name ? t("profileOf", { name: chat.name }) : t("profile"));
     title.addEventListener("click", () => openDirectProfile(chat));
     threadHead.append(title);
   } else {
@@ -422,7 +457,7 @@ function paintThreadHead(chat: ChatRow): void {
   button.className = muted ? "thread-mute is-muted" : "thread-mute";
   button.dataset.muted = muted ? "1" : "0";
   button.setAttribute("aria-pressed", muted ? "true" : "false");
-  button.setAttribute("aria-label", muted ? "Unmute sound notifications" : "Mute sound notifications");
+  button.setAttribute("aria-label", muted ? t("unmute") : t("mute"));
   button.append(speakerIcon(muted));
   button.addEventListener("click", () => {
     setSoundMuted(chat.id, !soundMuted(chat));
@@ -635,7 +670,10 @@ function showThread(chat: ChatRow | undefined): void {
     unreadFocus = "";
     closeGallery();
     closeReactionPicker();
+    closeStickerPanel();
     composerInput.disabled = true;
+    attachFile.disabled = true;
+    stickerOpen.disabled = true;
     sendError.hidden = true;
     threadHead.replaceChildren();
     delete document.body.dataset.sound;
@@ -644,7 +682,13 @@ function showThread(chat: ChatRow | undefined): void {
   thread.hidden = false;
   paintThreadHead(chat);
   composerInput.disabled = false;
+  attachFile.disabled = false;
+  stickerOpen.disabled = false;
   if (chat.id !== openId) {
+    armedStickers.clear();
+    stickerWatch?.disconnect();
+    stickerWatch = null;
+    closeStickerPanel();
     openId = chat.id;
     openLastId = "";
     paintedHistory = "";
@@ -661,7 +705,8 @@ function showThread(chat: ChatRow | undefined): void {
     threadBody.replaceChildren();
     const note = document.createElement("p");
     note.className = "thread-note";
-    note.textContent = "Loading messages…";
+    note.dataset.kind = "loading";
+    note.textContent = t("loadingMessages");
     threadBody.append(note);
     void invoke("load_history", { id: chat.id }).catch((error: unknown) => {
       if (token !== historyToken) {
@@ -677,7 +722,7 @@ function showThread(chat: ChatRow | undefined): void {
 
 function historyStamp(payload: HistoryPayload): string {
   return payload.messages
-    .map((message) => [message.id || "", message.sender || "", message.text, message.status || "", message.kind || "", message.replyId || "", String(message.readers || 0), String(message.time)].join("\u001f"))
+    .map((message) => [message.id || "", message.sender || "", message.text, message.status || "", message.kind || "", message.sticker || "", message.replyId || "", String(message.readers || 0), String(message.time)].join("\u001f"))
     .join("\u001e");
 }
 
@@ -685,6 +730,7 @@ function renderHistory(payload: HistoryPayload): void {
   if (payload.id !== openId) {
     return;
   }
+  openHistory = payload;
   const candidate = payload.lastMessageId || newestMessageId(payload.messages.map((message) => message.id || ""));
   if (candidate) {
     noteLatest(payload.id, candidate);
@@ -701,6 +747,7 @@ function renderHistory(payload: HistoryPayload): void {
   const savedTop = threadBody.scrollTop;
   const previousIds = new Set(paintedIds ? paintedIds.split("\u001f") : []);
   claimOutgoing(payload.id, payload.messages);
+  armUnreadStickers(payload.messages, previousIds, firstPaint);
   paintedHistory = stamp;
   paintedIds = payload.messages.map((message) => message.id || "").join("\u001f");
   closeReactionPicker();
@@ -709,7 +756,8 @@ function renderHistory(payload: HistoryPayload): void {
   if (payload.messages.length === 0 && !outgoing.some((item) => item.chatId === payload.id)) {
     const note = document.createElement("p");
     note.className = "thread-note";
-    note.textContent = "No messages";
+    note.dataset.kind = "empty";
+    note.textContent = t("noMessages");
     threadBody.append(note);
     document.body.dataset.history = "0";
     unreadFocus = "";
@@ -791,25 +839,333 @@ function markOpenRead(id: string): void {
   holdRead(id, openLastId);
 }
 
+const playedStickers = new Set<string>();
+const armedStickers = new Set<string>();
+let stickerWatch: IntersectionObserver | null = null;
+
+function transferStickerPlay(from: string, to: string): void {
+  if (!from || !to || from === to) {
+    return;
+  }
+  if (playedStickers.has(from)) {
+    playedStickers.add(to);
+    armedStickers.delete(to);
+  } else if (armedStickers.has(from)) {
+    armedStickers.add(to);
+  }
+  armedStickers.delete(from);
+}
+
+function armUnreadStickers(messages: HistoryMessage[], previousIds: Set<string>, firstPaint: boolean): void {
+  if (firstPaint) {
+    if (openUnread <= 0) {
+      return;
+    }
+    const incoming = messages.map(incomingId).filter((id) => id);
+    for (const id of incoming.slice(Math.max(0, incoming.length - openUnread))) {
+      if (!playedStickers.has(id)) {
+        armedStickers.add(id);
+      }
+    }
+    return;
+  }
+  for (const message of messages) {
+    const id = message.id || "";
+    if (!id || previousIds.has(id) || playedStickers.has(id) || !message.sticker?.includes("/sticker_animation.png")) {
+      continue;
+    }
+    if (message.mine || incomingId(message)) {
+      armedStickers.add(id);
+    }
+  }
+}
+
+function stickerInView(node: HTMLElement): boolean {
+  const root = threadBody.getBoundingClientRect();
+  const box = node.getBoundingClientRect();
+  const visible = Math.min(box.bottom, root.bottom) - Math.max(box.top, root.top);
+  return visible > box.height * 0.5;
+}
+
+function watchSticker(host: HTMLElement): void {
+  if (!stickerWatch) {
+    stickerWatch = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) {
+          continue;
+        }
+        const node = entry.target as HTMLElement;
+        const id = node.dataset.playId || "";
+        if (!id || playedStickers.has(id) || !armedStickers.has(id)) {
+          stickerWatch?.unobserve(node);
+          continue;
+        }
+        if (!stickerInView(node)) {
+          continue;
+        }
+        stickerWatch?.unobserve(node);
+        startStickerPlay(node, id);
+      }
+    }, { root: threadBody, threshold: 0.5 });
+  }
+  stickerWatch.observe(host);
+}
+
+function startStickerPlay(host: HTMLElement, id: string): void {
+  armedStickers.delete(id);
+  playedStickers.add(id);
+  const src = host.dataset.src || "";
+  void playStickerAnimation(src).then((movie) => {
+    if (!movie || !host.isConnected || !stickerInView(host)) {
+      movie?.frames.forEach((frame) => frame.image.close());
+      if (host.isConnected && !stickerInView(host)) {
+        playedStickers.delete(id);
+        armedStickers.add(id);
+        watchSticker(host);
+      }
+      return;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.className = "sticker";
+    canvas.dataset.src = src;
+    canvas.dataset.fallback = host.dataset.fallback || "";
+    host.replaceChildren(canvas);
+    runStickerMovie(canvas, movie);
+  });
+}
+
+function stillSticker(src: string, fallback: string): string {
+  if (src.includes("/sticker_animation.png")) {
+    return src.replace("/sticker_animation.png", "/sticker.png");
+  }
+  return fallback || src;
+}
+
 function stickerImage(
   src: string,
   fallback: string,
   className: string,
   onFail?: () => void,
-): HTMLImageElement {
+  messageId = "",
+): HTMLElement {
+  const still = stillSticker(src, fallback);
   const img = document.createElement("img");
   img.className = className;
   img.alt = "";
-  img.src = src;
+  img.dataset.src = src;
+  img.dataset.fallback = still;
+  img.src = className === "sticker" && src.includes("/sticker_animation.png") ? still : src;
   img.addEventListener("error", () => {
-    if (fallback && img.src !== fallback) {
+    const next = img.dataset.fallback || "";
+    if (next && img.src !== next) {
+      img.src = next;
+      return;
+    }
+    if (fallback && img.src !== fallback && fallback !== next) {
       img.src = fallback;
       return;
     }
     img.remove();
     onFail?.();
   });
-  return img;
+  if (className !== "sticker" || !src.includes("/sticker_animation.png") || !messageId || playedStickers.has(messageId) || !armedStickers.has(messageId)) {
+    return img;
+  }
+  const host = document.createElement("span");
+  host.className = "sticker-play";
+  host.dataset.playId = messageId;
+  host.dataset.src = src;
+  host.dataset.fallback = still;
+  host.append(img);
+  watchSticker(host);
+  return host;
+}
+
+type StickerFrame = {
+  image: ImageBitmap;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  delay: number;
+  dispose: number;
+  blend: number;
+};
+
+type StickerMovie = { width: number; height: number; plays: number; frames: StickerFrame[] };
+
+function pngCrc(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type: string, data: Uint8Array): Uint8Array {
+  const out = new Uint8Array(12 + data.length);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, data.length);
+  out.set(new TextEncoder().encode(type), 4);
+  out.set(data, 8);
+  const covered = out.subarray(4, 8 + data.length);
+  view.setUint32(8 + data.length, pngCrc(covered));
+  return out;
+}
+
+async function playStickerAnimation(url: string): Promise<StickerMovie | null> {
+  try {
+    const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
+    const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+    if (signature.some((byte, index) => bytes[index] !== byte)) {
+      return null;
+    }
+    let cursor = 8;
+    let width = 0;
+    let height = 0;
+    let plays = 0;
+    const prefix: Uint8Array[] = [];
+    const frames: { meta: Uint8Array; data: Uint8Array[] }[] = [];
+    let current: { meta: Uint8Array; data: Uint8Array[] } | null = null;
+    while (cursor + 8 <= bytes.length) {
+      const length = new DataView(bytes.buffer, bytes.byteOffset + cursor, 4).getUint32(0);
+      const type = String.fromCharCode(...bytes.subarray(cursor + 4, cursor + 8));
+      const data = bytes.subarray(cursor + 8, cursor + 8 + length);
+      cursor += 12 + length;
+      if (type === "IHDR") {
+        width = new DataView(data.buffer, data.byteOffset, 4).getUint32(0);
+        height = new DataView(data.buffer, data.byteOffset + 4, 4).getUint32(0);
+      } else if (type === "acTL") {
+        plays = new DataView(data.buffer, data.byteOffset + 4, 4).getUint32(0);
+      } else if (type === "fcTL") {
+        current = { meta: data.slice(), data: [] };
+        frames.push(current);
+      } else if (type === "IDAT" && current) {
+        current.data.push(data.slice());
+      } else if (type === "fdAT" && current) {
+        current.data.push(data.subarray(4).slice());
+      } else if (type === "IEND") {
+        break;
+      } else if (!current && type !== "IHDR" && type !== "acTL") {
+        prefix.push(pngChunk(type, data.slice()));
+      }
+    }
+    if (!width || !height || frames.length === 0) {
+      return null;
+    }
+    const header = bytes.subarray(16, 29);
+    const decoded: StickerFrame[] = [];
+    for (const frame of frames) {
+      const view = new DataView(frame.meta.buffer, frame.meta.byteOffset, frame.meta.byteLength);
+      const frameWidth = view.getUint32(4);
+      const frameHeight = view.getUint32(8);
+      const ihdr = new Uint8Array(13);
+      const ihdrView = new DataView(ihdr.buffer);
+      ihdrView.setUint32(0, frameWidth);
+      ihdrView.setUint32(4, frameHeight);
+      ihdr.set(header.subarray(8), 8);
+      const idat = new Uint8Array(frame.data.reduce((sum, part) => sum + part.length, 0));
+      let offset = 0;
+      for (const part of frame.data) {
+        idat.set(part, offset);
+        offset += part.length;
+      }
+      const parts = [Uint8Array.from(signature), pngChunk("IHDR", ihdr), ...prefix, pngChunk("IDAT", idat), pngChunk("IEND", new Uint8Array())];
+      const png = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+      let at = 0;
+      for (const part of parts) {
+        png.set(part, at);
+        at += part.length;
+      }
+      const image = await createImageBitmap(new Blob([png.buffer], { type: "image/png" }));
+      const denominator = view.getUint16(22) || 100;
+      decoded.push({
+        image,
+        x: view.getUint32(12),
+        y: view.getUint32(16),
+        width: frameWidth,
+        height: frameHeight,
+        delay: Math.max(20, (view.getUint16(20) / denominator) * 1000),
+        dispose: frame.meta[24] || 0,
+        blend: frame.meta[25] || 0,
+      });
+    }
+    return { width, height, plays, frames: decoded };
+  } catch {
+    return null;
+  }
+}
+
+function runStickerMovie(canvas: HTMLCanvasElement, movie: StickerMovie): void {
+  const context = canvas.getContext("2d");
+  if (!context) {
+    return;
+  }
+  canvas.width = movie.width;
+  canvas.height = movie.height;
+  const snapshot = document.createElement("canvas");
+  snapshot.width = movie.width;
+  snapshot.height = movie.height;
+  const saved = snapshot.getContext("2d");
+  let index = 0;
+  let played = 0;
+  let previous: StickerFrame | null = null;
+  let timer = 0;
+  let stopped = false;
+  const finish = (): void => {
+    if (stopped) {
+      return;
+    }
+    stopped = true;
+    window.clearTimeout(timer);
+    movie.frames.forEach((frame) => frame.image.close());
+  };
+  const draw = (): void => {
+    if (!canvas.isConnected) {
+      finish();
+      return;
+    }
+    const frame = movie.frames[index];
+    if (!frame) {
+      return;
+    }
+    if (previous?.dispose === 1) {
+      context.clearRect(previous.x, previous.y, previous.width, previous.height);
+    } else if (previous?.dispose === 2 && saved) {
+      context.clearRect(0, 0, movie.width, movie.height);
+      context.drawImage(snapshot, 0, 0);
+    }
+    if (frame.dispose === 2 && saved) {
+      saved.clearRect(0, 0, movie.width, movie.height);
+      saved.drawImage(canvas, 0, 0);
+    }
+    if (frame.blend === 0) {
+      context.clearRect(frame.x, frame.y, frame.width, frame.height);
+    }
+    context.drawImage(frame.image, frame.x, frame.y);
+    previous = frame;
+    const last = index === movie.frames.length - 1;
+    if (last) {
+      played += 1;
+      if (movie.plays > 0 && played >= movie.plays) {
+        finish();
+        return;
+      }
+    }
+    index = (index + 1) % movie.frames.length;
+    timer = window.setTimeout(draw, frame.delay);
+  };
+  draw();
+  const stop = new MutationObserver(() => {
+    if (!canvas.isConnected) {
+      finish();
+      stop.disconnect();
+    }
+  });
+  stop.observe(canvas.parentElement || document.body, { childList: true });
 }
 
 function groupMessages(messages: HistoryMessage[]): BubbleMessage[] {
@@ -923,7 +1279,7 @@ function clampIfTall(body: HTMLElement, attempt = 0): void {
   const more = document.createElement("button");
   more.type = "button";
   more.className = "msg-more";
-  more.textContent = "more";
+  more.textContent = t("moreLabel");
   more.addEventListener("click", () => {
     body.classList.remove("clamped");
     more.remove();
@@ -931,14 +1287,14 @@ function clampIfTall(body: HTMLElement, attempt = 0): void {
   body.after(more);
 }
 
-const REACTIONS: { emoji: string; label: string }[] = [
-  { emoji: "👍", label: "Like" },
-  { emoji: "😎", label: "Cool" },
-  { emoji: "😍", label: "Love" },
-  { emoji: "😠", label: "Angry" },
-  { emoji: "🥺", label: "Please" },
-  { emoji: "😭", label: "Cry" },
-  { emoji: "😮", label: "Wow" },
+const REACTIONS: { emoji: string; label: MessageKey }[] = [
+  { emoji: "👍", label: "like" },
+  { emoji: "😎", label: "cool" },
+  { emoji: "😍", label: "love" },
+  { emoji: "😠", label: "angry" },
+  { emoji: "🥺", label: "please" },
+  { emoji: "😭", label: "cry" },
+  { emoji: "😮", label: "wow" },
 ];
 
 type ShownReaction = { emoji: string; image: string; mine: boolean };
@@ -1007,7 +1363,7 @@ function paintReaction(row: HTMLElement, chip: HTMLElement, reaction: ShownReact
   const visible = Boolean(reaction.emoji || reaction.image);
   chip.hidden = !visible;
   chip.dataset.mine = reaction.mine ? "1" : "0";
-  chip.setAttribute("aria-label", visible && reaction.mine ? "Remove reaction" : "Reaction");
+  chip.setAttribute("aria-label", visible && reaction.mine ? t("removeReaction") : t("reaction"));
   row.classList.toggle("has-reaction", visible);
 }
 
@@ -1096,7 +1452,7 @@ function openReactionPicker(
     choice.className = "react-choice";
     choice.textContent = reaction.emoji;
     choice.setAttribute("role", "menuitem");
-    choice.setAttribute("aria-label", reaction.label);
+    choice.setAttribute("aria-label", t(reaction.label));
     if (reaction.emoji === current.emoji) {
       choice.classList.add("on");
       choice.setAttribute("aria-pressed", "true");
@@ -1169,7 +1525,7 @@ function reactionControls(row: HTMLElement, bubble: HTMLElement, meta: HTMLEleme
   const toggle = document.createElement("button");
   toggle.type = "button";
   toggle.className = "react-toggle";
-  toggle.setAttribute("aria-label", "Add reaction");
+  toggle.setAttribute("aria-label", t("addReaction"));
   toggle.setAttribute("aria-haspopup", "menu");
   toggle.setAttribute("aria-expanded", "false");
   toggle.append(smileIcon());
@@ -1203,22 +1559,22 @@ function reactionControls(row: HTMLElement, bubble: HTMLElement, meta: HTMLEleme
 
 function quoteFromHistory(message: HistoryMessage): string {
   if (message.kind === "unsent" || message.kind === "chat update") {
-    return "Message";
+    return t("message");
   }
   const text = message.text.trim();
   if (text && !mediaLabel(text)) {
     return text;
   }
   if (message.sticker) {
-    return "Sticker";
+    return t("sticker");
   }
   if (message.kind === "video") {
-    return "Video";
+    return t("video");
   }
   if (message.kind === "image") {
-    return "Photo";
+    return t("photo");
   }
-  return text || "Message";
+  return text || t("message");
 }
 
 function hydrateReplies(messages: HistoryMessage[]): HistoryMessage[] {
@@ -1235,8 +1591,8 @@ function hydrateReplies(messages: HistoryMessage[]): HistoryMessage[] {
     const source = byId.get(message.replyId);
     return {
       ...message,
-      replyText: message.replyText || (source ? quoteFromHistory(source) : "Message"),
-      replyName: message.replyName || (source ? (source.mine ? (myName || "You") : (source.name || "Message")) : ""),
+      replyText: message.replyText || (source ? quoteFromHistory(source) : t("message")),
+      replyName: message.replyName || (source ? (source.mine ? (myName || t("you")) : (source.name || t("message"))) : ""),
       replyPicture: message.replyPicture || (source ? quotedPicture(source) : ""),
     };
   });
@@ -1250,10 +1606,10 @@ function appendReplyQuote(bubble: HTMLElement, message: BubbleMessage): void {
   quote.className = "reply-quote";
   const who = document.createElement("div");
   who.className = "reply-who";
-  who.textContent = message.replyName || "Message";
+  who.textContent = message.replyName || t("message");
   const body = document.createElement("div");
   body.className = "reply-body";
-  body.textContent = message.replyText || "Message";
+  body.textContent = message.replyText || t("message");
   const copy = document.createElement("div");
   copy.append(who, body);
   const face = document.createElement("span");
@@ -1274,15 +1630,15 @@ function quoteText(row: HTMLElement): string {
     return text;
   }
   if (row.querySelector(".sticker")) {
-    return "Sticker";
+    return t("sticker");
   }
   if (row.querySelector("video")) {
-    return "Video";
+    return t("video");
   }
   if (row.querySelector(".media-grid")) {
-    return "Photo";
+    return t("photo");
   }
-  return text || "Message";
+  return text || t("message");
 }
 
 function copyableText(row: HTMLElement): string {
@@ -1295,17 +1651,17 @@ function copyableText(row: HTMLElement): string {
 
 function senderLabel(row: HTMLElement): string {
   if (row.classList.contains("mine")) {
-    return myName || "You";
+    return myName || t("you");
   }
-  return row.querySelector(".who")?.textContent?.trim() || rows.find((item) => item.id === openId)?.name || "Message";
+  return row.querySelector(".who")?.textContent?.trim() || rows.find((item) => item.id === openId)?.name || t("message");
 }
 
 function unsentLine(mine: boolean, name: string): string {
   if (mine) {
-    return "You unsent a message.";
+    return t("unsentYou");
   }
   const who = name.trim();
-  return who ? `${who} unsent a message.` : "Unsent a message.";
+  return who ? t("unsentOther", { name: who }) : t("unsentUnknown");
 }
 
 function quotedPicture(source: HistoryMessage): string {
@@ -1445,7 +1801,7 @@ async function copyMessage(row: HTMLElement): Promise<void> {
   const text = copyableText(row);
   if (!text) {
     sendError.hidden = false;
-    sendError.textContent = "Nothing to copy";
+    sendError.textContent = t("nothingToCopy");
     return;
   }
   try {
@@ -1460,18 +1816,18 @@ async function copyMessage(row: HTMLElement): Promise<void> {
     area.remove();
     if (!copied) {
       sendError.hidden = false;
-      sendError.textContent = "Could not copy that message";
+      sendError.textContent = t("couldNotCopy");
       return;
     }
   }
   sendError.hidden = true;
 }
 
-const REPORT_REASONS: { id: number; label: string }[] = [
-  { id: 1, label: "Spam" },
-  { id: 2, label: "Sexual harassment" },
-  { id: 3, label: "Harassment" },
-  { id: 0, label: "Other" },
+const REPORT_REASONS: { id: number; label: MessageKey }[] = [
+  { id: 1, label: "spam" },
+  { id: 2, label: "sexualHarassment" },
+  { id: 3, label: "harassment" },
+  { id: 0, label: "other" },
 ];
 
 function messageSender(row: HTMLElement): string {
@@ -1488,27 +1844,28 @@ function showReport(row: HTMLElement): void {
   const text = copyableText(row);
   if (!openId || !messageId || !sender) {
     sendError.hidden = false;
-    sendError.textContent = "That message cannot be reported";
+    sendError.textContent = t("cannotReport");
     return;
   }
   const chatId = openId;
-  sheetTitle.textContent = "Report";
+  sheetTitle.textContent = t("report");
   sheetBody.hidden = false;
-  sheetBody.textContent = "Why are you reporting this message?";
+  sheetBody.textContent = t("whyReport");
   sheetSettings.hidden = true;
   sheetAbout.hidden = true;
+  sheetLanguage.hidden = true;
   sheetList.hidden = false;
   sheetList.replaceChildren();
   for (const reason of REPORT_REASONS) {
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = reason.label;
+    button.textContent = t(reason.label);
     button.addEventListener("click", () => {
       button.disabled = true;
       void invoke("report_message", { id: chatId, messageId, sender, reason: reason.id, text }).then(() => {
         sheetList.hidden = true;
         sheetBody.hidden = false;
-        sheetBody.textContent = "Report sent.";
+        sheetBody.textContent = t("reportSent");
       }).catch((error: unknown) => {
         button.disabled = false;
         sheetBody.hidden = false;
@@ -1522,17 +1879,18 @@ function showReport(row: HTMLElement): void {
 
 function showShare(text: string): void {
   shareText = text;
-  sheetTitle.textContent = "Share";
+  sheetTitle.textContent = t("share");
   sheetBody.hidden = true;
   sheetSettings.hidden = true;
   sheetAbout.hidden = true;
+  sheetLanguage.hidden = true;
   sheetList.hidden = false;
   sheetList.replaceChildren();
   const choices = rows.filter((row) => row.id && row.name);
   if (choices.length === 0) {
     sheetList.hidden = true;
     sheetBody.hidden = false;
-    sheetBody.textContent = "No chats to share to.";
+    sheetBody.textContent = t("noChatsToShare");
   } else {
     for (const chat of choices) {
       const button = document.createElement("button");
@@ -1552,7 +1910,7 @@ async function unsendRow(row: HTMLElement): Promise<void> {
   const ids = (row.dataset.ids || row.dataset.id || "").split(",").map((id) => id.trim()).filter((id) => id);
   if (ids.length === 0 || !openId) {
     sendError.hidden = false;
-    sendError.textContent = "That message cannot be unsent";
+    sendError.textContent = t("cannotUnsend");
     return;
   }
   const chatId = openId;
@@ -1612,8 +1970,8 @@ function messageBubble(message: BubbleMessage): HTMLElement {
     }
   } else if (message.sticker) {
     bubble.append(stickerImage(message.sticker, message.stickerFallback || "", "sticker", () => {
-      appendMessageText(bubble, message.text || "Sticker");
-    }));
+      appendMessageText(bubble, message.text || t("sticker"));
+    }, message.id || ""));
   } else {
     appendMessageText(bubble, message.text);
   }
@@ -1670,12 +2028,12 @@ function messageMeta(message: BubbleMessage): HTMLElement | null {
     const retry = document.createElement("button");
     retry.type = "button";
     retry.className = "msg-retry";
-    retry.textContent = "Not sent";
+    retry.textContent = t("notSent");
     meta.append(retry);
   } else if (sending) {
     const label = document.createElement("span");
     label.className = "msg-state";
-    label.textContent = "Sending";
+    label.textContent = t("sending");
     meta.append(label);
   }
   if (read) {
@@ -1693,7 +2051,7 @@ function messageMeta(message: BubbleMessage): HTMLElement | null {
 function receiptNode(readers: number): HTMLElement {
   const mark = document.createElement("span");
   mark.className = "receipt";
-  mark.textContent = readers > 1 ? `Read ${readers}` : "Read";
+  mark.textContent = readers > 1 ? t("readCount", { count: readers }) : t("read");
   return mark;
 }
 
@@ -1800,7 +2158,7 @@ function senderMark(message: BubbleMessage): HTMLElement {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "msg-avatar";
-  button.setAttribute("aria-label", name ? `Profile of ${name}` : "Profile");
+  button.setAttribute("aria-label", name ? t("profileOf", { name }) : t("profile"));
   if (picture) {
     const photo = document.createElement("img");
     photo.alt = "";
@@ -1866,7 +2224,7 @@ function imageGrid(items: MediaSlot[], token: number): HTMLElement {
       const key = mediaKey(item.id, thumb);
       const url = mediaUrls.get(key);
       if (!url) {
-        button.textContent = "Image";
+        button.textContent = t("image");
         return;
       }
       showFrame(button, url, mediaMimes.get(key) || "");
@@ -1896,7 +2254,7 @@ function videoStack(items: MediaSlot[], token: number): HTMLElement {
         video.src = url;
       } else {
         const note = document.createElement("div");
-        note.textContent = "Video";
+        note.textContent = t("video");
         video.replaceWith(note);
       }
     });
@@ -2007,7 +2365,7 @@ function renderList(): void {
     const top = document.createElement("div");
     top.className = "row-top";
     const name = document.createElement("strong");
-    name.textContent = chat.name;
+    name.textContent = displayName(chat.name);
     top.append(name);
     if (chat.members !== null) {
       const count = document.createElement("span");
@@ -2057,7 +2415,7 @@ function updateLabel(text: string): boolean {
 
 function previewText(text: string): string {
   const trimmed = text.trim();
-  return trimmed && !updateLabel(trimmed) ? trimmed : "No messages";
+  return trimmed && !updateLabel(trimmed) ? trimmed : t("noMessages");
 }
 
 function callPreviewLabel(text: string): string | null {
@@ -2074,7 +2432,7 @@ function callPreviewLabel(text: string): string | null {
   const minutes = Math.floor(safe / 60);
   const seconds = safe % 60;
   const pad = (value: number) => String(value).padStart(2, "0");
-  return `Call time ${pad(minutes)}:${pad(seconds)}`;
+  return t("callTime", { time: `${pad(minutes)}:${pad(seconds)}` });
 }
 
 function phoneIcon(): SVGSVGElement {
@@ -2163,7 +2521,7 @@ function renderChats(payload: ChatPayload): void {
 }
 
 async function showChats(): Promise<boolean> {
-  status.textContent = "Loading chats…";
+  setStatus("loadingChats");
   try {
     await invoke("load_chats");
     return true;
@@ -2172,7 +2530,7 @@ async function showChats(): Promise<boolean> {
     if (message.includes("No LINE session")) {
       return false;
     }
-    status.textContent = message;
+    setStatusText(message);
     return true;
   }
 }
@@ -2180,7 +2538,11 @@ async function showChats(): Promise<boolean> {
 async function start(): Promise<void> {
   refresh.disabled = true;
   const internals = (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
-  status.textContent = internals ? "Loading chats…" : "Desktop bridge is not ready.";
+  if (internals) {
+    setStatus("loadingChats");
+  } else {
+    setStatus("bridgeNotReady");
+  }
   if (!internals) {
     window.setTimeout(() => void start(), 200);
     return;
@@ -2189,11 +2551,11 @@ async function start(): Promise<void> {
     return;
   }
   refresh.hidden = false;
-  status.textContent = "Opening a login QR…";
+  setStatus("openingQr");
   try {
     await invoke("start_login");
   } catch (error) {
-    status.textContent = error instanceof Error ? error.message : String(error);
+    setStatusText(error instanceof Error ? error.message : String(error));
   } finally {
     refresh.disabled = false;
   }
@@ -2269,7 +2631,7 @@ msgMenu.addEventListener("click", (event) => {
     const text = copyableText(row);
     if (!text) {
       sendError.hidden = false;
-      sendError.textContent = "Nothing to share";
+      sendError.textContent = t("nothingToShare");
       return;
     }
     showShare(text);
@@ -2292,7 +2654,7 @@ await listen<LoginEvent>("login-event", (event) => {
   try {
     renderChats(payload);
   } catch (error) {
-    status.textContent = error instanceof Error ? error.message : String(error);
+    setStatusText(error instanceof Error ? error.message : String(error));
   }
 };
 
@@ -2300,24 +2662,25 @@ await listen<LoginEvent>("login-event", (event) => {
   try {
     renderHistory(payload);
   } catch (error) {
-    status.textContent = error instanceof Error ? error.message : String(error);
+    setStatusText(error instanceof Error ? error.message : String(error));
   }
 };
 
 function sendFailureNote(payload: Pick<SendResult, "code" | "error">): string {
   return payload.code === 82
-    ? "Letter sealing blocked this send (E2EE_RETRY_ENCRYPT)."
-    : (payload.error || "Could not send");
+    ? t("letterSealingBlocked")
+    : (payload.error || t("couldNotSend"));
 }
 
-function bumpChat(chatId: string, text: string, time: number): void {
+function bumpChat(chatId: string, text: string, time: number, sticker = "", fallback = ""): void {
   const chat = rows.find((row) => row.id === chatId);
   if (!chat || !text) {
     return;
   }
   chat.lastMessage = text;
   chat.time = time;
-  chat.sticker = "";
+  chat.sticker = sticker;
+  chat.stickerFallback = fallback;
   chat.sealed = false;
   rows.sort((left, right) => right.time - left.time);
   const stay = visibleRows().findIndex((row) => row.id === openId);
@@ -2328,19 +2691,47 @@ function bumpChat(chatId: string, text: string, time: number): void {
 }
 
 function outgoingBubble(item: Outgoing): HTMLElement {
+  if (item.kind === "sticker" && item.sticker?.includes("/sticker_animation.png") && !playedStickers.has(item.localId)) {
+    armedStickers.add(item.localId);
+  }
   const row = messageBubble({
     id: item.localId,
     mine: true,
     name: "",
-    text: item.text,
+    text: item.previewUrl ? "" : item.text,
     sealed: false,
     status: item.state,
     time: item.time,
+    sticker: item.sticker,
+    stickerFallback: item.stickerFallback,
     replyId: item.reply?.id || "",
     replyText: item.reply?.text || "",
     replyName: item.reply?.name || "",
     replyPicture: item.reply?.picture || "",
   });
+  if (item.previewUrl) {
+    const bubble = row.querySelector(".bubble");
+    const media = item.kind === "video" ? document.createElement("video") : document.createElement("img");
+    media.className = "outgoing-media";
+    media.src = item.previewUrl;
+    if (media instanceof HTMLVideoElement) {
+      media.muted = true;
+      media.playsInline = true;
+      media.preload = "metadata";
+    }
+    const caption = item.kind === "image" || item.kind === "video" ? "" : item.text;
+    if (caption) {
+      const text = document.createElement("div");
+      text.textContent = caption;
+      bubble?.prepend(text);
+    }
+    bubble?.prepend(media);
+    bubble?.querySelectorAll(":scope > div").forEach((node) => {
+      if (!node.className && !node.textContent) {
+        node.remove();
+      }
+    });
+  }
   row.dataset.localId = item.localId;
   row.dataset.state = item.state;
   const retry = row.querySelector<HTMLButtonElement>(".msg-retry");
@@ -2352,6 +2743,7 @@ function outgoingBubble(item: Outgoing): HTMLElement {
 
 function setDelivery(row: HTMLElement, state: "sending" | "failed" | "sent", time: number, serverId = "", error = ""): void {
   if (serverId) {
+    transferStickerPlay(row.dataset.localId || "", serverId);
     row.dataset.id = serverId;
     row.dataset.ids = serverId;
     delete row.dataset.localId;
@@ -2411,7 +2803,7 @@ function takeMatchingOutgoing(chatId: string, message: HistoryMessage): Outgoing
     item.chatId === chatId
     && item.state === "sending"
     && item.knownIds !== ""
-    && item.text === message.text
+    && (item.text === message.text || (Boolean(item.kind) && item.kind === (message.kind || "")))
     && (item.reply?.id || "") === (message.replyId || "")
     && !item.knownIds.split("\u001f").includes(message.id || "")
   );
@@ -2427,6 +2819,9 @@ function claimOutgoing(chatId: string, messages: HistoryMessage[]): void {
     const claimed = takeMatchingOutgoing(chatId, message);
     if (!claimed) {
       continue;
+    }
+    if (message.id) {
+      transferStickerPlay(claimed.localId, message.id);
     }
     const row = messageRow(claimed.localId);
     if (row && message.id && row !== messageRow(message.id)) {
@@ -2453,9 +2848,12 @@ function finishOutgoing(localId: string, payload: SendResult): void {
   if (index >= 0) {
     outgoing.splice(index, 1);
   }
+  const sticker = payload.sticker || item?.sticker || "";
+  const stickerFallback = payload.stickerFallback || item?.stickerFallback || "";
   if (payload.text) {
-    bumpChat(payload.id, payload.text, payload.time || item?.time || Date.now());
+    bumpChat(payload.id, payload.text, payload.time || item?.time || Date.now(), sticker, stickerFallback);
   }
+  rememberSent(payload, item, sticker, stickerFallback);
   if (payload.id !== openId || !payload.text) {
     return;
   }
@@ -2481,6 +2879,9 @@ function finishOutgoing(localId: string, payload: SendResult): void {
     sealed: false,
     status: "sent",
     time: payload.time || Date.now(),
+    sticker,
+    stickerFallback,
+    kind: payload.kind || item?.kind || "",
     replyId: item?.reply?.id || payload.replyId || "",
     replyText: item?.reply?.text || "",
     replyName: item?.reply?.name || "",
@@ -2490,19 +2891,76 @@ function finishOutgoing(localId: string, payload: SendResult): void {
   scrollThreadToEnd();
 }
 
+function rememberSent(payload: SendResult, item: Outgoing | undefined, sticker: string, stickerFallback: string): void {
+  if (!openHistory || openHistory.id !== payload.id || !payload.messageId || !payload.text) {
+    return;
+  }
+  const message: HistoryMessage = {
+    id: payload.messageId,
+    mine: true,
+    name: "",
+    text: payload.text,
+    sealed: false,
+    status: "sent",
+    time: payload.time || item?.time || Date.now(),
+    sticker,
+    stickerFallback,
+    kind: payload.kind || item?.kind || "",
+    replyId: item?.reply?.id || payload.replyId || "",
+    replyText: item?.reply?.text || "",
+    replyName: item?.reply?.name || "",
+    replyPicture: item?.reply?.picture || "",
+  };
+  const existing = openHistory.messages.findIndex((entry) => entry.id === payload.messageId);
+  if (existing >= 0) {
+    const prior = openHistory.messages[existing];
+    openHistory.messages[existing] = {
+      ...prior,
+      ...message,
+      sticker: message.sticker || prior.sticker,
+      stickerFallback: message.stickerFallback || prior.stickerFallback,
+      kind: message.kind || prior.kind,
+    };
+    return;
+  }
+  openHistory.messages.push(message);
+  openHistory.lastMessageId = payload.messageId;
+}
+
 function dispatchSend(item: Outgoing): void {
-  void invoke("send_message", {
-    id: item.chatId,
-    text: item.text,
-    relatedId: item.reply?.id || undefined,
-    localId: item.localId,
-  }).catch((error: unknown) => {
+  const fail = (error: unknown) => {
     finishOutgoing(item.localId, {
       id: item.chatId,
       ok: false,
       error: error instanceof Error ? error.message : String(error),
     });
-  });
+  };
+  if (item.file) {
+    void invoke("send_media", {
+      id: item.chatId,
+      name: item.file.name,
+      mime: item.file.mime,
+      data: item.file.data,
+      localId: item.localId,
+    }).catch(fail);
+    return;
+  }
+  if (item.stickerSend) {
+    void invoke("send_sticker", {
+      id: item.chatId,
+      packageId: item.stickerSend.packageId,
+      stickerId: item.stickerSend.stickerId,
+      animated: item.stickerSend.animated,
+      localId: item.localId,
+    }).catch(fail);
+    return;
+  }
+  void invoke("send_message", {
+    id: item.chatId,
+    text: item.text,
+    relatedId: item.reply?.id || undefined,
+    localId: item.localId,
+  }).catch(fail);
 }
 
 function startSend(chatId: string, text: string, reply: ReplyDraft | null): void {
@@ -2548,6 +3006,8 @@ function retryOutgoing(localId: string): void {
 
 function onSent(payload: SendResult): void {
   composerInput.disabled = !openId;
+  attachFile.disabled = !openId;
+  stickerOpen.disabled = !openId;
   finishOutgoing(payload.localId || "", payload);
 }
 
@@ -2555,7 +3015,7 @@ function onSent(payload: SendResult): void {
   try {
     applyPoll(payload);
   } catch (error) {
-    status.textContent = error instanceof Error ? error.message : String(error);
+    setStatusText(error instanceof Error ? error.message : String(error));
   }
 };
 
@@ -2563,9 +3023,135 @@ function onSent(payload: SendResult): void {
   try {
     onSent(payload);
   } catch (error) {
-    status.textContent = error instanceof Error ? error.message : String(error);
+    setStatusText(error instanceof Error ? error.message : String(error));
   }
 };
+
+const MEDIA_LIMIT = 40_000_000;
+const STICKER_PACK: { packageId: string; stickerId: string; animated: boolean }[] = [
+  ...["1988", "1989", "1990", "1991", "1992"].map((stickerId) => ({ packageId: "446", stickerId, animated: false })),
+  ...Array.from({ length: 11 }, (_, index) => ({ packageId: "11537", stickerId: String(52002734 + index), animated: true })),
+];
+
+function closeStickerPanel(): void {
+  stickerPanel.hidden = true;
+  stickerOpen.setAttribute("aria-expanded", "false");
+}
+
+function paintStickerPanel(): void {
+  if (stickerPanel.childElementCount > 0) {
+    return;
+  }
+  for (const sticker of STICKER_PACK) {
+    const button = document.createElement("button");
+    button.type = "button";
+    const asset = sticker.animated ? "sticker_animation.png" : "sticker.png";
+    const img = document.createElement("img");
+    img.alt = "";
+    img.src = `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.stickerId}/android/${asset}`;
+    button.append(img);
+    button.addEventListener("click", () => {
+      if (!openId || composerInput.disabled) {
+        return;
+      }
+      closeStickerPanel();
+      startSticker(openId, sticker);
+    });
+    stickerPanel.append(button);
+  }
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error("could not read that file"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function queueOutgoing(item: Outgoing): void {
+  outgoing.push(item);
+  bumpChat(item.chatId, item.text, item.time, item.sticker || "", item.stickerFallback || "");
+  if (item.chatId === openId) {
+    threadBody.querySelector(".thread-note")?.remove();
+    threadBody.append(outgoingBubble(item));
+    unreadFocus = "";
+    scrollThreadToEnd();
+  }
+  dispatchSend(item);
+}
+
+function startSticker(chatId: string, sticker: { packageId: string; stickerId: string; animated: boolean }): void {
+  const asset = sticker.animated ? "sticker_animation.png" : "sticker.png";
+  const item: Outgoing = {
+    localId: `local-${Date.now()}-${outgoingSeq += 1}`,
+    chatId,
+    text: "Sticker",
+    reply: null,
+    time: Date.now(),
+    state: "sending",
+    error: "",
+    knownIds: chatId === openId ? paintedIds : "",
+    kind: "sticker",
+    sticker: `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.stickerId}/android/${asset}`,
+    stickerFallback: `https://stickershop.line-scdn.net/stickershop/v1/product/${sticker.packageId}/android/stickers/${sticker.stickerId}.png`,
+    stickerSend: sticker,
+  };
+  queueOutgoing(item);
+}
+
+async function startAttachment(chatId: string, file: File): Promise<void> {
+  if (!file || file.size <= 0) {
+    return;
+  }
+  if (file.size > MEDIA_LIMIT) {
+    sendError.hidden = false;
+    sendError.textContent = t("fileTooLarge");
+    return;
+  }
+  sendError.hidden = true;
+  const data = await fileToBase64(file);
+  const mime = file.type || "application/octet-stream";
+  const ext = file.name.split(".").pop()?.toLowerCase() || "";
+  const imageExt = ["jpg", "jpeg", "png", "gif", "webp", "heic", "bmp"].includes(ext);
+  const videoExt = ["mp4", "mov", "m4v", "webm"].includes(ext);
+  const audioExt = ["m4a", "aac", "mp3", "wav"].includes(ext);
+  const kind = mime.startsWith("image/") || imageExt
+    ? "image"
+    : mime.startsWith("audio/") || audioExt
+      ? "audio"
+      : mime.startsWith("video/") || videoExt
+        ? "video"
+        : "file";
+  const preview = kind === "image" || kind === "video";
+  const item: Outgoing = {
+    localId: `local-${Date.now()}-${outgoingSeq += 1}`,
+    chatId,
+    text: preview ? (kind === "image" ? "Image" : "Video") : file.name,
+    reply: null,
+    time: Date.now(),
+    state: "sending",
+    error: "",
+    knownIds: chatId === openId ? paintedIds : "",
+    kind,
+    previewUrl: preview ? URL.createObjectURL(file) : "",
+    file: { name: file.name, mime, data },
+  };
+  queueOutgoing(item);
+}
+
+composerInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) {
+    return;
+  }
+  event.preventDefault();
+  composerInput.form?.requestSubmit();
+});
 
 document.querySelector<HTMLFormElement>("#composer")!.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -2582,6 +3168,35 @@ document.querySelector<HTMLFormElement>("#composer")!.addEventListener("submit",
   startSend(id, text, reply);
 });
 
+attachFile.addEventListener("click", () => {
+  if (!openId || composerInput.disabled) {
+    return;
+  }
+  closeStickerPanel();
+  fileInput.click();
+});
+
+fileInput.addEventListener("change", () => {
+  const file = fileInput.files?.[0];
+  fileInput.value = "";
+  if (!file || !openId || composerInput.disabled) {
+    return;
+  }
+  void startAttachment(openId, file).catch((error: unknown) => {
+    sendError.hidden = false;
+    sendError.textContent = error instanceof Error ? error.message : String(error);
+  });
+});
+
+stickerOpen.addEventListener("click", () => {
+  if (!openId || composerInput.disabled) {
+    return;
+  }
+  paintStickerPanel();
+  stickerPanel.hidden = !stickerPanel.hidden;
+  stickerOpen.setAttribute("aria-expanded", stickerPanel.hidden ? "false" : "true");
+});
+
 function closeMenu(): void {
   railMenu.hidden = true;
   railMore.setAttribute("aria-expanded", "false");
@@ -2594,6 +3209,7 @@ function showSheet(title: string, body: string): void {
   sheetSettings.hidden = true;
   sheetList.hidden = true;
   sheetAbout.hidden = true;
+  sheetLanguage.hidden = true;
   sheet.hidden = false;
 }
 
@@ -2605,7 +3221,7 @@ function buildStamp(iso: string): string {
   if (Number.isNaN(date.getTime())) {
     return iso;
   }
-  return date.toLocaleString("en-US", {
+  return date.toLocaleString(intlLocale(), {
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -2617,17 +3233,108 @@ function buildStamp(iso: string): string {
 }
 
 function showAbout(): void {
-  sheetTitle.textContent = "About LINE";
+  sheetTitle.textContent = t("aboutLine");
   aboutBuild.textContent = String(__BUILD_NUMBER__);
   aboutTime.textContent = buildStamp(__BUILD_TIME__);
   sheetBody.hidden = true;
   sheetSettings.hidden = true;
   sheetList.hidden = true;
   sheetAbout.hidden = false;
+  sheetLanguage.hidden = true;
   sheet.hidden = false;
 }
 
 type ListedDevice = { name: string; detail: string };
+type DeviceLists = { outputs: ListedDevice[]; inputs: ListedDevice[]; cameras: ListedDevice[]; audioError: string };
+
+let listedDevices: DeviceLists | null = null;
+let pendingLanguage: "auto" | (typeof LOCALES)[number]["id"] = languagePreference();
+
+function displayName(name: string): string {
+  return name === "Direct chat" ? t("directChat") : name;
+}
+
+function paintLanguageCurrent(): void {
+  languageCurrent.textContent = languageName(languagePreference());
+}
+
+function paintLanguageList(): void {
+  pendingLanguage = languagePreference();
+  languageList.replaceChildren();
+  const choices: Array<"auto" | (typeof LOCALES)[number]["id"]> = ["auto", ...LOCALES.map((locale) => locale.id)];
+  for (const id of choices) {
+    const item = document.createElement("li");
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "app-language";
+    input.value = id;
+    input.checked = id === pendingLanguage;
+    input.addEventListener("change", () => {
+      pendingLanguage = id;
+    });
+    const name = document.createElement("span");
+    name.textContent = id === "auto" ? t("autoLanguage") : languageName(id);
+    label.append(input, name);
+    item.append(label);
+    languageList.append(item);
+  }
+}
+
+function showLanguage(): void {
+  paintLanguageList();
+  sheetTitle.textContent = t("language");
+  sheetBody.hidden = true;
+  sheetSettings.hidden = true;
+  sheetList.hidden = true;
+  sheetAbout.hidden = true;
+  sheetLanguage.hidden = false;
+  sheet.hidden = false;
+}
+
+function refreshLocale(): void {
+  applyI18n();
+  paintLanguageCurrent();
+  if (statusKey) {
+    setStatus(statusKey);
+  }
+  if (!sheet.hidden) {
+    if (!sheetLanguage.hidden) {
+      const chosen = pendingLanguage;
+      paintLanguageList();
+      pendingLanguage = chosen;
+      languageList.querySelectorAll<HTMLInputElement>("input").forEach((input) => {
+        input.checked = input.value === chosen;
+      });
+      sheetTitle.textContent = t("language");
+    } else if (!sheetSettings.hidden) {
+      sheetTitle.textContent = t("settings");
+      if (listedDevices) {
+        fillDevices(devicesOutput, listedDevices.outputs, t("noSpeakers"));
+        fillDevices(devicesInput, listedDevices.inputs, t("noMics"));
+        fillDevices(devicesCamera, listedDevices.cameras, t("noCameras"));
+      }
+    } else if (!sheetAbout.hidden) {
+      aboutTime.textContent = buildStamp(__BUILD_TIME__);
+      sheetTitle.textContent = t("aboutLine");
+    }
+  }
+  if (!signedIn) {
+    return;
+  }
+  renderList();
+  if (openHistory && openHistory.id === openId) {
+    paintedHistory = "";
+    renderHistory(openHistory);
+    return;
+  }
+  const note = threadBody.querySelector<HTMLElement>(".thread-note");
+  if (note?.dataset.kind === "loading") {
+    note.textContent = t("loadingMessages");
+  } else if (note?.dataset.kind === "empty") {
+    note.textContent = t("noMessages");
+  }
+}
 
 function fillDevices(list: HTMLElement, devices: ListedDevice[], empty: string): void {
   list.replaceChildren();
@@ -2654,40 +3361,63 @@ function fillDevices(list: HTMLElement, devices: ListedDevice[], empty: string):
 }
 
 async function showSettings(): Promise<void> {
-  sheetTitle.textContent = "Settings";
+  sheetTitle.textContent = t("settings");
   sheetBody.hidden = true;
   sheetSettings.hidden = false;
   sheetList.hidden = true;
   sheetAbout.hidden = true;
+  sheetLanguage.hidden = true;
   sheet.hidden = false;
+  paintLanguageCurrent();
   devicesNote.hidden = true;
-  fillDevices(devicesOutput, [], "Looking…");
-  fillDevices(devicesInput, [], "Looking…");
-  fillDevices(devicesCamera, [], "Looking…");
+  fillDevices(devicesOutput, [], t("looking"));
+  fillDevices(devicesInput, [], t("looking"));
+  fillDevices(devicesCamera, [], t("looking"));
   minimizeToTray.disabled = true;
   try {
     const settings = await invoke<{ minimizeToTray: boolean }>("get_settings");
     minimizeToTray.checked = settings.minimizeToTray;
   } catch (error) {
-    status.textContent = error instanceof Error ? error.message : String(error);
+    setStatusText(error instanceof Error ? error.message : String(error));
   }
   minimizeToTray.disabled = false;
   try {
-    const devices = await invoke<{ outputs: ListedDevice[]; inputs: ListedDevice[]; cameras: ListedDevice[]; audioError: string }>("list_media_devices");
-    fillDevices(devicesOutput, devices.outputs, "No speakers found");
-    fillDevices(devicesInput, devices.inputs, "No microphones found");
-    fillDevices(devicesCamera, devices.cameras, "No cameras found");
+    const devices = await invoke<DeviceLists>("list_media_devices");
+    listedDevices = devices;
+    fillDevices(devicesOutput, devices.outputs, t("noSpeakers"));
+    fillDevices(devicesInput, devices.inputs, t("noMics"));
+    fillDevices(devicesCamera, devices.cameras, t("noCameras"));
     devicesNote.hidden = devices.audioError.length === 0;
     devicesNote.textContent = devices.audioError;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    fillDevices(devicesOutput, [], "Couldn't list speakers");
-    fillDevices(devicesInput, [], "Couldn't list microphones");
-    fillDevices(devicesCamera, [], "Couldn't list cameras");
+    fillDevices(devicesOutput, [], t("couldntSpeakers"));
+    fillDevices(devicesInput, [], t("couldntMics"));
+    fillDevices(devicesCamera, [], t("couldntCameras"));
     devicesNote.hidden = false;
     devicesNote.textContent = message;
+    listedDevices = null;
   }
 }
+
+languageOpen.addEventListener("click", () => {
+  showLanguage();
+});
+
+languageSave.addEventListener("click", () => {
+  sheetLanguage.hidden = true;
+  sheetSettings.hidden = false;
+  setLanguage(pendingLanguage);
+  sheetTitle.textContent = t("settings");
+});
+
+languageCancel.addEventListener("click", () => {
+  sheet.hidden = true;
+});
+
+applyI18n();
+paintLanguageCurrent();
+onLocaleChange(refreshLocale);
 
 railMore.addEventListener("click", (event) => {
   event.stopPropagation();
@@ -2705,7 +3435,7 @@ railMenu.addEventListener("click", (event) => {
   if (action === "settings") {
     void showSettings();
   } else if (action === "help") {
-    showSheet("Help", "Help is not in this window yet.");
+    showSheet(t("help"), t("helpMissing"));
   } else if (action === "about") {
     showAbout();
   } else if (action === "logout") {
@@ -2735,7 +3465,7 @@ minimizeToTray.addEventListener("change", () => {
   const enabled = minimizeToTray.checked;
   void invoke("set_minimize_to_tray", { enabled }).catch((error: unknown) => {
     minimizeToTray.checked = !enabled;
-    status.textContent = error instanceof Error ? error.message : String(error);
+    setStatusText(error instanceof Error ? error.message : String(error));
   });
 });
 
@@ -2799,7 +3529,7 @@ function appendLiveMessage(update: PollUpdate, followTail: boolean, batch: { foc
   }
   if (message.replyId && !message.replyText) {
     const source = messageRow(message.replyId);
-    message.replyText = source ? quoteText(source) : "Message";
+    message.replyText = source ? quoteText(source) : t("message");
     message.replyName = source ? senderLabel(source) : "";
     message.replyPicture = source ? rowPicture(source) : "";
   }
@@ -3074,7 +3804,7 @@ async function logout(): Promise<void> {
     await invoke("logout");
   } catch (error) {
     signedIn = true;
-    status.textContent = error instanceof Error ? error.message : String(error);
+    setStatusText(error instanceof Error ? error.message : String(error));
     return;
   }
   rows = [];
@@ -3085,11 +3815,11 @@ async function logout(): Promise<void> {
   card.hidden = true;
   pin.hidden = true;
   refresh.hidden = false;
-  status.textContent = "Opening a login QR…";
+  setStatus("openingQr");
   try {
     await invoke("start_login");
   } catch (error) {
-    status.textContent = error instanceof Error ? error.message : String(error);
+    setStatusText(error instanceof Error ? error.message : String(error));
   }
 }
 
