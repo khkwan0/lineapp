@@ -183,6 +183,7 @@
                 <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
               </svg>
             </button>
+            <span id="ai-mark" hidden data-i18n="chatLlmAiOn" data-i18n-title="chatLlmAiOnHint" title="Replies in this chat start with an AI note.">AI note</span>
             <p id="auto-reply-wait" hidden>
               <span data-i18n="autoReplySent">Sent to the model</span>
               <span id="auto-reply-elapsed">0:00</span>
@@ -512,7 +513,7 @@
             <span data-i18n="agentAutoContext">Auto reply context</span>
             <textarea id="agent-auto-context" rows="4" spellcheck="true"></textarea>
           </label>
-          <p class="settings-notice" data-i18n="agentAutoContextHint">Guidance added to every automatic chat reply. Leave this blank to follow the thread.</p>
+          <p class="settings-notice" data-i18n="agentAutoContextHint">Extra instructions added to every automatic reply. The recent messages in the chat are included either way.</p>
           <label class="agent-field">
             <span data-i18n="agentExtra">Extra JSON</span>
             <textarea id="reply-extra" rows="4" spellcheck="false" autocomplete="off"></textarea>
@@ -544,8 +545,15 @@
           </div>
         </div>
         <div id="sheet-chat-llm" hidden>
-          <p class="settings-notice" data-i18n="chatLlmHint">Endpoint, parameters, and context are saved for this conversation only.</p>
+          <p class="settings-notice" data-i18n="chatLlmHint">These settings are for this chat only. Other chats keep their own model settings.</p>
           <p id="chat-llm-unsaved" class="settings-notice" data-i18n="chatLlmUnsaved" hidden>Not saved for this chat yet.</p>
+          <label class="agent-field">
+            <span data-i18n="chatLlmCopy">Copy from another chat</span>
+            <div class="chat-llm-copy">
+              <select id="chat-llm-copy"></select>
+              <button id="chat-llm-copy-apply" type="button" data-i18n="chatLlmCopyApply">Copy</button>
+            </div>
+          </label>
           <label class="agent-field">
             <span data-i18n="agentProtocol">Protocol</span>
             <select id="chat-llm-protocol">
@@ -589,10 +597,36 @@
             </select>
           </label>
           <label class="agent-field">
+            <span data-i18n="chatLlmReplyLanguage">Reply language</span>
+            <select id="chat-llm-language">
+              <option value="" data-i18n="chatLlmReplyLanguageMatch">Same as the conversation</option>
+              <option value="en">English</option>
+              <option value="ja">日本語</option>
+              <option value="ko">한국어</option>
+              <option value="zh-Hans">中文(简体)</option>
+              <option value="zh-Hant">中文(繁體)</option>
+              <option value="th">ภาษาไทย</option>
+              <option value="vi">Tiếng Việt</option>
+              <option value="id">Bahasa Indonesia</option>
+              <option value="ms">Bahasa Melayu</option>
+              <option value="es">Español</option>
+              <option value="pt">Português</option>
+              <option value="fr">Français</option>
+              <option value="de">Deutsch</option>
+              <option value="it">Italiano</option>
+              <option value="ru">Русский</option>
+              <option value="ar">العربية</option>
+              <option value="tr">Türkçe</option>
+              <option value="el">Ελληνικά</option>
+              <option value="hi">हिन्दी</option>
+            </select>
+          </label>
+          <p class="settings-notice" data-i18n="chatLlmReplyLanguageHint">Automatic replies use this language. Recent messages are still included.</p>
+          <label class="agent-field">
             <span data-i18n="agentAutoContext">Auto reply context</span>
             <textarea id="chat-llm-context" rows="4" spellcheck="true"></textarea>
           </label>
-          <p class="settings-notice" data-i18n="agentAutoContextHint">Guidance added to every automatic chat reply. Leave this blank to follow the thread.</p>
+          <p class="settings-notice" data-i18n="agentAutoContextHint">Extra instructions added to every automatic reply. The recent messages in the chat are included either way.</p>
           <label class="setting">
             <input id="chat-llm-mark-ai" type="checkbox" />
             <span>

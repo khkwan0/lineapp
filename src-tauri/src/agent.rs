@@ -55,6 +55,8 @@ pub(crate) struct AgentSettings {
     reply_thinking: String,
     #[serde(default)]
     reply_extra: String,
+    #[serde(default)]
+    reply_language: String,
 }
 
 fn default_reply_thinking() -> String {
@@ -382,6 +384,7 @@ pub fn get_agent_settings() -> Result<AgentSettings, String> {
         reply_max_tokens: string_field(&value, "agentReplyMaxTokens"),
         reply_thinking: stored_reply_thinking(&value),
         reply_extra: string_field(&value, "agentReplyExtra"),
+        reply_language: String::new(),
     })
 }
 
@@ -470,6 +473,8 @@ pub(crate) struct ChatLlm {
     extra: String,
     context: String,
     #[serde(default)]
+    language: String,
+    #[serde(default)]
     mark_ai: bool,
     #[serde(default)]
     interrupt: bool,
@@ -511,6 +516,7 @@ fn chat_llm_from_json(value: &Json) -> ChatLlm {
         thinking: thinking.to_string(),
         extra: string_field(value, "extra"),
         context: string_field(value, "context"),
+        language: reply_language_name(&string_field(value, "language")).map(|_| string_field(value, "language")).unwrap_or_default(),
         mark_ai: bool_field(value, "markAi"),
         interrupt: bool_field(value, "interrupt"),
     }
@@ -561,6 +567,7 @@ fn chat_as_settings(chat: &ChatLlm) -> AgentSettings {
         reply_max_tokens: chat.max_tokens.clone(),
         reply_thinking: thinking,
         reply_extra: chat.extra.clone(),
+        reply_language: chat.language.clone(),
     }
 }
 
@@ -586,6 +593,19 @@ pub fn get_chat_llm(id: String) -> Result<Option<ChatLlm>, String> {
 }
 
 #[tauri::command]
+pub fn list_chat_llm() -> Result<Vec<String>, String> {
+    Ok(chat_llm_ids(&load_object()?))
+}
+
+fn chat_llm_ids(root: &Json) -> Vec<String> {
+    let mut ids: Vec<String> = chat_llm_map(root)
+        .map(|map| map.keys().filter(|id| check_chat_key(id).is_ok()).cloned().collect())
+        .unwrap_or_default();
+    ids.sort();
+    ids
+}
+
+#[tauri::command]
 pub fn set_chat_llm(id: String, settings: ChatLlm) -> Result<(), String> {
     let id = id.trim();
     check_chat_key(id)?;
@@ -605,6 +625,7 @@ pub fn set_chat_llm(id: String, settings: ChatLlm) -> Result<(), String> {
         thinking: check_reply_thinking(&settings.thinking)?,
         extra: check_extra(&settings.extra)?,
         context: check_auto_context(&settings.context)?,
+        language: check_reply_language(&settings.language)?,
         mark_ai: settings.mark_ai,
         interrupt: settings.interrupt,
     };
@@ -631,6 +652,42 @@ pub(crate) struct ComposeTurn {
 
 const REPLY_SYSTEM: &str = "You are replying in a LINE chat as the account owner. Write only the next message to send. No quotes, labels, or explanation. Match the language and tone of the conversation.";
 
+fn reply_language_name(id: &str) -> Option<&'static str> {
+    Some(match id.trim() {
+        "en" => "English",
+        "ja" => "Japanese",
+        "ko" => "Korean",
+        "zh-Hans" => "Simplified Chinese",
+        "zh-Hant" => "Traditional Chinese",
+        "th" => "Thai",
+        "vi" => "Vietnamese",
+        "id" => "Indonesian",
+        "ms" => "Malay",
+        "es" => "Spanish",
+        "pt" => "Portuguese",
+        "fr" => "French",
+        "de" => "German",
+        "it" => "Italian",
+        "ru" => "Russian",
+        "ar" => "Arabic",
+        "tr" => "Turkish",
+        "el" => "Greek",
+        "hi" => "Hindi",
+        _ => return None,
+    })
+}
+
+fn check_reply_language(raw: &str) -> Result<String, String> {
+    let language = raw.trim();
+    if language.is_empty() {
+        return Ok(String::new());
+    }
+    if reply_language_name(language).is_none() {
+        return Err("Choose a reply language.".to_string());
+    }
+    Ok(language.to_string())
+}
+
 fn reply_transcript(messages: &[ComposeTurn]) -> String {
     let mut lines = Vec::new();
     let start = messages.len().saturating_sub(20);
@@ -651,12 +708,23 @@ fn reply_transcript(messages: &[ComposeTurn]) -> String {
     lines.join("\n")
 }
 
-fn reply_system(guidance: &str) -> String {
+fn reply_system(guidance: &str, language: &str) -> String {
+    let base = match reply_language_name(language) {
+        Some(name) => format!("You are replying in a LINE chat as the account owner. Write only the next message to send. No quotes, labels, or explanation. Reply in {name}. Match the tone of the conversation."),
+        None => REPLY_SYSTEM.to_string(),
+    };
     let guidance = guidance.trim();
     if guidance.is_empty() {
-        return REPLY_SYSTEM.to_string();
+        return base;
     }
-    format!("{REPLY_SYSTEM}\n\nGuidance from the user:\n{guidance}")
+    format!("{base}\n\nGuidance from the user:\n{guidance}")
+}
+
+fn empty_reply_message(thinking: Thinking) -> String {
+    if thinking == Thinking::Off {
+        return "The model returned only its thinking and no message to send.".to_string();
+    }
+    "The model returned only its thinking and no message. Turn thinking off for this chat.".to_string()
 }
 
 fn last_is_mine(messages: &[ComposeTurn]) -> bool {
@@ -728,7 +796,7 @@ fn compose_reply(messages: Vec<ComposeTurn>, chat_id: &str) -> Result<String, St
         return Err("Set the endpoint and model for this chat.".to_string());
     }
     let knobs = reply_knobs(&settings)?;
-    let mut system = reply_system(&settings.auto_context);
+    let mut system = reply_system(&settings.auto_context, &settings.reply_language);
     let (mut links, remote) = crate::mcp::prepare();
     let offered = mcp_tools(&remote);
     if !offered.is_empty() {
@@ -759,7 +827,7 @@ fn compose_reply(messages: Vec<ComposeTurn>, chat_id: &str) -> Result<String, St
         if answering || step.calls.is_empty() {
             let text = clip(step.text.trim(), 2000);
             if text.is_empty() {
-                return Err("The model returned only its thinking and no message. Turn thinking off in Auto reply settings.".to_string());
+                return Err(empty_reply_message(knobs.thinking));
             }
             return Ok(text);
         }
@@ -770,7 +838,7 @@ fn compose_reply(messages: Vec<ComposeTurn>, chat_id: &str) -> Result<String, St
         }
         append_tool_results(knobs.protocol, &mut transcript, &step.calls, &results);
     }
-    Err("The model returned only its thinking and no message. Turn thinking off in Auto reply settings.".to_string())
+    Err(empty_reply_message(knobs.thinking))
 }
 
 #[tauri::command]
@@ -928,11 +996,12 @@ fn reply_knobs(settings: &AgentSettings) -> Result<Knobs, String> {
     resolve_knobs(&shaped)
 }
 
-/// Ollama keeps thinking on qwen unless the request says so. Off for an auto
-/// reply means the visible text is the message, not a hidden reasoning trace.
+/// Ollama's OpenAI-compatible endpoint ignores `think` and turns thinking on
+/// unless `reasoning_effort` is `none`. Off means the visible text is the message.
 fn silence_thinking(protocol: Protocol, thinking: Thinking, body: &mut Json) {
     if thinking == Thinking::Off && protocol == Protocol::OpenAi {
         body["think"] = json!(false);
+        body["reasoning_effort"] = json!("none");
     }
 }
 
@@ -2471,8 +2540,11 @@ mod tests {
         ];
         assert!(!last_is_mine(&thread));
         assert_eq!(reply_transcript(&thread), "You: hello\nAda: are you coming?");
-        assert!(reply_system("Be brief and friendly.").contains("Be brief and friendly."));
-        assert_eq!(reply_system("  "), REPLY_SYSTEM);
+        assert!(reply_system("Be brief and friendly.", "").contains("Be brief and friendly."));
+        assert_eq!(reply_system("  ", ""), REPLY_SYSTEM);
+        let japanese = reply_system("", "ja");
+        assert!(japanese.contains("Reply in Japanese."));
+        assert!(!japanese.contains("Match the language"));
         let own = vec![ComposeTurn { mine: false, name: "Ada".to_string(), text: "hi".to_string() }, ComposeTurn { mine: true, name: String::new(), text: "on my way".to_string() }];
         assert!(last_is_mine(&own));
         assert!(check_auto_context(&"x".repeat(4001)).is_err());
@@ -2493,6 +2565,7 @@ mod tests {
             thinking: "off".into(),
             extra: String::new(),
             context: "Reply in English.".into(),
+            language: "en".into(),
             mark_ai: false,
             interrupt: false,
         };
@@ -2509,15 +2582,31 @@ mod tests {
     }
 
     #[test]
+    fn saved_chat_ids_are_listed_in_order() {
+        let root = json!({
+            "minimizeToTray": true,
+            "chatLlm": {
+                "u20": { "endpoint": "http://127.0.0.1/v1", "model": "a" },
+                "u10": { "endpoint": "http://127.0.0.1/v1", "model": "b" }
+            }
+        });
+        assert_eq!(chat_llm_ids(&root), vec!["u10".to_string(), "u20".to_string()]);
+        assert!(chat_llm_ids(&json!({})).is_empty());
+    }
+
+    #[test]
     fn auto_reply_thinking_off_asks_ollama_not_to_think() {
         let mut body = json!({ "model": "qwen3.5:4b" });
         silence_thinking(Protocol::OpenAi, Thinking::Off, &mut body);
         assert_eq!(body["think"], false);
+        assert_eq!(body["reasoning_effort"], "none");
         silence_thinking(Protocol::OpenAi, Thinking::Default, &mut body);
         assert_eq!(body["think"], false);
+        assert_eq!(body["reasoning_effort"], "none");
         let mut left = json!({});
         silence_thinking(Protocol::OpenAi, Thinking::Default, &mut left);
         assert!(left.get("think").is_none());
+        assert!(left.get("reasoning_effort").is_none());
     }
 
     #[test]

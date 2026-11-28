@@ -221,6 +221,7 @@ const sheetAgent = document.querySelector<HTMLElement>("#sheet-agent")!;
 const sheetReply = document.querySelector<HTMLElement>("#sheet-reply")!;
 const sheetChatLlm = document.querySelector<HTMLElement>("#sheet-chat-llm")!;
 const chatLlmButton = document.querySelector<HTMLButtonElement>("#chat-llm")!;
+const aiMark = document.querySelector<HTMLElement>("#ai-mark")!;
 const agentOpen = document.querySelector<HTMLButtonElement>("#agent-open")!;
 const replyOpen = document.querySelector<HTMLButtonElement>("#reply-open")!;
 const replyCurrent = document.querySelector<HTMLElement>("#reply-current")!;
@@ -253,6 +254,7 @@ const chatLlmTemperature = document.querySelector<HTMLInputElement>("#chat-llm-t
 const chatLlmTopP = document.querySelector<HTMLInputElement>("#chat-llm-top-p")!;
 const chatLlmMaxTokens = document.querySelector<HTMLInputElement>("#chat-llm-max-tokens")!;
 const chatLlmThinking = document.querySelector<HTMLSelectElement>("#chat-llm-thinking")!;
+const chatLlmLanguage = document.querySelector<HTMLSelectElement>("#chat-llm-language")!;
 const chatLlmContext = document.querySelector<HTMLTextAreaElement>("#chat-llm-context")!;
 const chatLlmMarkAi = document.querySelector<HTMLInputElement>("#chat-llm-mark-ai")!;
 const chatLlmInterrupt = document.querySelector<HTMLInputElement>("#chat-llm-interrupt")!;
@@ -263,6 +265,8 @@ const chatLlmNote = document.querySelector<HTMLElement>("#chat-llm-note")!;
 const chatLlmSave = document.querySelector<HTMLButtonElement>("#chat-llm-save")!;
 const chatLlmClear = document.querySelector<HTMLButtonElement>("#chat-llm-clear")!;
 const chatLlmCancel = document.querySelector<HTMLButtonElement>("#chat-llm-cancel")!;
+const chatLlmCopy = document.querySelector<HTMLSelectElement>("#chat-llm-copy")!;
+const chatLlmCopyApply = document.querySelector<HTMLButtonElement>("#chat-llm-copy-apply")!;
 const autoReplyWait = document.querySelector<HTMLElement>("#auto-reply-wait")!;
 const autoReplyElapsed = document.querySelector<HTMLElement>("#auto-reply-elapsed")!;
 const agentSave = document.querySelector<HTMLButtonElement>("#agent-save")!;
@@ -5553,6 +5557,7 @@ type ChatLlm = {
   thinking: string;
   extra: string;
   context: string;
+  language: string;
   markAi: boolean;
   interrupt: boolean;
 };
@@ -5577,6 +5582,7 @@ function llmFromAgent(): ChatLlm {
     thinking: agentConfig.replyThinking || "off",
     extra: agentConfig.replyExtra || "",
     context: agentConfig.autoContext || "",
+    language: "",
     markAi: false,
     interrupt: false,
   };
@@ -5591,11 +5597,16 @@ function fillChatLlm(settings: ChatLlm, saved: boolean): void {
   chatLlmTopP.value = settings.topP;
   chatLlmMaxTokens.value = settings.maxTokens;
   chatLlmThinking.value = ["default", "off", "low", "medium", "high"].includes(settings.thinking) ? settings.thinking : "off";
+  chatLlmLanguage.value = settings.language || "";
+  if (chatLlmLanguage.value !== (settings.language || "")) {
+    chatLlmLanguage.value = "";
+  }
   chatLlmContext.value = settings.context;
   chatLlmMarkAi.checked = settings.markAi === true;
   chatLlmInterrupt.checked = settings.interrupt === true;
   chatLlmExtra.value = settings.extra;
   chatLlmUnsaved.hidden = saved;
+  chatLlmUnsaved.textContent = t("chatLlmUnsaved");
   chatLlmClear.disabled = !saved;
 }
 
@@ -5618,6 +5629,7 @@ function paintAutoReply(chatId = openId): void {
   autoReplyButton.dataset.chat = chatId;
   autoReplyButton.disabled = !chatId || (!agentReady && !chatHasOwnModel(chatId));
   chatLlmButton.disabled = !chatId;
+  aiMark.hidden = !(chatId && chatLlmCache.get(chatId)?.markAi);
   if (!chatId) {
     autoReplyButton.title = t("autoReplyOff");
   } else if (!agentProbeStarted) {
@@ -7299,6 +7311,7 @@ async function showChatLlm(chatId: string): Promise<void> {
   sheetAgent.hidden = true;
   sheetReply.hidden = true;
   sheetChatLlm.hidden = false;
+  sheetChatLlm.scrollTop = 0;
   chatLlmNote.hidden = true;
   sheet.hidden = false;
   let saved = chatLlmCache.get(chatId) ?? null;
@@ -7318,8 +7331,78 @@ async function showChatLlm(chatId: string): Promise<void> {
     }
   }
   fillChatLlm(saved ?? llmFromAgent(), Boolean(saved));
+  void paintChatLlmCopy(chatId);
   chatLlmEndpoint.focus();
 }
+
+async function paintChatLlmCopy(chatId: string): Promise<void> {
+  chatLlmCopy.replaceChildren();
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = t("chatLlmCopyChoose");
+  chatLlmCopy.append(placeholder);
+  let ids: string[] = [];
+  try {
+    ids = await invoke<string[]>("list_chat_llm");
+  } catch {
+    ids = [];
+  }
+  if (chatLlmEditing !== chatId) {
+    return;
+  }
+  const choices = ids
+    .filter((id) => id !== chatId)
+    .map((id) => ({ id, name: rows.find((chat) => chat.id === id)?.name || id }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+  if (choices.length === 0) {
+    placeholder.textContent = t("chatLlmCopyEmpty");
+    chatLlmCopy.disabled = true;
+    chatLlmCopyApply.disabled = true;
+    return;
+  }
+  for (const choice of choices) {
+    const option = document.createElement("option");
+    option.value = choice.id;
+    option.textContent = choice.name;
+    chatLlmCopy.append(option);
+  }
+  chatLlmCopy.disabled = false;
+  chatLlmCopyApply.disabled = false;
+}
+
+chatLlmCopyApply.addEventListener("click", () => {
+  const chatId = chatLlmEditing;
+  const source = chatLlmCopy.value;
+  if (!chatId || !source || source === chatId) {
+    return;
+  }
+  chatLlmNote.hidden = true;
+  chatLlmCopyApply.disabled = true;
+  void invoke<ChatLlm | null>("get_chat_llm", { id: source })
+    .then((saved) => {
+      if (chatLlmEditing !== chatId) {
+        return;
+      }
+      if (!saved) {
+        chatLlmNote.hidden = false;
+        chatLlmNote.textContent = t("chatLlmCopyEmpty");
+        return;
+      }
+      chatLlmCache.set(source, saved);
+      fillChatLlm(saved, false);
+      chatLlmClear.disabled = !chatLlmCache.get(chatId);
+      const name = rows.find((chat) => chat.id === source)?.name || source;
+      chatLlmUnsaved.hidden = false;
+      chatLlmUnsaved.textContent = t("chatLlmCopied", { name });
+    })
+    .catch((error: unknown) => {
+      chatLlmNote.hidden = false;
+      chatLlmNote.textContent = error instanceof Error ? error.message : String(error);
+    })
+    .finally(() => {
+      chatLlmCopyApply.disabled = chatLlmCopy.disabled;
+    });
+});
 
 chatLlmButton.addEventListener("click", () => {
   if (!openId || chatLlmButton.disabled) {
@@ -7368,6 +7451,7 @@ chatLlmSave.addEventListener("click", () => {
     topP: chatLlmTopP.value.trim(),
     maxTokens: chatLlmMaxTokens.value.trim(),
     thinking: chatLlmThinking.value,
+    language: chatLlmLanguage.value,
     extra: chatLlmExtra.value.trim(),
     context: chatLlmContext.value.trim(),
     markAi: chatLlmMarkAi.checked,
