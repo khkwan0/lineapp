@@ -11,5 +11,7 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 src-tauri/speech/
+flatpak/stage/
+.flatpak-builder/
 third_party/
 public/chats.json

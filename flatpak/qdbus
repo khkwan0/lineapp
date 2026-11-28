@@ -1,0 +1,11 @@
+#!/bin/sh
+# The GNOME runtime has gdbus, not qdbus. LINE uses qdbus to load a KWin script.
+if [ "$#" -lt 3 ]; then
+  echo "usage: qdbus SERVICE PATH METHOD [ARG...]" >&2
+  exit 1
+fi
+service=$1
+object=$2
+method=$3
+shift 3
+exec gdbus call --session --dest "$service" --object-path "$object" --method "$method" "$@" >/dev/null

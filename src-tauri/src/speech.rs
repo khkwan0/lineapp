@@ -23,6 +23,13 @@ static DICTATE: std::sync::Mutex<Option<Session>> = std::sync::Mutex::new(None);
 
 fn speech_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("speech")];
+    // A packaged build installs the engine under <prefix>/share/lineapp/speech.
+    // The Flatpak prefix is /app. A development binary has no such directory.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(prefix) = exe.parent().and_then(|dir| dir.parent()) {
+            dirs.push(prefix.join("share").join("lineapp").join("speech"));
+        }
+    }
     if let Some(data) = dirs::data_dir() {
         dirs.push(data.join("lineapp").join("speech"));
     }

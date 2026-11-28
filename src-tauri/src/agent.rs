@@ -1,11 +1,14 @@
 //! Local agent. The user picks an OpenAI-compatible, Anthropic, or Gemini endpoint.
 //! Tools only read chats and messages already stored in the SQLite database.
 
+use std::io::{BufRead, BufReader};
 use std::time::Duration;
 
 use rusqlite::{params, Connection};
 use serde_json::{json, Value as Json};
 use url::Url;
+
+use tauri::Emitter;
 
 use crate::line;
 use crate::store;
@@ -20,7 +23,7 @@ pub(crate) struct TurnIn {
     content: String,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AgentSettings {
     endpoint: String,
@@ -38,6 +41,28 @@ pub(crate) struct AgentSettings {
     thinking: String,
     #[serde(default)]
     extra: String,
+    #[serde(default = "default_stream")]
+    stream: bool,
+    #[serde(default)]
+    auto_context: String,
+    #[serde(default)]
+    reply_temperature: String,
+    #[serde(default)]
+    reply_top_p: String,
+    #[serde(default)]
+    reply_max_tokens: String,
+    #[serde(default = "default_reply_thinking")]
+    reply_thinking: String,
+    #[serde(default)]
+    reply_extra: String,
+}
+
+fn default_reply_thinking() -> String {
+    "off".to_string()
+}
+
+fn default_stream() -> bool {
+    true
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -64,6 +89,7 @@ struct Knobs {
     max_tokens: Option<u64>,
     thinking: Thinking,
     extra: Json,
+    stream: bool,
 }
 
 struct Step {
@@ -72,7 +98,9 @@ struct Step {
     assistant: Json,
 }
 
-const SYSTEM: &str = "You are the assistant inside a LINE desktop app. Answer questions about chats saved in the local database on this computer. Use the tools to look up chats and messages. The database keeps only recent messages for each chat. Do not invent messages, names, or times. If a tool returns nothing, say that. You cannot send, delete, or change messages. Reply in the same language as the user's question.";
+const SYSTEM: &str = "You are the assistant inside a LINE desktop app. Answer questions about chats saved in the local database on this computer. Use the tools to look up chats and messages. When the user asks for the latest or recent messages in a chat, call latest_messages once with that chat's name, then answer. The database keeps only recent messages for each chat. Do not invent messages, names, or times. If a tool returns nothing, say that. You cannot send, delete, or change messages. Reply in the same language as the user's question.";
+
+const ANSWER_NOW: &str = "Answer the user's last question now from the tool results above. Do not call tools.";
 
 #[derive(serde::Serialize)]
 pub(crate) struct AgentAnswer {
@@ -81,16 +109,16 @@ pub(crate) struct AgentAnswer {
 }
 
 struct Tool {
-    name: &'static str,
-    description: &'static str,
+    name: String,
+    description: String,
     schema: Json,
 }
 
 fn tools() -> Vec<Tool> {
     vec![
         Tool {
-            name: "search_conversations",
-            description: "Search saved conversations by chat name or by message text. Use this to find where something was said.",
+            name: "search_conversations".into(),
+            description: "Search saved conversations by chat name or by message text. Use this to find where something was said.".into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -101,8 +129,8 @@ fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
-            name: "get_messages",
-            description: "Retrieve messages saved for one chat. Pass a chat id, or the display name of a person or group.",
+            name: "get_messages".into(),
+            description: "Retrieve messages saved for one chat. Pass a chat id, or the display name of a person or group.".into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -113,8 +141,20 @@ fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
-            name: "list_chats",
-            description: "List saved chats with a person or a group. Filter by kind and an optional name.",
+            name: "latest_messages".into(),
+            description: "Read the newest messages in one chat. Use this once when the user asks for the latest, recent, or last messages, or for a summary of a named chat. Then answer without calling another tool.".into(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "chat": { "type": "string", "description": "Chat id, or the name of a person or group." },
+                    "count": { "type": "integer", "description": "How many of the newest messages to return, from 1 to 40. Defaults to 12." }
+                },
+                "required": ["chat"]
+            }),
+        },
+        Tool {
+            name: "list_chats".into(),
+            description: "List saved chats with a person or a group. Filter by kind and an optional name.".into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -127,10 +167,9 @@ fn tools() -> Vec<Tool> {
     ]
 }
 
-fn openai_tools() -> Json {
+fn openai_tools(tools: &[Tool]) -> Json {
     Json::Array(
-        tools()
-            .into_iter()
+        tools.iter()
             .map(|tool| {
                 json!({
                     "type": "function",
@@ -149,7 +188,7 @@ fn settings_file() -> std::path::PathBuf {
     line::config_path().with_file_name("lineapp.settings.json")
 }
 
-fn load_object() -> Result<Json, String> {
+pub(crate) fn load_object() -> Result<Json, String> {
     let path = settings_file();
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Ok(json!({}));
@@ -168,7 +207,7 @@ fn string_field(value: &Json, key: &str) -> String {
     value.get(key).and_then(|item| item.as_str()).unwrap_or("").trim().to_string()
 }
 
-fn write_object(value: &Json) -> Result<(), String> {
+pub(crate) fn write_object(value: &Json) -> Result<(), String> {
     let path = settings_file();
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -263,6 +302,14 @@ fn check_optional_tokens(raw: &str) -> Result<String, String> {
     Ok(text.to_string())
 }
 
+fn check_auto_context(raw: &str) -> Result<String, String> {
+    let text = raw.trim();
+    if text.len() > 4000 {
+        return Err("That auto reply context is too long.".to_string());
+    }
+    Ok(text.to_string())
+}
+
 fn check_extra(raw: &str) -> Result<String, String> {
     let text = raw.trim();
     if text.is_empty() {
@@ -286,6 +333,14 @@ fn stored_protocol(value: &Json) -> String {
     }
 }
 
+fn stored_stream(value: &Json) -> bool {
+    match value.get("agentStream") {
+        Some(Json::Bool(on)) => *on,
+        Some(Json::String(text)) => !text.eq_ignore_ascii_case("false"),
+        _ => true,
+    }
+}
+
 fn stored_thinking(value: &Json) -> String {
     match string_field(value, "agentThinking").as_str() {
         "off" => "off".to_string(),
@@ -293,6 +348,17 @@ fn stored_thinking(value: &Json) -> String {
         "medium" => "medium".to_string(),
         "high" => "high".to_string(),
         _ => "default".to_string(),
+    }
+}
+
+fn stored_reply_thinking(value: &Json) -> String {
+    match string_field(value, "agentReplyThinking").as_str() {
+        "default" => "default".to_string(),
+        "low" => "low".to_string(),
+        "medium" => "medium".to_string(),
+        "high" => "high".to_string(),
+        "off" => "off".to_string(),
+        _ => "off".to_string(),
     }
 }
 
@@ -309,6 +375,13 @@ pub fn get_agent_settings() -> Result<AgentSettings, String> {
         max_tokens: string_field(&value, "agentMaxTokens"),
         thinking: stored_thinking(&value),
         extra: string_field(&value, "agentExtra"),
+        stream: stored_stream(&value),
+        auto_context: string_field(&value, "agentAutoContext"),
+        reply_temperature: string_field(&value, "agentReplyTemperature"),
+        reply_top_p: string_field(&value, "agentReplyTopP"),
+        reply_max_tokens: string_field(&value, "agentReplyMaxTokens"),
+        reply_thinking: stored_reply_thinking(&value),
+        reply_extra: string_field(&value, "agentReplyExtra"),
     })
 }
 
@@ -336,17 +409,386 @@ pub fn set_agent_settings(settings: AgentSettings) -> Result<(), String> {
     object.insert("agentMaxTokens".to_string(), Json::String(max_tokens));
     object.insert("agentThinking".to_string(), Json::String(thinking));
     object.insert("agentExtra".to_string(), Json::String(extra));
+    object.insert("agentStream".to_string(), Json::Bool(settings.stream));
+    write_object(&value)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReplySettings {
+    temperature: String,
+    top_p: String,
+    max_tokens: String,
+    thinking: String,
+    extra: String,
+    auto_context: String,
+}
+
+fn check_reply_thinking(raw: &str) -> Result<String, String> {
+    match raw.trim() {
+        "" | "off" => Ok("off".to_string()),
+        "default" => Ok("default".to_string()),
+        "low" => Ok("low".to_string()),
+        "medium" => Ok("medium".to_string()),
+        "high" => Ok("high".to_string()),
+        _ => Err("Choose a thinking level.".to_string()),
+    }
+}
+
+#[tauri::command]
+pub fn set_reply_settings(settings: ReplySettings) -> Result<(), String> {
+    let temperature = check_optional_number(&settings.temperature, 0.0, 2.0)?;
+    let top_p = check_optional_number(&settings.top_p, 0.0, 1.0)?;
+    let max_tokens = check_optional_tokens(&settings.max_tokens)?;
+    let thinking = check_reply_thinking(&settings.thinking)?;
+    let extra = check_extra(&settings.extra)?;
+    let auto_context = check_auto_context(&settings.auto_context)?;
+    let mut value = load_object()?;
+    let Some(object) = value.as_object_mut() else {
+        return Err("Could not read settings.".to_string());
+    };
+    object.insert("agentReplyTemperature".to_string(), Json::String(temperature));
+    object.insert("agentReplyTopP".to_string(), Json::String(top_p));
+    object.insert("agentReplyMaxTokens".to_string(), Json::String(max_tokens));
+    object.insert("agentReplyThinking".to_string(), Json::String(thinking));
+    object.insert("agentReplyExtra".to_string(), Json::String(extra));
+    object.insert("agentAutoContext".to_string(), Json::String(auto_context));
+    write_object(&value)
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChatLlm {
+    endpoint: String,
+    model: String,
+    api_key: String,
+    protocol: String,
+    temperature: String,
+    top_p: String,
+    max_tokens: String,
+    thinking: String,
+    extra: String,
+    context: String,
+    #[serde(default)]
+    mark_ai: bool,
+    #[serde(default)]
+    interrupt: bool,
+}
+
+fn check_chat_key(id: &str) -> Result<(), String> {
+    if id.len() > 64 || id.is_empty() || !id.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return Err("That chat cannot store model settings.".to_string());
+    }
+    Ok(())
+}
+
+fn chat_llm_map(value: &Json) -> Option<&serde_json::Map<String, Json>> {
+    value.get("chatLlm").and_then(Json::as_object)
+}
+
+fn chat_llm_from_json(value: &Json) -> ChatLlm {
+    let thinking = match string_field(value, "thinking").as_str() {
+        "default" => "default",
+        "low" => "low",
+        "medium" => "medium",
+        "high" => "high",
+        "off" => "off",
+        _ => "off",
+    };
+    let protocol = match string_field(value, "protocol").as_str() {
+        "anthropic" => "anthropic",
+        "gemini" => "gemini",
+        _ => "openai",
+    };
+    ChatLlm {
+        endpoint: string_field(value, "endpoint"),
+        model: string_field(value, "model"),
+        api_key: string_field(value, "apiKey"),
+        protocol: protocol.to_string(),
+        temperature: string_field(value, "temperature"),
+        top_p: string_field(value, "topP"),
+        max_tokens: string_field(value, "maxTokens"),
+        thinking: thinking.to_string(),
+        extra: string_field(value, "extra"),
+        context: string_field(value, "context"),
+        mark_ai: bool_field(value, "markAi"),
+        interrupt: bool_field(value, "interrupt"),
+    }
+}
+
+fn bool_field(value: &Json, key: &str) -> bool {
+    match value.get(key) {
+        Some(Json::Bool(on)) => *on,
+        Some(Json::String(text)) => text.eq_ignore_ascii_case("true"),
+        _ => false,
+    }
+}
+
+fn read_chat_llm(root: &Json, id: &str) -> Option<ChatLlm> {
+    chat_llm_map(root).and_then(|map| map.get(id)).map(chat_llm_from_json)
+}
+
+fn upsert_chat_llm(root: &mut Json, id: &str, settings: ChatLlm) {
+    let map = root.as_object_mut().expect("settings object").entry("chatLlm").or_insert_with(|| json!({}));
+    if !map.is_object() {
+        *map = json!({});
+    }
+    map.as_object_mut().expect("chat map").insert(id.to_string(), serde_json::to_value(settings).expect("chat llm"));
+}
+
+fn remove_chat_llm(root: &mut Json, id: &str) {
+    if let Some(map) = root.get_mut("chatLlm").and_then(Json::as_object_mut) {
+        map.remove(id);
+    }
+}
+
+fn chat_as_settings(chat: &ChatLlm) -> AgentSettings {
+    let thinking = if chat.thinking.trim().is_empty() { "off".to_string() } else { chat.thinking.clone() };
+    AgentSettings {
+        endpoint: chat.endpoint.clone(),
+        model: chat.model.clone(),
+        api_key: chat.api_key.clone(),
+        protocol: chat.protocol.clone(),
+        temperature: chat.temperature.clone(),
+        top_p: chat.top_p.clone(),
+        max_tokens: chat.max_tokens.clone(),
+        thinking: thinking.clone(),
+        extra: chat.extra.clone(),
+        stream: false,
+        auto_context: chat.context.clone(),
+        reply_temperature: chat.temperature.clone(),
+        reply_top_p: chat.top_p.clone(),
+        reply_max_tokens: chat.max_tokens.clone(),
+        reply_thinking: thinking,
+        reply_extra: chat.extra.clone(),
+    }
+}
+
+fn load_chat_llm(id: &str) -> Result<Option<ChatLlm>, String> {
+    if id.is_empty() {
+        return Ok(None);
+    }
+    check_chat_key(id)?;
+    let value = load_object()?;
+    Ok(read_chat_llm(&value, id))
+}
+
+fn settings_for_chat(chat_id: &str) -> Result<AgentSettings, String> {
+    if let Some(chat) = load_chat_llm(chat_id)? {
+        return Ok(chat_as_settings(&chat));
+    }
+    get_agent_settings()
+}
+
+#[tauri::command]
+pub fn get_chat_llm(id: String) -> Result<Option<ChatLlm>, String> {
+    load_chat_llm(id.trim())
+}
+
+#[tauri::command]
+pub fn set_chat_llm(id: String, settings: ChatLlm) -> Result<(), String> {
+    let id = id.trim();
+    check_chat_key(id)?;
+    let endpoint = check_endpoint(&settings.endpoint)?;
+    let model = check_model(&settings.model)?;
+    if endpoint.is_empty() || model.is_empty() {
+        return Err("Enter an endpoint and a model for this chat.".to_string());
+    }
+    let saved = ChatLlm {
+        endpoint,
+        model,
+        api_key: check_key(&settings.api_key)?,
+        protocol: check_protocol(&settings.protocol)?,
+        temperature: check_optional_number(&settings.temperature, 0.0, 2.0)?,
+        top_p: check_optional_number(&settings.top_p, 0.0, 1.0)?,
+        max_tokens: check_optional_tokens(&settings.max_tokens)?,
+        thinking: check_reply_thinking(&settings.thinking)?,
+        extra: check_extra(&settings.extra)?,
+        context: check_auto_context(&settings.context)?,
+        mark_ai: settings.mark_ai,
+        interrupt: settings.interrupt,
+    };
+    let mut value = load_object()?;
+    upsert_chat_llm(&mut value, id, saved);
     write_object(&value)
 }
 
 #[tauri::command]
-pub async fn agent_ask(messages: Vec<TurnIn>) -> Result<AgentAnswer, String> {
-    tauri::async_runtime::spawn_blocking(move || ask(messages))
+pub fn clear_chat_llm(id: String) -> Result<(), String> {
+    let id = id.trim();
+    check_chat_key(id)?;
+    let mut value = load_object()?;
+    remove_chat_llm(&mut value, id);
+    write_object(&value)
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct ComposeTurn {
+    mine: bool,
+    name: String,
+    text: String,
+}
+
+const REPLY_SYSTEM: &str = "You are replying in a LINE chat as the account owner. Write only the next message to send. No quotes, labels, or explanation. Match the language and tone of the conversation.";
+
+fn reply_transcript(messages: &[ComposeTurn]) -> String {
+    let mut lines = Vec::new();
+    let start = messages.len().saturating_sub(20);
+    for turn in &messages[start..] {
+        let text = clip(turn.text.trim(), 500);
+        if text.is_empty() {
+            continue;
+        }
+        let who = if turn.mine {
+            "You".to_string()
+        } else if turn.name.trim().is_empty() {
+            "Them".to_string()
+        } else {
+            turn.name.trim().to_string()
+        };
+        lines.push(format!("{who}: {text}"));
+    }
+    lines.join("\n")
+}
+
+fn reply_system(guidance: &str) -> String {
+    let guidance = guidance.trim();
+    if guidance.is_empty() {
+        return REPLY_SYSTEM.to_string();
+    }
+    format!("{REPLY_SYSTEM}\n\nGuidance from the user:\n{guidance}")
+}
+
+fn last_is_mine(messages: &[ComposeTurn]) -> bool {
+    messages.iter().rev().find(|turn| !turn.text.trim().is_empty()).is_none_or(|turn| turn.mine)
+}
+
+#[tauri::command]
+pub async fn agent_probe() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(probe_model).await.map_err(|err| err.to_string())?
+}
+
+fn probe_model() -> Result<(), String> {
+    let settings = get_agent_settings()?;
+    if settings.endpoint.is_empty() || settings.model.is_empty() {
+        return Err("Set the agent endpoint in Settings.".to_string());
+    }
+    let mut knobs = resolve_knobs(&settings)?;
+    knobs.stream = false;
+    knobs.thinking = Thinking::Off;
+    knobs.max_tokens = Some(16);
+    let transcript = seed_transcript(knobs.protocol, &[("user".to_string(), "Reply with ok.".to_string())]);
+    let mut body = build_request(&knobs, &transcript);
+    strip_tools(&mut body);
+    let payload = post_chat(&settings.endpoint, &settings.api_key, &body, knobs.protocol, 20)?;
+    let step = parse_reply(knobs.protocol, &payload)?;
+    if !probe_answered(knobs.protocol, &payload, &step) {
+        return Err("The endpoint returned an empty reply.".to_string());
+    }
+    Ok(())
+}
+
+/// A thinking model can spend a short probe on hidden reasoning and leave the
+/// visible text empty. That is still a response, so auto reply can be offered.
+fn probe_answered(protocol: Protocol, payload: &Json, step: &Step) -> bool {
+    if !step.text.trim().is_empty() || !step.calls.is_empty() {
+        return true;
+    }
+    match protocol {
+        Protocol::OpenAi => {
+            let message = payload.pointer("/choices/0/message");
+            filled(message.and_then(|item| item.get("reasoning"))) || filled(message.and_then(|item| item.get("reasoning_content")))
+        }
+        Protocol::Anthropic => payload.get("content").and_then(Json::as_array).is_some_and(|blocks| {
+            blocks.iter().any(|block| matches!(block.get("type").and_then(Json::as_str), Some("thinking" | "text")))
+        }),
+        Protocol::Gemini => payload
+            .pointer("/candidates/0/content/parts")
+            .and_then(Json::as_array)
+            .is_some_and(|parts| parts.iter().any(|part| part.get("text").and_then(Json::as_str).is_some_and(|text| !text.trim().is_empty()) || part.get("thought") == Some(&Json::Bool(true)))),
+    }
+}
+
+fn filled(value: Option<&Json>) -> bool {
+    value.and_then(Json::as_str).is_some_and(|text| !text.trim().is_empty())
+}
+
+#[tauri::command]
+pub async fn agent_compose(messages: Vec<ComposeTurn>, chat_id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || compose_reply(messages, &chat_id)).await.map_err(|err| err.to_string())?
+}
+
+fn compose_reply(messages: Vec<ComposeTurn>, chat_id: &str) -> Result<String, String> {
+    let transcript = reply_transcript(&messages);
+    if transcript.is_empty() || last_is_mine(&messages) {
+        return Ok(String::new());
+    }
+    let settings = settings_for_chat(chat_id)?;
+    if settings.endpoint.is_empty() || settings.model.is_empty() {
+        return Err("Set the endpoint and model for this chat.".to_string());
+    }
+    let knobs = reply_knobs(&settings)?;
+    let mut system = reply_system(&settings.auto_context);
+    let (mut links, remote) = crate::mcp::prepare();
+    let offered = mcp_tools(&remote);
+    if !offered.is_empty() {
+        system.push_str("\n\nYou may call MCP tools before writing the message. After the tools return, reply with only the next chat message.");
+    }
+    let mut transcript = match knobs.protocol {
+        Protocol::OpenAi => vec![
+            json!({ "role": "system", "content": system }),
+            json!({ "role": "user", "content": transcript }),
+        ],
+        Protocol::Anthropic => vec![json!({ "role": "user", "content": transcript })],
+        Protocol::Gemini => vec![json!({ "role": "user", "parts": [{ "text": transcript }] })],
+    };
+    let rounds = if offered.is_empty() { 0 } else { 3 };
+    for round in 0..=rounds {
+        let answering = round == rounds;
+        let use_tools: &[Tool] = if answering { &[] } else { &offered };
+        let mut body = protocol_body(&knobs, &transcript, use_tools);
+        match knobs.protocol {
+            Protocol::Anthropic => body["system"] = json!(system),
+            Protocol::Gemini => body["systemInstruction"] = json!({ "parts": [{ "text": system }] }),
+            Protocol::OpenAi => {}
+        }
+        silence_thinking(knobs.protocol, knobs.thinking, &mut body);
+        finish_body(&mut body, &knobs, use_tools);
+        let payload = post_chat(&settings.endpoint, &settings.api_key, &body, knobs.protocol, timeout_secs(knobs.thinking))?;
+        let step = parse_reply(knobs.protocol, &payload)?;
+        if answering || step.calls.is_empty() {
+            let text = clip(step.text.trim(), 2000);
+            if text.is_empty() {
+                return Err("The model returned only its thinking and no message. Turn thinking off in Auto reply settings.".to_string());
+            }
+            return Ok(text);
+        }
+        transcript.push(step.assistant);
+        let mut results = Vec::new();
+        for (_id, name, args) in &step.calls {
+            results.push(dispatch_tool(name, args, &mut links, &remote));
+        }
+        append_tool_results(knobs.protocol, &mut transcript, &step.calls, &results);
+    }
+    Err("The model returned only its thinking and no message. Turn thinking off in Auto reply settings.".to_string())
+}
+
+#[tauri::command]
+pub async fn agent_ask(app: tauri::AppHandle, messages: Vec<TurnIn>) -> Result<AgentAnswer, String> {
+    tauri::async_runtime::spawn_blocking(move || ask(&app, messages))
         .await
         .map_err(|err| err.to_string())?
 }
 
-fn ask(messages: Vec<TurnIn>) -> Result<AgentAnswer, String> {
+fn emit_agent(app: &tauri::AppHandle, payload: Json) {
+    let _ = app.emit("agent-stream", payload);
+}
+
+fn ask(app: &tauri::AppHandle, messages: Vec<TurnIn>) -> Result<AgentAnswer, String> {
+    ask_with(messages, &mut |payload| emit_agent(app, payload))
+}
+
+fn ask_with(messages: Vec<TurnIn>, emit: &mut dyn FnMut(Json)) -> Result<AgentAnswer, String> {
     let settings = get_agent_settings()?;
     if settings.endpoint.is_empty() {
         return Err("Set the agent endpoint in Settings.".to_string());
@@ -355,6 +797,12 @@ fn ask(messages: Vec<TurnIn>) -> Result<AgentAnswer, String> {
         return Err("Set the agent model in Settings.".to_string());
     }
     let knobs = resolve_knobs(&settings)?;
+    let (mut links, remote) = crate::mcp::prepare();
+    let offered = {
+        let mut combined = tools();
+        combined.extend(mcp_tools(&remote));
+        combined
+    };
     let mut kept = Vec::new();
     for turn in messages.iter().rev().filter(|turn| turn.role == "user" || turn.role == "assistant") {
         let content = clip(turn.content.trim(), TURN_CHARS);
@@ -371,26 +819,121 @@ fn ask(messages: Vec<TurnIn>) -> Result<AgentAnswer, String> {
         return Err("Write a message first.".to_string());
     }
     let mut transcript = seed_transcript(knobs.protocol, &kept);
+    if !remote.is_empty() && knobs.protocol == Protocol::OpenAi {
+        if let Some(Json::String(text)) = transcript.first_mut().and_then(|message| message.get_mut("content")) {
+            text.push_str("\n\nMCP tools from servers the user added are also available. Call one when it helps, then answer from its result.");
+        }
+    }
     let mut calls = Vec::new();
-    for _ in 0..ROUNDS {
-        let body = build_request(&knobs, &transcript);
-        let payload = post_chat(&settings.endpoint, &settings.api_key, &body, knobs.protocol, timeout_secs(knobs.thinking))?;
-        let step = parse_reply(knobs.protocol, &payload)?;
-        if step.calls.is_empty() {
+    for round in 0..=ROUNDS {
+        let answering = round == ROUNDS;
+        if answering {
+            nudge_answer(knobs.protocol, &mut transcript);
+        }
+        let use_tools: &[Tool] = if answering { &[] } else { &offered };
+        let body = request_with(&knobs, &transcript, use_tools);
+        let step = if knobs.stream {
+            let endpoint = stream_endpoint(knobs.protocol, &settings.endpoint);
+            post_stream(&endpoint, &settings.api_key, &body, knobs.protocol, timeout_secs(knobs.thinking), emit)?
+        } else {
+            let payload = post_chat(&settings.endpoint, &settings.api_key, &body, knobs.protocol, timeout_secs(knobs.thinking))?;
+            parse_reply(knobs.protocol, &payload)?
+        };
+        if answering || step.calls.is_empty() {
             if step.text.trim().is_empty() {
-                return Err("The endpoint returned an empty reply.".to_string());
+                return Err(if answering {
+                    "The agent stopped after several lookups without a reply.".to_string()
+                } else {
+                    "The endpoint returned an empty reply.".to_string()
+                });
             }
             return Ok(AgentAnswer { text: step.text.trim().to_string(), calls });
         }
         transcript.push(step.assistant);
         let mut results = Vec::new();
         for (_id, name, args) in &step.calls {
-            calls.push(name.clone());
-            results.push(run_tool(name, args));
+            calls.push(crate::mcp::chip_name(&remote, name).unwrap_or_else(|| name.clone()));
+            results.push(dispatch_tool(name, args, &mut links, &remote));
         }
         append_tool_results(knobs.protocol, &mut transcript, &step.calls, &results);
     }
     Err("The agent stopped after several lookups without a reply.".to_string())
+}
+
+fn mcp_tools(remote: &[crate::mcp::McpTool]) -> Vec<Tool> {
+    remote
+        .iter()
+        .map(|tool| {
+            let description = if tool.description.is_empty() {
+                format!("MCP tool {}.", tool.remote)
+            } else {
+                format!("{} (MCP)", tool.description)
+            };
+            Tool { name: tool.exposed.clone(), description, schema: tool.schema.clone() }
+        })
+        .collect()
+}
+
+fn dispatch_tool(name: &str, arguments: &Json, links: &mut [crate::mcp::Link], remote: &[crate::mcp::McpTool]) -> String {
+    if let Some(result) = crate::mcp::invoke(links, remote, name, arguments) {
+        return result;
+    }
+    run_tool(name, arguments)
+}
+
+fn strip_tools(body: &mut Json) {
+    if let Some(object) = body.as_object_mut() {
+        object.remove("tools");
+        object.remove("tool_choice");
+    }
+}
+
+fn nudge_answer(protocol: Protocol, messages: &mut Vec<Json>) {
+    match protocol {
+        Protocol::OpenAi => messages.push(json!({ "role": "user", "content": ANSWER_NOW })),
+        Protocol::Anthropic => {
+            if let Some(last) = messages.last_mut().filter(|message| message.get("role").and_then(|value| value.as_str()) == Some("user")) {
+                match last.get_mut("content") {
+                    Some(Json::Array(blocks)) => blocks.push(json!({ "type": "text", "text": ANSWER_NOW })),
+                    Some(Json::String(text)) => {
+                        let prior = text.clone();
+                        last["content"] = json!([{ "type": "text", "text": prior }, { "type": "text", "text": ANSWER_NOW }]);
+                    }
+                    _ => last["content"] = json!(ANSWER_NOW),
+                }
+                return;
+            }
+            messages.push(json!({ "role": "user", "content": ANSWER_NOW }));
+        }
+        Protocol::Gemini => {
+            if let Some(last) = messages.last_mut().filter(|message| message.get("role").and_then(|value| value.as_str()) == Some("user")) {
+                if let Some(parts) = last.get_mut("parts").and_then(|value| value.as_array_mut()) {
+                    parts.push(json!({ "text": ANSWER_NOW }));
+                    return;
+                }
+            }
+            messages.push(json!({ "role": "user", "parts": [{ "text": ANSWER_NOW }] }));
+        }
+    }
+}
+
+fn reply_knobs(settings: &AgentSettings) -> Result<Knobs, String> {
+    let mut shaped = settings.clone();
+    shaped.temperature = settings.reply_temperature.clone();
+    shaped.top_p = settings.reply_top_p.clone();
+    shaped.max_tokens = settings.reply_max_tokens.clone();
+    shaped.thinking = if settings.reply_thinking.trim().is_empty() { "off".to_string() } else { settings.reply_thinking.clone() };
+    shaped.extra = settings.reply_extra.clone();
+    shaped.stream = false;
+    resolve_knobs(&shaped)
+}
+
+/// Ollama keeps thinking on qwen unless the request says so. Off for an auto
+/// reply means the visible text is the message, not a hidden reasoning trace.
+fn silence_thinking(protocol: Protocol, thinking: Thinking, body: &mut Json) {
+    if thinking == Thinking::Off && protocol == Protocol::OpenAi {
+        body["think"] = json!(false);
+    }
 }
 
 fn resolve_knobs(settings: &AgentSettings) -> Result<Knobs, String> {
@@ -425,6 +968,7 @@ fn resolve_knobs(settings: &AgentSettings) -> Result<Knobs, String> {
         max_tokens: optional_tokens(&settings.max_tokens)?,
         thinking,
         extra,
+        stream: settings.stream,
     })
 }
 
@@ -481,20 +1025,83 @@ fn encode_turn(protocol: Protocol, role: &str, content: &str) -> Json {
 }
 
 fn build_request(knobs: &Knobs, messages: &[Json]) -> Json {
-    let mut body = match knobs.protocol {
-        Protocol::OpenAi => openai_body(knobs, messages),
-        Protocol::Anthropic => anthropic_body(knobs, messages),
-        Protocol::Gemini => gemini_body(knobs, messages),
-    };
-    deep_merge(&mut body, &knobs.extra);
+    request_with(knobs, messages, &tools())
+}
+
+fn request_with(knobs: &Knobs, messages: &[Json], tools: &[Tool]) -> Json {
+    let mut body = protocol_body(knobs, messages, tools);
+    finish_body(&mut body, knobs, tools);
     body
 }
 
-fn openai_body(knobs: &Knobs, messages: &[Json]) -> Json {
+fn protocol_body(knobs: &Knobs, messages: &[Json], tools: &[Tool]) -> Json {
+    match knobs.protocol {
+        Protocol::OpenAi => openai_body(knobs, messages, tools),
+        Protocol::Anthropic => anthropic_body(knobs, messages, tools),
+        Protocol::Gemini => gemini_body(knobs, messages, tools),
+    }
+}
+
+fn finish_body(body: &mut Json, knobs: &Knobs, tools: &[Tool]) {
+    deep_merge(body, &knobs.extra);
+    if tools.is_empty() {
+        strip_tools(body);
+    } else {
+        attach_tools(body, knobs.protocol, tools);
+    }
+    if knobs.protocol != Protocol::Gemini {
+        if knobs.stream {
+            body["stream"] = json!(true);
+        } else if let Some(object) = body.as_object_mut() {
+            object.remove("stream");
+        }
+    }
+}
+
+fn attach_tools(body: &mut Json, protocol: Protocol, tools: &[Tool]) {
+    match protocol {
+        Protocol::OpenAi => {
+            body["tools"] = openai_tools(tools);
+            body["tool_choice"] = json!("auto");
+        }
+        Protocol::Anthropic => {
+            body["tools"] = anthropic_tools(tools);
+        }
+        Protocol::Gemini => {
+            body["tools"] = gemini_tools(tools);
+        }
+    }
+}
+
+fn system_text(tools: &[Tool]) -> String {
+    if tools.iter().any(|tool| tool.name.starts_with("mcp")) {
+        format!("{SYSTEM}\n\nMCP tools from servers the user added are also available. Call one when it helps, then answer from its result.")
+    } else {
+        SYSTEM.to_string()
+    }
+}
+
+fn stream_endpoint(protocol: Protocol, endpoint: &str) -> String {
+    if protocol != Protocol::Gemini {
+        return endpoint.to_string();
+    }
+    let mut url = if endpoint.contains(":streamGenerateContent") {
+        endpoint.to_string()
+    } else {
+        endpoint.replacen(":generateContent", ":streamGenerateContent", 1)
+    };
+    if !url.contains("alt=sse") {
+        url.push(if url.contains('?') { '&' } else { '?' });
+        url.push_str("alt=sse");
+    }
+    url
+}
+
+fn openai_body(knobs: &Knobs, messages: &[Json], tools: &[Tool]) -> Json {
     let mut body = json!({
         "model": knobs.model,
         "messages": messages,
-        "tools": openai_tools(),
+        "tools": openai_tools(tools),
         "tool_choice": "auto",
     });
     if let Some(value) = knobs.temperature {
@@ -516,7 +1123,7 @@ fn openai_body(knobs: &Knobs, messages: &[Json]) -> Json {
     body
 }
 
-fn anthropic_body(knobs: &Knobs, messages: &[Json]) -> Json {
+fn anthropic_body(knobs: &Knobs, messages: &[Json], tools: &[Tool]) -> Json {
     let thinking_on = thinking_name(knobs.thinking).is_some();
     let budget = thinking_budget(knobs.thinking);
     let mut max_tokens = knobs.max_tokens.unwrap_or(4096);
@@ -528,9 +1135,9 @@ fn anthropic_body(knobs: &Knobs, messages: &[Json]) -> Json {
     let mut body = json!({
         "model": knobs.model,
         "max_tokens": max_tokens,
-        "system": SYSTEM,
+        "system": system_text(tools),
         "messages": messages,
-        "tools": anthropic_tools(),
+        "tools": anthropic_tools(tools),
     });
     if let Some(value) = knobs.temperature {
         if !thinking_on {
@@ -546,11 +1153,11 @@ fn anthropic_body(knobs: &Knobs, messages: &[Json]) -> Json {
     body
 }
 
-fn gemini_body(knobs: &Knobs, messages: &[Json]) -> Json {
+fn gemini_body(knobs: &Knobs, messages: &[Json], tools: &[Tool]) -> Json {
     let mut body = json!({
-        "systemInstruction": { "parts": [{ "text": SYSTEM }] },
+        "systemInstruction": { "parts": [{ "text": system_text(tools) }] },
         "contents": messages,
-        "tools": gemini_tools(),
+        "tools": gemini_tools(tools),
     });
     let mut generation = json!({});
     if let Some(value) = knobs.temperature {
@@ -593,10 +1200,10 @@ fn thinking_budget(thinking: Thinking) -> Option<u64> {
     }
 }
 
-fn anthropic_tools() -> Json {
+fn anthropic_tools(tools: &[Tool]) -> Json {
     Json::Array(
-        tools()
-            .into_iter()
+        tools
+            .iter()
             .map(|tool| {
                 json!({
                     "name": tool.name,
@@ -608,9 +1215,9 @@ fn anthropic_tools() -> Json {
     )
 }
 
-fn gemini_tools() -> Json {
+fn gemini_tools(tools: &[Tool]) -> Json {
     json!([{
-        "functionDeclarations": tools().into_iter().map(|tool| json!({
+        "functionDeclarations": tools.iter().map(|tool| json!({
             "name": tool.name,
             "description": tool.description,
             "parameters": tool.schema,
@@ -778,6 +1385,436 @@ fn content_text(content: &Json) -> String {
     }
 }
 
+struct OpenAiTool {
+    id: String,
+    name: String,
+    args: String,
+    announced: bool,
+}
+
+struct AnthropicBlock {
+    kind: String,
+    id: String,
+    name: String,
+    text: String,
+    signature: String,
+    announced: bool,
+}
+
+struct StreamFold {
+    protocol: Protocol,
+    text: String,
+    openai_tools: Vec<OpenAiTool>,
+    anthropic: Vec<AnthropicBlock>,
+    gemini_parts: Vec<Json>,
+    error: Option<String>,
+}
+
+fn post_stream(endpoint: &str, key: &str, body: &Json, protocol: Protocol, timeout: u64, emit: &mut dyn FnMut(Json)) -> Result<Step, String> {
+    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(timeout)).redirects(0).build();
+    let mut request = agent.post(endpoint).set("Content-Type", "application/json").set("Accept", "text/event-stream, application/json");
+    if protocol == Protocol::Anthropic {
+        request = request.set("anthropic-version", "2023-06-01");
+    }
+    if !key.is_empty() {
+        request = match protocol {
+            Protocol::OpenAi => request.set("Authorization", &format!("Bearer {key}")),
+            Protocol::Anthropic => request.set("x-api-key", key),
+            Protocol::Gemini => request.set("x-goog-api-key", key),
+        };
+    }
+    let bytes = serde_json::to_vec(body).map_err(|err| err.to_string())?;
+    let response = match request.send_bytes(&bytes) {
+        Ok(response) => response,
+        Err(ureq::Error::Status(code, response)) => {
+            let text = response.into_string().unwrap_or_default();
+            return Err(http_failure(code, &text));
+        }
+        Err(_) => return Err("The endpoint did not answer.".to_string()),
+    };
+    let mut reader = BufReader::new(response.into_reader());
+    let mut line = String::new();
+    let mut fold = StreamFold::new(protocol);
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line).map_err(|_| "The endpoint returned data this app could not read.".to_string())?;
+        if read == 0 {
+            break;
+        }
+        let (delta, names) = fold.accept(&line);
+        if !delta.is_empty() {
+            emit(json!({ "type": "text", "text": delta }));
+        }
+        for name in names {
+            emit(json!({ "type": "call", "name": name }));
+        }
+    }
+    fold.finish()
+}
+
+impl StreamFold {
+    fn new(protocol: Protocol) -> Self {
+        Self {
+            protocol,
+            text: String::new(),
+            openai_tools: Vec::new(),
+            anthropic: Vec::new(),
+            gemini_parts: Vec::new(),
+            error: None,
+        }
+    }
+
+    fn accept(&mut self, line: &str) -> (String, Vec<String>) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with(':') || trimmed.starts_with("event:") {
+            return (String::new(), Vec::new());
+        }
+        let payload = trimmed.strip_prefix("data:").map(str::trim).unwrap_or(trimmed);
+        if payload.is_empty() || payload == "[DONE]" {
+            return (String::new(), Vec::new());
+        }
+        let Ok(value) = serde_json::from_str::<Json>(payload) else {
+            return (String::new(), Vec::new());
+        };
+        self.consume(value)
+    }
+
+    fn consume(&mut self, value: Json) -> (String, Vec<String>) {
+        match self.protocol {
+            Protocol::OpenAi => self.consume_openai(value),
+            Protocol::Anthropic => self.consume_anthropic(value),
+            Protocol::Gemini => self.consume_gemini(value),
+        }
+    }
+
+    fn note_error(&mut self, message: &str) {
+        let message = message.trim();
+        if !message.is_empty() && self.error.is_none() {
+            self.error = Some(clip(message, 300));
+        }
+    }
+
+    fn consume_openai(&mut self, value: Json) -> (String, Vec<String>) {
+        if value.get("choices").is_none() {
+            if let Some(message) = value.pointer("/error/message").and_then(|item| item.as_str()) {
+                self.note_error(message);
+            }
+        }
+        if value.pointer("/choices/0/message").is_some() {
+            return self.consume_openai_message(value);
+        }
+        let Some(delta) = value.pointer("/choices/0/delta").cloned() else {
+            return (String::new(), Vec::new());
+        };
+        let mut shown = String::new();
+        if let Some(piece) = delta.get("content") {
+            shown = self.push_visible(&content_text(piece));
+        }
+        let mut names = Vec::new();
+        let listed = delta.get("tool_calls").and_then(|item| item.as_array()).cloned().unwrap_or_default();
+        for call in listed {
+            let index = call.get("index").and_then(|item| item.as_u64()).unwrap_or(self.openai_tools.len() as u64) as usize;
+            while self.openai_tools.len() <= index {
+                self.openai_tools.push(OpenAiTool { id: String::new(), name: String::new(), args: String::new(), announced: false });
+            }
+            let tool = &mut self.openai_tools[index];
+            if let Some(id) = call.get("id").and_then(|item| item.as_str()).filter(|id| !id.is_empty()) {
+                tool.id = id.to_string();
+            }
+            if let Some(name) = call.pointer("/function/name").and_then(|item| item.as_str()).filter(|name| !name.is_empty()) {
+                tool.name = name.to_string();
+            }
+            if let Some(arguments) = call.pointer("/function/arguments") {
+                match arguments {
+                    Json::String(text) => tool.args.push_str(text),
+                    Json::Null => {}
+                    other => tool.args.push_str(&other.to_string()),
+                }
+            }
+            if !tool.announced && !tool.name.is_empty() {
+                tool.announced = true;
+                names.push(tool.name.clone());
+            }
+        }
+        (shown, names)
+    }
+
+    fn consume_openai_message(&mut self, value: Json) -> (String, Vec<String>) {
+        let Some(message) = value.pointer("/choices/0/message").cloned() else {
+            return (String::new(), Vec::new());
+        };
+        let shown = self.push_visible(&content_text(message.get("content").unwrap_or(&Json::Null)));
+        let mut names = Vec::new();
+        for call in message.get("tool_calls").and_then(|item| item.as_array()).cloned().unwrap_or_default() {
+            let name = call.pointer("/function/name").and_then(|item| item.as_str()).unwrap_or("").to_string();
+            let args = match call.pointer("/function/arguments") {
+                Some(Json::String(text)) => text.clone(),
+                Some(Json::Null) | None => String::new(),
+                Some(other) => other.to_string(),
+            };
+            let announced = name.is_empty();
+            if !announced {
+                names.push(name.clone());
+            }
+            self.openai_tools.push(OpenAiTool {
+                id: call.get("id").and_then(|item| item.as_str()).unwrap_or("").to_string(),
+                name,
+                args,
+                announced: !announced,
+            });
+        }
+        (shown, names)
+    }
+
+    fn consume_anthropic(&mut self, value: Json) -> (String, Vec<String>) {
+        if value.get("type").and_then(|item| item.as_str()) == Some("error") {
+            if let Some(message) = value.pointer("/error/message").and_then(|item| item.as_str()) {
+                self.note_error(message);
+            }
+            return (String::new(), Vec::new());
+        }
+        let whole_message = value.get("type").and_then(|item| item.as_str()) == Some("message") || (value.get("content").is_some_and(|item| item.is_array()) && value.get("role").is_some());
+        if whole_message {
+            return self.consume_anthropic_message(&value);
+        }
+        let kind = value.get("type").and_then(|item| item.as_str()).unwrap_or("");
+        if kind == "content_block_start" {
+            let index = value.get("index").and_then(|item| item.as_u64()).unwrap_or(self.anthropic.len() as u64) as usize;
+            let block = self.anthropic_block(index);
+            let content = value.get("content_block").cloned().unwrap_or_else(|| json!({}));
+            block.kind = content.get("type").and_then(|item| item.as_str()).unwrap_or("").to_string();
+            block.id = content.get("id").and_then(|item| item.as_str()).unwrap_or("").to_string();
+            block.name = content.get("name").and_then(|item| item.as_str()).unwrap_or("").to_string();
+            let mut names = Vec::new();
+            if block.kind == "tool_use" && !block.name.is_empty() && !block.announced {
+                block.announced = true;
+                names.push(block.name.clone());
+            }
+            return (String::new(), names);
+        }
+        if kind == "content_block_delta" {
+            let index = value.get("index").and_then(|item| item.as_u64()).unwrap_or(0) as usize;
+            let block = self.anthropic_block(index);
+            let delta = value.get("delta").cloned().unwrap_or_else(|| json!({}));
+            let delta_type = delta.get("type").and_then(|item| item.as_str()).unwrap_or("");
+            return match delta_type {
+                "text_delta" => {
+                    if block.kind.is_empty() {
+                        block.kind = "text".to_string();
+                    }
+                    let piece = delta.get("text").and_then(|item| item.as_str()).unwrap_or("");
+                    block.text.push_str(piece);
+                    (self.push_visible(piece), Vec::new())
+                }
+                "thinking_delta" => {
+                    if block.kind.is_empty() {
+                        block.kind = "thinking".to_string();
+                    }
+                    block.text.push_str(delta.get("thinking").and_then(|item| item.as_str()).unwrap_or(""));
+                    (String::new(), Vec::new())
+                }
+                "signature_delta" => {
+                    block.signature.push_str(delta.get("signature").and_then(|item| item.as_str()).unwrap_or(""));
+                    (String::new(), Vec::new())
+                }
+                "input_json_delta" => {
+                    if block.kind.is_empty() {
+                        block.kind = "tool_use".to_string();
+                    }
+                    block.text.push_str(delta.get("partial_json").and_then(|item| item.as_str()).unwrap_or(""));
+                    (String::new(), Vec::new())
+                }
+                _ => (String::new(), Vec::new()),
+            };
+        }
+        (String::new(), Vec::new())
+    }
+
+    fn consume_anthropic_message(&mut self, value: &Json) -> (String, Vec<String>) {
+        let content = value.get("content").cloned().unwrap_or(Json::Null);
+        let mut blocks = match content {
+            Json::String(text) => vec![json!({ "type": "text", "text": text })],
+            Json::Array(items) => items,
+            _ => Vec::new(),
+        };
+        let mut shown = String::new();
+        let mut names = Vec::new();
+        for block in &mut blocks {
+            let kind = block.get("type").and_then(|item| item.as_str()).unwrap_or("").to_string();
+            let id = block.get("id").and_then(|item| item.as_str()).unwrap_or("").to_string();
+            let name = block.get("name").and_then(|item| item.as_str()).unwrap_or("").to_string();
+            let text = match kind.as_str() {
+                "text" => block.get("text").and_then(|item| item.as_str()).unwrap_or("").to_string(),
+                "thinking" => block.get("thinking").and_then(|item| item.as_str()).unwrap_or("").to_string(),
+                "tool_use" => block.get("input").map(|item| item.to_string()).unwrap_or_default(),
+                _ => String::new(),
+            };
+            if kind == "text" {
+                shown.push_str(&self.push_visible(&text));
+            }
+            if kind == "tool_use" && !name.is_empty() {
+                names.push(name.clone());
+            }
+            self.anthropic.push(AnthropicBlock {
+                kind,
+                id,
+                name,
+                text,
+                signature: block.get("signature").and_then(|item| item.as_str()).unwrap_or("").to_string(),
+                announced: true,
+            });
+        }
+        (shown, names)
+    }
+
+    fn anthropic_block(&mut self, index: usize) -> &mut AnthropicBlock {
+        while self.anthropic.len() <= index {
+            self.anthropic.push(AnthropicBlock {
+                kind: String::new(),
+                id: String::new(),
+                name: String::new(),
+                text: String::new(),
+                signature: String::new(),
+                announced: false,
+            });
+        }
+        &mut self.anthropic[index]
+    }
+
+    fn consume_gemini(&mut self, value: Json) -> (String, Vec<String>) {
+        if value.get("candidates").is_none() {
+            if let Some(message) = value.pointer("/error/message").and_then(|item| item.as_str()) {
+                self.note_error(message);
+            }
+        }
+        let parts = value.pointer("/candidates/0/content/parts").and_then(|item| item.as_array()).cloned().unwrap_or_default();
+        let mut shown = String::new();
+        let mut names = Vec::new();
+        for part in parts {
+            if part.get("thought").and_then(|item| item.as_bool()).unwrap_or(false) {
+                self.gemini_parts.push(part);
+                continue;
+            }
+            if let Some(piece) = part.get("text").and_then(|item| item.as_str()) {
+                shown.push_str(&self.push_visible(piece));
+                self.push_gemini_text(piece);
+            }
+            if let Some(call) = part.get("functionCall") {
+                let name = call.get("name").and_then(|item| item.as_str()).unwrap_or("").to_string();
+                if !name.is_empty() {
+                    names.push(name);
+                }
+                self.gemini_parts.push(part);
+            }
+        }
+        (shown, names)
+    }
+
+    fn push_gemini_text(&mut self, piece: &str) {
+        if let Some(last) = self.gemini_parts.last_mut() {
+            let thought = last.get("thought").and_then(|item| item.as_bool()).unwrap_or(false);
+            if !thought && last.get("functionCall").is_none() && last.get("text").is_some() {
+                let current = last.get("text").and_then(|item| item.as_str()).unwrap_or("").to_string();
+                last["text"] = json!(format!("{current}{piece}"));
+                return;
+            }
+        }
+        self.gemini_parts.push(json!({ "text": piece }));
+    }
+
+    fn push_visible(&mut self, piece: &str) -> String {
+        if piece.is_empty() {
+            return String::new();
+        }
+        self.text.push_str(piece);
+        piece.to_string()
+    }
+
+    fn finish(self) -> Result<Step, String> {
+        let error = self.error.clone();
+        let step = match self.protocol {
+            Protocol::OpenAi => self.finish_openai(),
+            Protocol::Anthropic => self.finish_anthropic(),
+            Protocol::Gemini => self.finish_gemini(),
+        };
+        if step.calls.is_empty() && step.text.trim().is_empty() {
+            if let Some(message) = error {
+                return Err(message);
+            }
+        }
+        Ok(step)
+    }
+
+    fn finish_openai(self) -> Step {
+        let mut message = json!({ "role": "assistant", "content": self.text });
+        let mut calls = Vec::new();
+        if !self.openai_tools.is_empty() {
+            let mut listed = Vec::new();
+            for (index, tool) in self.openai_tools.iter().enumerate() {
+                if tool.name.is_empty() {
+                    continue;
+                }
+                let id = if tool.id.is_empty() { format!("call-{}", index + 1) } else { tool.id.clone() };
+                listed.push(json!({
+                    "id": id,
+                    "type": "function",
+                    "function": { "name": tool.name, "arguments": tool.args },
+                }));
+                calls.push((id, tool.name.clone(), Json::String(tool.args.clone())));
+            }
+            if !listed.is_empty() {
+                message["tool_calls"] = Json::Array(listed);
+            }
+        }
+        Step { text: self.text, calls, assistant: message }
+    }
+
+    fn finish_anthropic(self) -> Step {
+        let mut blocks = Vec::new();
+        let mut calls = Vec::new();
+        let mut text = String::new();
+        for (index, block) in self.anthropic.iter().enumerate() {
+            match block.kind.as_str() {
+                "text" => {
+                    push_text(&mut text, &block.text);
+                    blocks.push(json!({ "type": "text", "text": block.text }));
+                }
+                "thinking" => {
+                    let mut saved = json!({ "type": "thinking", "thinking": block.text });
+                    if !block.signature.is_empty() {
+                        saved["signature"] = json!(block.signature);
+                    }
+                    blocks.push(saved);
+                }
+                "tool_use" => {
+                    let id = if block.id.is_empty() { format!("call-{}", index + 1) } else { block.id.clone() };
+                    let input = serde_json::from_str::<Json>(&block.text).ok().filter(|value| value.is_object()).unwrap_or_else(|| json!({}));
+                    blocks.push(json!({ "type": "tool_use", "id": id, "name": block.name, "input": input }));
+                    calls.push((id, block.name.clone(), input));
+                }
+                _ => {}
+            }
+        }
+        Step { text, calls, assistant: json!({ "role": "assistant", "content": blocks }) }
+    }
+
+    fn finish_gemini(self) -> Step {
+        let mut calls = Vec::new();
+        for part in &self.gemini_parts {
+            if part.get("thought").and_then(|item| item.as_bool()).unwrap_or(false) {
+                continue;
+            }
+            if let Some(call) = part.get("functionCall") {
+                let name = call.get("name").and_then(|item| item.as_str()).unwrap_or("").to_string();
+                let args = call.get("args").cloned().unwrap_or_else(|| json!({}));
+                calls.push((format!("call-{}", calls.len() + 1), name, args));
+            }
+        }
+        let assistant = json!({ "role": "model", "parts": self.gemini_parts });
+        Step { text: self.text, calls, assistant }
+    }
+}
+
 fn post_chat(endpoint: &str, key: &str, body: &Json, protocol: Protocol, timeout: u64) -> Result<Json, String> {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(timeout)).redirects(0).build();
     let mut request = agent.post(endpoint).set("Content-Type", "application/json").set("Accept", "application/json");
@@ -836,6 +1873,7 @@ fn call_tool(conn: &Connection, name: &str, args: &Json) -> Json {
     match name {
         "search_conversations" => search_conversations(conn, args),
         "get_messages" => get_messages(conn, args),
+        "latest_messages" => latest_messages(conn, args),
         "list_chats" => list_chats(conn, args),
         _ => json!({ "error": "Unknown tool." }),
     }
@@ -846,7 +1884,11 @@ fn field(args: &Json, key: &str) -> String {
 }
 
 fn limit_field(args: &Json, default: usize, max: usize) -> usize {
-    let Some(raw) = args.get("limit") else {
+    limit_named(args, "limit", default, max)
+}
+
+fn limit_named(args: &Json, key: &str, default: usize, max: usize) -> usize {
+    let Some(raw) = args.get(key) else {
         return default;
     };
     let parsed = raw
@@ -1070,6 +2112,19 @@ fn speaker(mine: bool, name: &str) -> String {
     }
 }
 
+fn latest_messages(conn: &Connection, args: &Json) -> Json {
+    let count = limit_named(args, "count", 12, 40);
+    let mut forwarded = args.clone();
+    if let Some(object) = forwarded.as_object_mut() {
+        object.insert("limit".to_string(), json!(count));
+    }
+    let mut value = get_messages(conn, &forwarded);
+    if value.get("messages").is_some() {
+        value["note"] = json!("These are the newest messages. Answer the user from them and do not call another tool.");
+    }
+    value
+}
+
 fn get_messages(conn: &Connection, args: &Json) -> Json {
     let chat = field(args, "chat");
     if chat.is_empty() {
@@ -1229,11 +2284,28 @@ mod tests {
 
     #[test]
     fn tools_are_named_and_described() {
-        let names: Vec<_> = tools().into_iter().map(|tool| tool.name).collect();
-        assert_eq!(names, ["search_conversations", "get_messages", "list_chats"]);
-        let exported = openai_tools();
-        assert_eq!(exported.as_array().unwrap().len(), 3);
+        let local = tools();
+        let names: Vec<_> = local.iter().map(|tool| tool.name.as_str()).collect();
+        assert_eq!(names, ["search_conversations", "get_messages", "latest_messages", "list_chats"]);
+        let exported = openai_tools(&local);
+        assert_eq!(exported.as_array().unwrap().len(), 4);
         assert_eq!(exported[0]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn an_mcp_tool_is_offered_beside_the_local_tools() {
+        let mut offered = tools();
+        offered.push(Tool {
+            name: "mcp0_ping".into(),
+            description: "Ping a server. (MCP)".into(),
+            schema: json!({ "type": "object", "properties": {} }),
+        });
+        let body = request_with(&knobs(Protocol::OpenAi), &hi(Protocol::OpenAi), &offered);
+        let names: Vec<_> = body["tools"].as_array().unwrap().iter().map(|tool| tool["function"]["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"search_conversations"));
+        assert!(names.contains(&"mcp0_ping"));
+        let anthropic = request_with(&knobs(Protocol::Anthropic), &hi(Protocol::Anthropic), &offered);
+        assert!(anthropic["system"].as_str().unwrap().contains("MCP tools"));
     }
 
     #[test]
@@ -1288,6 +2360,118 @@ mod tests {
     }
 
     #[test]
+    fn latest_messages_returns_the_newest_count() {
+        let conn = db();
+        chat(&conn, "c1", "Bangkok Pool League Captains", "group", "later", 30, Some(4));
+        chat(&conn, "c2", "Bangkok Pool League", "group", "other", 20, Some(4));
+        message(&conn, "c1", "m1", false, "Ada", "first", 10, 1);
+        message(&conn, "c1", "m2", false, "Bea", "second", 20, 2);
+        message(&conn, "c1", "m3", true, "", "third", 30, 3);
+        let latest = call_tool(&conn, "latest_messages", &json!({ "chat": "captains", "count": 2 }));
+        assert_eq!(latest["chat"]["id"], "c1");
+        assert_eq!(latest["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(latest["messages"][0]["text"], "second");
+        assert_eq!(latest["messages"][1]["text"], "third");
+        assert!(latest["note"].as_str().unwrap().contains("newest"));
+        let ambiguous = call_tool(&conn, "latest_messages", &json!({ "chat": "Bangkok" }));
+        assert!(ambiguous["error"].as_str().unwrap().contains("Several"));
+    }
+
+    #[test]
+    fn final_answer_request_drops_tools_and_asks_for_the_reply() {
+        let mut body = build_request(&knobs(Protocol::OpenAi), &hi(Protocol::OpenAi));
+        body["tools"] = json!([{ "type": "function" }]);
+        body["tool_choice"] = json!("auto");
+        strip_tools(&mut body);
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+
+        let mut openai = vec![json!({ "role": "tool", "tool_call_id": "c", "content": "{}" })];
+        nudge_answer(Protocol::OpenAi, &mut openai);
+        assert_eq!(openai.last().unwrap()["content"], ANSWER_NOW);
+
+        let mut anthropic = vec![json!({ "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t", "content": "{}" }] })];
+        nudge_answer(Protocol::Anthropic, &mut anthropic);
+        assert_eq!(anthropic[0]["content"][1]["text"], ANSWER_NOW);
+
+        let mut gemini = vec![json!({ "role": "user", "parts": [{ "functionResponse": { "name": "latest_messages", "response": {} } }] })];
+        nudge_answer(Protocol::Gemini, &mut gemini);
+        assert_eq!(gemini[0]["parts"][1]["text"], ANSWER_NOW);
+    }
+
+    #[test]
+    fn auto_reply_skips_our_own_last_message_and_keeps_the_guidance() {
+        let thread = vec![
+            ComposeTurn { mine: true, name: String::new(), text: "hello".to_string() },
+            ComposeTurn { mine: false, name: "Ada".to_string(), text: "are you coming?".to_string() },
+        ];
+        assert!(!last_is_mine(&thread));
+        assert_eq!(reply_transcript(&thread), "You: hello\nAda: are you coming?");
+        assert!(reply_system("Be brief and friendly.").contains("Be brief and friendly."));
+        assert_eq!(reply_system("  "), REPLY_SYSTEM);
+        let own = vec![ComposeTurn { mine: false, name: "Ada".to_string(), text: "hi".to_string() }, ComposeTurn { mine: true, name: String::new(), text: "on my way".to_string() }];
+        assert!(last_is_mine(&own));
+        assert!(check_auto_context(&"x".repeat(4001)).is_err());
+        assert!(check_auto_context("Bring snacks.").is_ok());
+    }
+
+    #[test]
+    fn each_chat_keeps_its_own_endpoint_and_context() {
+        let mut root = json!({ "minimizeToTray": true });
+        let first = ChatLlm {
+            endpoint: "http://127.0.0.1:11434/v1/chat/completions".into(),
+            model: "qwen".into(),
+            api_key: String::new(),
+            protocol: "openai".into(),
+            temperature: String::new(),
+            top_p: String::new(),
+            max_tokens: String::new(),
+            thinking: "off".into(),
+            extra: String::new(),
+            context: "Reply in English.".into(),
+            mark_ai: false,
+            interrupt: false,
+        };
+        let second = ChatLlm { context: "Reply in Thai.".into(), model: "other".into(), ..first.clone() };
+        upsert_chat_llm(&mut root, "u111", first);
+        upsert_chat_llm(&mut root, "u222", second);
+        assert_eq!(root["minimizeToTray"], true);
+        assert_eq!(read_chat_llm(&root, "u111").unwrap().context, "Reply in English.");
+        assert_eq!(read_chat_llm(&root, "u222").unwrap().model, "other");
+        assert!(read_chat_llm(&root, "u333").is_none());
+        remove_chat_llm(&mut root, "u111");
+        assert!(read_chat_llm(&root, "u111").is_none());
+        assert_eq!(read_chat_llm(&root, "u222").unwrap().context, "Reply in Thai.");
+    }
+
+    #[test]
+    fn auto_reply_thinking_off_asks_ollama_not_to_think() {
+        let mut body = json!({ "model": "qwen3.5:4b" });
+        silence_thinking(Protocol::OpenAi, Thinking::Off, &mut body);
+        assert_eq!(body["think"], false);
+        silence_thinking(Protocol::OpenAi, Thinking::Default, &mut body);
+        assert_eq!(body["think"], false);
+        let mut left = json!({});
+        silence_thinking(Protocol::OpenAi, Thinking::Default, &mut left);
+        assert!(left.get("think").is_none());
+    }
+
+    #[test]
+    fn a_thinking_model_with_blank_text_still_counts_as_responding() {
+        let payload = json!({
+            "choices": [{
+                "message": { "role": "assistant", "content": "", "reasoning": "Thinking Process:" }
+            }]
+        });
+        let step = parse_reply(Protocol::OpenAi, &payload).expect("reply");
+        assert!(step.text.is_empty());
+        assert!(probe_answered(Protocol::OpenAi, &payload, &step));
+        let blank = json!({ "choices": [{ "message": { "role": "assistant", "content": "" } }] });
+        let empty = parse_reply(Protocol::OpenAi, &blank).expect("reply");
+        assert!(!probe_answered(Protocol::OpenAi, &blank, &empty));
+    }
+
+    #[test]
     fn times_are_utc_and_endpoints_stay_http() {
         assert_eq!(iso_utc(0), "");
         assert_eq!(iso_utc(1_577_836_800_000), "2020-01-01T00:00:00.000Z");
@@ -1314,6 +2498,7 @@ mod tests {
             max_tokens: None,
             thinking: Thinking::Default,
             extra: json!({}),
+            stream: false,
         }
     }
 
@@ -1368,7 +2553,7 @@ mod tests {
         assert_eq!(body["generationConfig"]["thinkingConfig"]["thinkingLevel"], "high");
         assert!(body["generationConfig"]["thinkingConfig"].get("thinkingBudget").is_none());
         assert_eq!(body["generationConfig"]["temperature"], 0.4);
-        assert_eq!(body["tools"][0]["functionDeclarations"].as_array().unwrap().len(), 3);
+        assert_eq!(body["tools"][0]["functionDeclarations"].as_array().unwrap().len(), 4);
         knobs.thinking = Thinking::Off;
         knobs.temperature = None;
         let off = build_request(&knobs, &hi(Protocol::Gemini));
@@ -1424,5 +2609,92 @@ mod tests {
         assert_eq!(gemini.calls[0].2["query"], "park");
         assert_eq!(timeout_secs(Thinking::Off), 120);
         assert_eq!(timeout_secs(Thinking::Default), 180);
+    }
+
+    fn played(protocol: Protocol, raw: &str) -> (Step, String, Vec<String>) {
+        let mut fold = StreamFold::new(protocol);
+        let mut shown = String::new();
+        let mut names = Vec::new();
+        for line in raw.lines() {
+            let (delta, calls) = fold.accept(line);
+            shown.push_str(&delta);
+            names.extend(calls);
+        }
+        (fold.finish().expect("stream"), shown, names)
+    }
+
+    #[test]
+    fn stream_toggle_sets_the_request_and_keeps_the_gemini_url() {
+        let mut off = knobs(Protocol::OpenAi);
+        off.extra = json!({ "stream": true });
+        assert!(build_request(&off, &hi(Protocol::OpenAi)).get("stream").is_none());
+        let mut on = knobs(Protocol::OpenAi);
+        on.stream = true;
+        assert_eq!(build_request(&on, &hi(Protocol::OpenAi))["stream"], true);
+        assert_eq!(stream_endpoint(Protocol::OpenAi, "http://vr.local.net:11434/v1/chat/completions"), "http://vr.local.net:11434/v1/chat/completions");
+        assert_eq!(
+            stream_endpoint(Protocol::Gemini, "https://example.test/v1beta/models/gemini:generateContent"),
+            "https://example.test/v1beta/models/gemini:streamGenerateContent?alt=sse"
+        );
+        assert_eq!(
+            stream_endpoint(Protocol::Gemini, "https://example.test/models/gemini:streamGenerateContent?key=1"),
+            "https://example.test/models/gemini:streamGenerateContent?key=1&alt=sse"
+        );
+    }
+
+    #[test]
+    fn each_protocol_streams_text_and_a_tool_call() {
+        let (step, shown, names) = played(
+            Protocol::OpenAi,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\
+             data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"list_chats\",\"arguments\":\"\"}}]}}]}\n\
+             data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"kind\\\":\\\"group\\\"}\"}}]}}]}\n\
+             data: [DONE]\n",
+        );
+        assert_eq!(shown, "Hello");
+        assert_eq!(step.text, "Hello");
+        assert_eq!(names, vec!["list_chats".to_string()]);
+        assert_eq!(step.calls[0].1, "list_chats");
+        assert_eq!(step.calls[0].2, json!("{\"kind\":\"group\"}"));
+
+        let (step, shown, names) = played(
+            Protocol::Anthropic,
+            "event: content_block_start\n\
+             data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\
+             data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"secret\"}}\n\
+             data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}\n\
+             data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\
+             data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\
+             data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"get_messages\",\"input\":{}}}\n\
+             data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"chat\\\":\\\"Ada\\\"}\"}}\n",
+        );
+        assert_eq!(shown, "Hi");
+        assert_eq!(step.text, "Hi");
+        assert!(!step.text.contains("secret"));
+        assert_eq!(names, vec!["get_messages".to_string()]);
+        assert_eq!(step.calls[0].2["chat"], "Ada");
+        assert_eq!(step.assistant["content"][0]["thinking"], "secret");
+        assert_eq!(step.assistant["content"][0]["signature"], "sig");
+
+        let (step, shown, names) = played(
+            Protocol::Gemini,
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"secret\",\"thought\":true}]}}]}\n\
+             data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Look\"}]}}]}\n\
+             data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" here\"}]}}]}\n\
+             data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"search_conversations\",\"args\":{\"query\":\"park\"}}}]}}]}\n",
+        );
+        assert_eq!(shown, "Look here");
+        assert_eq!(step.text, "Look here");
+        assert_eq!(names, vec!["search_conversations".to_string()]);
+        assert_eq!(step.calls[0].2["query"], "park");
+        assert_eq!(step.assistant["parts"][1]["text"], "Look here");
+
+        let mut fold = StreamFold::new(Protocol::OpenAi);
+        fold.accept("data: {\"error\":{\"message\":\"bad key\"}}");
+        match fold.finish() {
+            Err(message) => assert!(message.contains("bad key")),
+            Ok(_) => panic!("expected the stream error"),
+        }
     }
 }

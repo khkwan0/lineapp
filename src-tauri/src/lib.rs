@@ -3,6 +3,7 @@ mod e2ee;
 mod h2gate;
 mod legy;
 mod line;
+mod mcp;
 mod preview;
 mod speech;
 mod store;
@@ -1638,7 +1639,7 @@ pub fn run() {
             tauri::webview::PermissionKind::Microphone | tauri::webview::PermissionKind::Camera => tauri::webview::PermissionResponse::Allow,
             _ => tauri::webview::PermissionResponse::Default,
         })
-        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, save_download, read_dropped_file, send_message, send_media, send_sticker, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_always_on_top, set_focus_on_message, focus_for_message, attention_for_message, clear_attention, set_tray_badge, list_media_devices, speech::dictate_start, speech::dictate_stop, speech::dictate_cancel, speech::dictate_level, speech::mic_test_stop, speech::voice_start, speech::voice_stop, speech::voice_cancel, speech::voice_level, agent::get_agent_settings, agent::set_agent_settings, agent::agent_ask, open_profile, block_profile, add_profile, open_fraud_help, open_link, link_preview, rename_profile, favorite_profile, open_friend_chat, open_members, group_roster, rename_group, set_group_auto_join, invite_into_group, remove_group_member, group_invite_candidates, list_friends, friend_recommendations, find_person, create_group])
+        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, save_download, read_dropped_file, send_message, send_media, send_sticker, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_always_on_top, set_focus_on_message, focus_for_message, attention_for_message, clear_attention, set_tray_badge, list_media_devices, speech::dictate_start, speech::dictate_stop, speech::dictate_cancel, speech::dictate_level, speech::mic_test_stop, speech::voice_start, speech::voice_stop, speech::voice_cancel, speech::voice_level, agent::get_agent_settings, agent::set_agent_settings, agent::set_reply_settings, agent::get_chat_llm, agent::set_chat_llm, agent::clear_chat_llm, agent::agent_ask, agent::agent_probe, agent::agent_compose, mcp::get_mcp_servers, mcp::set_mcp_servers, open_profile, block_profile, add_profile, open_fraud_help, open_link, link_preview, rename_profile, favorite_profile, open_friend_chat, open_members, group_roster, rename_group, set_group_auto_join, invite_into_group, remove_group_member, group_invite_candidates, list_friends, friend_recommendations, find_person, create_group])
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;

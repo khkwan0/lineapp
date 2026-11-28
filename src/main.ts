@@ -117,6 +117,7 @@ const railPhoto = document.querySelector<HTMLImageElement>("#rail-photo")!;
 const railInitial = document.querySelector<HTMLElement>("#rail-initial")!;
 const railCount = document.querySelector<HTMLElement>("#rail-count")!;
 const composerInput = document.querySelector<HTMLTextAreaElement>("#composer-input")!;
+const autoReplyButton = document.querySelector<HTMLButtonElement>("#auto-reply")!;
 const attachFile = document.querySelector<HTMLButtonElement>("#attach-file")!;
 const stickerOpen = document.querySelector<HTMLButtonElement>("#sticker-open")!;
 const dictateButton = document.querySelector<HTMLButtonElement>("#dictate-message")!;
@@ -144,6 +145,7 @@ const agentLog = document.querySelector<HTMLElement>("#agent-log")!;
 const agentForm = document.querySelector<HTMLFormElement>("#agent-form")!;
 const agentInput = document.querySelector<HTMLTextAreaElement>("#agent-input")!;
 const agentSend = document.querySelector<HTMLButtonElement>("#agent-send")!;
+const agentSettingsButton = document.querySelector<HTMLButtonElement>("#agent-settings")!;
 const agentClear = document.querySelector<HTMLButtonElement>("#agent-clear")!;
 const stage = document.querySelector<HTMLElement>("#stage")!;
 const peoplePane = document.querySelector<HTMLElement>("#people-pane")!;
@@ -216,7 +218,12 @@ const languageOpen = document.querySelector<HTMLButtonElement>("#language-open")
 const languageSave = document.querySelector<HTMLButtonElement>("#language-save")!;
 const languageCancel = document.querySelector<HTMLButtonElement>("#language-cancel")!;
 const sheetAgent = document.querySelector<HTMLElement>("#sheet-agent")!;
+const sheetReply = document.querySelector<HTMLElement>("#sheet-reply")!;
+const sheetChatLlm = document.querySelector<HTMLElement>("#sheet-chat-llm")!;
+const chatLlmButton = document.querySelector<HTMLButtonElement>("#chat-llm")!;
 const agentOpen = document.querySelector<HTMLButtonElement>("#agent-open")!;
+const replyOpen = document.querySelector<HTMLButtonElement>("#reply-open")!;
+const replyCurrent = document.querySelector<HTMLElement>("#reply-current")!;
 const agentCurrent = document.querySelector<HTMLElement>("#agent-current")!;
 const agentEndpoint = document.querySelector<HTMLInputElement>("#agent-endpoint")!;
 const agentModel = document.querySelector<HTMLInputElement>("#agent-model")!;
@@ -226,8 +233,38 @@ const agentTemperature = document.querySelector<HTMLInputElement>("#agent-temper
 const agentTopP = document.querySelector<HTMLInputElement>("#agent-top-p")!;
 const agentMaxTokens = document.querySelector<HTMLInputElement>("#agent-max-tokens")!;
 const agentThinking = document.querySelector<HTMLSelectElement>("#agent-thinking")!;
+const agentStream = document.querySelector<HTMLInputElement>("#agent-stream")!;
 const agentExtra = document.querySelector<HTMLTextAreaElement>("#agent-extra")!;
 const agentSettingsNote = document.querySelector<HTMLElement>("#agent-settings-note")!;
+const replyTemperature = document.querySelector<HTMLInputElement>("#reply-temperature")!;
+const replyTopP = document.querySelector<HTMLInputElement>("#reply-top-p")!;
+const replyMaxTokens = document.querySelector<HTMLInputElement>("#reply-max-tokens")!;
+const replyThinking = document.querySelector<HTMLSelectElement>("#reply-thinking")!;
+const agentAutoContext = document.querySelector<HTMLTextAreaElement>("#agent-auto-context")!;
+const replyExtra = document.querySelector<HTMLTextAreaElement>("#reply-extra")!;
+const replySettingsNote = document.querySelector<HTMLElement>("#reply-settings-note")!;
+const replySave = document.querySelector<HTMLButtonElement>("#reply-save")!;
+const replyCancel = document.querySelector<HTMLButtonElement>("#reply-cancel")!;
+const chatLlmProtocol = document.querySelector<HTMLSelectElement>("#chat-llm-protocol")!;
+const chatLlmEndpoint = document.querySelector<HTMLInputElement>("#chat-llm-endpoint")!;
+const chatLlmModel = document.querySelector<HTMLInputElement>("#chat-llm-model")!;
+const chatLlmKey = document.querySelector<HTMLInputElement>("#chat-llm-key")!;
+const chatLlmTemperature = document.querySelector<HTMLInputElement>("#chat-llm-temperature")!;
+const chatLlmTopP = document.querySelector<HTMLInputElement>("#chat-llm-top-p")!;
+const chatLlmMaxTokens = document.querySelector<HTMLInputElement>("#chat-llm-max-tokens")!;
+const chatLlmThinking = document.querySelector<HTMLSelectElement>("#chat-llm-thinking")!;
+const chatLlmContext = document.querySelector<HTMLTextAreaElement>("#chat-llm-context")!;
+const chatLlmMarkAi = document.querySelector<HTMLInputElement>("#chat-llm-mark-ai")!;
+const chatLlmInterrupt = document.querySelector<HTMLInputElement>("#chat-llm-interrupt")!;
+const chatLlmExtra = document.querySelector<HTMLTextAreaElement>("#chat-llm-extra")!;
+const autoReplyCancelled = document.querySelector<HTMLElement>("#auto-reply-cancelled")!;
+const chatLlmUnsaved = document.querySelector<HTMLElement>("#chat-llm-unsaved")!;
+const chatLlmNote = document.querySelector<HTMLElement>("#chat-llm-note")!;
+const chatLlmSave = document.querySelector<HTMLButtonElement>("#chat-llm-save")!;
+const chatLlmClear = document.querySelector<HTMLButtonElement>("#chat-llm-clear")!;
+const chatLlmCancel = document.querySelector<HTMLButtonElement>("#chat-llm-cancel")!;
+const autoReplyWait = document.querySelector<HTMLElement>("#auto-reply-wait")!;
+const autoReplyElapsed = document.querySelector<HTMLElement>("#auto-reply-elapsed")!;
 const agentSave = document.querySelector<HTMLButtonElement>("#agent-save")!;
 const agentCancel = document.querySelector<HTMLButtonElement>("#agent-cancel")!;
 
@@ -1072,6 +1109,7 @@ function showThread(chat: ChatRow | undefined): void {
     threadHead.replaceChildren();
     delete document.body.dataset.sound;
     refreshSendButton();
+    paintAutoReply("");
     return;
   }
   thread.hidden = false;
@@ -1119,6 +1157,16 @@ function showThread(chat: ChatRow | undefined): void {
     });
   }
   refreshSendButton();
+  if (!sheetChatLlm.hidden && chatLlmEditing !== chat.id) {
+    sheetChatLlm.hidden = true;
+    sheet.hidden = true;
+  }
+  void rememberChatLlm(chat.id).then(() => {
+    if (openId === chat.id) {
+      paintAutoReply(chat.id);
+    }
+  });
+  paintAutoReply(chat.id);
   if (readingChat(chat.id)) {
     dismissUnread(chat.id);
   }
@@ -1135,6 +1183,7 @@ function renderHistory(payload: HistoryPayload): void {
     return;
   }
   openHistory = payload;
+  replaceAutoThread(payload.id, payload.messages);
   const candidate = payload.lastMessageId || newestMessageId(payload.messages.map((message) => message.id || ""));
   if (candidate) {
     noteLatest(payload.id, candidate);
@@ -1184,6 +1233,7 @@ function renderHistory(payload: HistoryPayload): void {
   }
   document.body.dataset.history = String(payload.messages.length);
   markOpenRead(payload.id);
+  paintAutoReply();
 }
 
 function incomingId(message: HistoryMessage): string {
@@ -1228,6 +1278,11 @@ function settleThread(messages: HistoryMessage[], previousIds: Set<string>, firs
     return;
   }
   const added = messages.filter((message) => message.id && !previousIds.has(message.id));
+  for (const message of added) {
+    if (incomingId(message)) {
+      queueAutoReply(openId, message.id || "");
+    }
+  }
   if (userMoved) {
     assignThreadScroll(savedTop);
     return;
@@ -3000,6 +3055,8 @@ function showReport(row: HTMLElement): void {
   sheetAbout.hidden = true;
   sheetLanguage.hidden = true;
   sheetAgent.hidden = true;
+  sheetReply.hidden = true;
+  sheetChatLlm.hidden = true;
   sheetList.hidden = false;
   sheetList.replaceChildren();
   for (const reason of REPORT_REASONS) {
@@ -3031,6 +3088,8 @@ function showShare(text: string): void {
   sheetAbout.hidden = true;
   sheetLanguage.hidden = true;
   sheetAgent.hidden = true;
+  sheetReply.hidden = true;
+  sheetChatLlm.hidden = true;
   sheetList.hidden = false;
   sheetList.replaceChildren();
   const choices = rows.filter((row) => row.id && row.name);
@@ -3738,6 +3797,7 @@ function releaseAttention(): void {
 function renderChats(payload: ChatPayload): void {
   const keepId = signedIn ? (openId || visibleRows()[selected]?.id || "") : "";
   signedIn = true;
+  ensureAgentProbe();
   login.hidden = true;
   app.hidden = false;
   const kept = rows.find((row) => row.id === keepId);
@@ -4231,6 +4291,13 @@ type AgentConfig = {
   maxTokens: string;
   thinking: string;
   extra: string;
+  stream: boolean;
+  autoContext: string;
+  replyTemperature: string;
+  replyTopP: string;
+  replyMaxTokens: string;
+  replyThinking: string;
+  replyExtra: string;
 };
 const EMPTY_AGENT: AgentConfig = {
   endpoint: "",
@@ -4242,14 +4309,24 @@ const EMPTY_AGENT: AgentConfig = {
   maxTokens: "",
   thinking: "default",
   extra: "",
+  stream: true,
+  autoContext: "",
+  replyTemperature: "",
+  replyTopP: "",
+  replyMaxTokens: "",
+  replyThinking: "off",
+  replyExtra: "",
 };
 const AGENT_CALL_KEYS: Record<string, MessageKey> = {
   search_conversations: "agentSearched",
   get_messages: "agentRetrieved",
+  latest_messages: "agentLatest",
   list_chats: "agentListed",
 };
 let agentTurns: AgentTurn[] = [];
 let agentBusy = false;
+let agentLiveText = "";
+let agentLiveCalls: string[] = [];
 let agentConfig: AgentConfig = { ...EMPTY_AGENT };
 let agentSettingsFromAgent = false;
 
@@ -4281,16 +4358,25 @@ function saveAgentLog(): void {
   localStorage.setItem(AGENT_LOG_KEY, JSON.stringify(agentTurns.slice(-40)));
 }
 
+function resetAgentLive(): void {
+  agentLiveText = "";
+  agentLiveCalls = [];
+}
+
 function clearAgentLog(): void {
   agentTurns = [];
   agentBusy = false;
+  resetAgentLive();
   localStorage.removeItem(AGENT_LOG_KEY);
   if (railMode === "agent") {
     paintAgent();
   }
 }
 
+let autoReplyState: Record<string, boolean> = {};
+
 loadAgentLog();
+loadAutoReply();
 
 function agentEndpointSummary(endpoint: string): string {
   const trimmed = endpoint.trim();
@@ -4308,8 +4394,48 @@ function paintAgentCurrent(): void {
   agentCurrent.textContent = agentEndpointSummary(agentConfig.endpoint);
 }
 
+function replyThinkingLabel(value: string): string {
+  if (value === "default") {
+    return t("agentThinkingDefault");
+  }
+  if (value === "low") {
+    return t("agentThinkingLow");
+  }
+  if (value === "medium") {
+    return t("agentThinkingMedium");
+  }
+  if (value === "high") {
+    return t("agentThinkingHigh");
+  }
+  return t("agentThinkingOff");
+}
+
+function paintReplyCurrent(): void {
+  replyCurrent.textContent = replyThinkingLabel(agentConfig.replyThinking);
+}
+
 function syncAgentSend(): void {
   agentSend.disabled = agentBusy || agentInput.value.trim().length === 0;
+}
+
+function appendAgentCalls(names: string[]): void {
+  if (names.length === 0) {
+    return;
+  }
+  const calls = document.createElement("div");
+  calls.className = "agent-calls";
+  const seen = new Set<string>();
+  for (const name of names) {
+    if (seen.has(name)) {
+      continue;
+    }
+    seen.add(name);
+    const chip = document.createElement("span");
+    const key = AGENT_CALL_KEYS[name];
+    chip.textContent = key ? t(key) : name;
+    calls.append(chip);
+  }
+  agentLog.append(calls);
 }
 
 function paintAgent(): void {
@@ -4321,32 +4447,26 @@ function paintAgent(): void {
     agentLog.append(empty);
   }
   for (const turn of agentTurns) {
-    if (turn.calls && turn.calls.length > 0) {
-      const calls = document.createElement("div");
-      calls.className = "agent-calls";
-      const seen = new Set<string>();
-      for (const name of turn.calls) {
-        if (seen.has(name)) {
-          continue;
-        }
-        seen.add(name);
-        const chip = document.createElement("span");
-        const key = AGENT_CALL_KEYS[name];
-        chip.textContent = key ? t(key) : name;
-        calls.append(chip);
-      }
-      agentLog.append(calls);
-    }
+    appendAgentCalls(turn.calls ?? []);
     const bubble = document.createElement("div");
     bubble.className = `agent-bubble ${turn.role}`;
     bubble.textContent = turn.text;
     agentLog.append(bubble);
   }
-  if (agentBusy) {
-    const working = document.createElement("p");
-    working.className = "agent-working";
-    working.textContent = t("agentWorking");
-    agentLog.append(working);
+  if (agentBusy && (agentLiveText || agentLiveCalls.length > 0)) {
+    appendAgentCalls(agentLiveCalls);
+    if (agentLiveText) {
+      const bubble = document.createElement("div");
+      bubble.className = "agent-bubble assistant";
+      bubble.textContent = agentLiveText;
+      agentLog.append(bubble);
+    }
+  }
+  if (agentBusy && !agentLiveText) {
+    const thinking = document.createElement("p");
+    thinking.className = "agent-thinking";
+    thinking.textContent = t("agentThinkingWait");
+    agentLog.append(thinking);
   }
   agentLog.scrollTop = agentLog.scrollHeight;
   syncAgentSend();
@@ -4354,6 +4474,8 @@ function paintAgent(): void {
 
 function dismissAgentSettings(): void {
   sheetAgent.hidden = true;
+  sheetReply.hidden = true;
+  sheetChatLlm.hidden = true;
   agentSettingsNote.hidden = true;
   if (agentSettingsFromAgent) {
     agentSettingsFromAgent = false;
@@ -4366,7 +4488,7 @@ function dismissAgentSettings(): void {
 
 async function openAgent(): Promise<void> {
   try {
-    agentConfig = await invoke<AgentConfig>("get_agent_settings");
+    agentConfig = { ...EMPTY_AGENT, ...(await invoke<AgentConfig>("get_agent_settings")) };
   } catch {
     agentConfig = { ...EMPTY_AGENT };
   }
@@ -4384,6 +4506,7 @@ async function askAgent(): Promise<void> {
     return;
   }
   agentBusy = true;
+  resetAgentLive();
   agentInput.value = "";
   agentTurns.push({ role: "user", text });
   paintAgent();
@@ -4398,9 +4521,121 @@ async function askAgent(): Promise<void> {
     agentTurns.push({ role: "error", text: error instanceof Error ? error.message : String(error) });
   }
   agentBusy = false;
+  resetAgentLive();
   agentTurns = agentTurns.slice(-40);
   saveAgentLog();
   paintAgent();
+}
+
+type McpServer = { url: string; enabled: boolean };
+let mcpServers: McpServer[] = [];
+
+function mcpSections(): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>("[data-mcp]")];
+}
+
+function paintMcp(): void {
+  for (const section of mcpSections()) {
+    const list = section.querySelector<HTMLElement>("[data-mcp-list]");
+    if (!list) {
+      continue;
+    }
+    list.replaceChildren();
+    mcpServers.forEach((server, index) => {
+      const item = document.createElement("li");
+      item.className = "mcp-row";
+      const toggle = document.createElement("input");
+      toggle.type = "checkbox";
+      toggle.checked = server.enabled;
+      toggle.dataset.i18nAria = "mcpEnabled";
+      toggle.setAttribute("aria-label", t("mcpEnabled"));
+      toggle.addEventListener("change", () => {
+        const next = mcpServers.map((entry, entryIndex) => entryIndex === index ? { ...entry, enabled: toggle.checked } : entry);
+        void commitMcp(next, section);
+      });
+      const url = document.createElement("input");
+      url.type = "url";
+      url.value = server.url;
+      url.spellcheck = false;
+      url.autocomplete = "off";
+      url.addEventListener("change", () => {
+        const next = mcpServers.map((entry, entryIndex) => entryIndex === index ? { ...entry, url: url.value.trim() } : entry);
+        void commitMcp(next, section);
+      });
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.dataset.i18n = "mcpRemove";
+      remove.textContent = t("mcpRemove");
+      remove.addEventListener("click", () => {
+        void commitMcp(mcpServers.filter((_, entryIndex) => entryIndex !== index), section);
+      });
+      item.append(toggle, url, remove);
+      list.append(item);
+    });
+  }
+}
+
+async function loadMcp(): Promise<void> {
+  try {
+    mcpServers = await invoke<McpServer[]>("get_mcp_servers");
+    for (const section of mcpSections()) {
+      const note = section.querySelector<HTMLElement>("[data-mcp-note]");
+      if (note) {
+        note.hidden = true;
+      }
+    }
+    paintMcp();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    for (const section of mcpSections()) {
+      const note = section.querySelector<HTMLElement>("[data-mcp-note]");
+      if (note) {
+        note.hidden = false;
+        note.textContent = message;
+      }
+    }
+  }
+}
+
+async function commitMcp(next: McpServer[], section: HTMLElement): Promise<void> {
+  const note = section.querySelector<HTMLElement>("[data-mcp-note]");
+  try {
+    await invoke("set_mcp_servers", { servers: next });
+    mcpServers = next;
+    if (note) {
+      note.hidden = true;
+    }
+    paintMcp();
+  } catch (error) {
+    if (note) {
+      note.hidden = false;
+      note.textContent = error instanceof Error ? error.message : String(error);
+    }
+    paintMcp();
+  }
+}
+
+function addMcp(section: HTMLElement): void {
+  const input = section.querySelector<HTMLInputElement>("[data-mcp-url]");
+  const url = input?.value.trim() || "";
+  void commitMcp([...mcpServers, { url, enabled: true }], section).then(() => {
+    const note = section.querySelector<HTMLElement>("[data-mcp-note]");
+    if (input && note?.hidden) {
+      input.value = "";
+    }
+  });
+}
+
+for (const section of document.querySelectorAll<HTMLElement>("[data-mcp]")) {
+  section.querySelector<HTMLButtonElement>("[data-mcp-add]")?.addEventListener("click", () => {
+    addMcp(section);
+  });
+  section.querySelector<HTMLInputElement>("[data-mcp-url]")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      addMcp(section);
+    }
+  });
 }
 
 async function showAgentSettings(): Promise<void> {
@@ -4411,10 +4646,12 @@ async function showAgentSettings(): Promise<void> {
   sheetAbout.hidden = true;
   sheetLanguage.hidden = true;
   sheetAgent.hidden = false;
+  sheetReply.hidden = true;
+  sheetChatLlm.hidden = true;
   agentSettingsNote.hidden = true;
   sheet.hidden = false;
   try {
-    agentConfig = await invoke<AgentConfig>("get_agent_settings");
+    agentConfig = { ...EMPTY_AGENT, ...(await invoke<AgentConfig>("get_agent_settings")) };
   } catch (error) {
     agentSettingsNote.hidden = false;
     agentSettingsNote.textContent = error instanceof Error ? error.message : String(error);
@@ -4427,8 +4664,11 @@ async function showAgentSettings(): Promise<void> {
   agentTopP.value = agentConfig.topP;
   agentMaxTokens.value = agentConfig.maxTokens;
   agentThinking.value = ["default", "off", "low", "medium", "high"].includes(agentConfig.thinking) ? agentConfig.thinking : "default";
+  agentStream.checked = agentConfig.stream !== false;
   agentExtra.value = agentConfig.extra;
   paintAgentCurrent();
+  paintReplyCurrent();
+  void loadMcp();
 }
 
 function setRail(mode: RailMode): void {
@@ -4551,6 +4791,10 @@ railChats.addEventListener("click", () => {
 railFriends.addEventListener("click", () => setRail("add"));
 railAgent.addEventListener("click", () => {
   void openAgent();
+});
+agentSettingsButton.addEventListener("click", () => {
+  agentSettingsFromAgent = true;
+  void showAgentSettings();
 });
 agentClear.addEventListener("click", () => {
   clearAgentLog();
@@ -4760,6 +5004,20 @@ notificationTones.addEventListener("click", (event) => {
 
 await listen<LoginEvent>("login-event", (event) => {
   void onEvent(event.payload);
+});
+
+await listen<{ type?: string; text?: string; name?: string }>("agent-stream", (event) => {
+  if (!agentBusy) {
+    return;
+  }
+  if (event.payload.type === "text" && event.payload.text) {
+    agentLiveText += event.payload.text;
+  } else if (event.payload.type === "call" && event.payload.name) {
+    agentLiveCalls.push(event.payload.name);
+  }
+  if (railMode === "agent") {
+    paintAgent();
+  }
 });
 
 (window as unknown as { __lineRender?: (payload: ChatPayload) => void }).__lineRender = (payload) => {
@@ -5154,6 +5412,321 @@ function dispatchSend(item: Outgoing): Promise<void> {
     localId: item.localId,
     silent: item.silent === true,
   }).then(() => undefined, fail);
+}
+
+const AUTO_REPLY_KEY = "lineapp.autoReply";
+type AutoTurn = { id: string; mine: boolean; name: string; text: string };
+const autoThreads = new Map<string, AutoTurn[]>();
+const autoQueued = new Set<string>();
+const autoReplyTimers = new Map<string, number>();
+const autoReplyBusy = new Set<string>();
+const autoReplyAgain = new Set<string>();
+let agentReady = false;
+let agentProbed = false;
+let agentProbeStarted = false;
+let agentProbeError = "";
+
+function autoReplyOn(chatId: string): boolean {
+  return Boolean(chatId) && autoReplyState[chatId] === true;
+}
+
+function loadAutoReply(): void {
+  autoReplyState = {};
+  try {
+    const saved = JSON.parse(localStorage.getItem(AUTO_REPLY_KEY) || "{}") as unknown;
+    const ids = Array.isArray(saved) ? saved : saved && typeof saved === "object" ? Object.keys(saved) : [];
+    const record = Array.isArray(saved) ? null : saved && typeof saved === "object" ? saved as Record<string, unknown> : null;
+    for (const id of ids) {
+      if (typeof id !== "string" || !id) {
+        continue;
+      }
+      if (record && record[id] !== true) {
+        continue;
+      }
+      autoReplyState[id] = true;
+    }
+  } catch {
+    autoReplyState = {};
+  }
+}
+
+function saveAutoReply(): void {
+  const saved: Record<string, boolean> = {};
+  for (const [id, on] of Object.entries(autoReplyState)) {
+    if (id && on === true) {
+      saved[id] = true;
+    }
+  }
+  localStorage.setItem(AUTO_REPLY_KEY, JSON.stringify(saved));
+}
+
+function replaceAutoThread(chatId: string, messages: HistoryMessage[]): void {
+  const turns: AutoTurn[] = [];
+  for (const message of messages) {
+    const text = message.text?.trim() || "";
+    if (!text || message.kind === "chat update" || message.kind === "unsent") {
+      continue;
+    }
+    turns.push({ id: message.id || "", mine: message.mine, name: message.name || "", text });
+  }
+  autoThreads.set(chatId, turns.slice(-20));
+}
+
+function pushAutoTurn(chatId: string, message: { id?: string; mine: boolean; name?: string; text?: string }): void {
+  const text = message.text?.trim() || "";
+  if (!chatId || !text) {
+    return;
+  }
+  const turns = autoThreads.get(chatId) ?? [];
+  const id = message.id || "";
+  const next = { id, mine: message.mine, name: message.name || "", text };
+  const index = id ? turns.findIndex((turn) => turn.id === id) : -1;
+  if (index >= 0) {
+    turns[index] = next;
+  } else {
+    turns.push(next);
+  }
+  autoThreads.set(chatId, turns.slice(-20));
+}
+
+const autoReplyStarted = new Map<string, number>();
+const autoReplyToken = new Map<string, number>();
+let autoReplyClock = 0;
+let autoReplyCancelNote = "";
+
+function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function paintAutoReplyWait(): void {
+  const started = openId ? autoReplyStarted.get(openId) : undefined;
+  const cancelled = Boolean(openId) && autoReplyCancelNote === openId && !started;
+  autoReplyCancelled.hidden = !cancelled;
+  if (!started) {
+    autoReplyWait.hidden = true;
+    return;
+  }
+  autoReplyWait.hidden = false;
+  autoReplyElapsed.textContent = formatElapsed(Date.now() - started);
+}
+
+function interruptAutoReply(): void {
+  const chatId = openId;
+  const saved = chatId ? chatLlmCache.get(chatId) : undefined;
+  if (!chatId || !saved?.interrupt || !autoReplyStarted.has(chatId)) {
+    return;
+  }
+  autoReplyToken.set(chatId, (autoReplyToken.get(chatId) ?? 0) + 1);
+  autoReplyAgain.delete(chatId);
+  autoReplyCancelNote = chatId;
+  settleAutoReply(chatId);
+}
+
+function watchAutoReply(chatId: string): void {
+  autoReplyStarted.set(chatId, Date.now());
+  if (!autoReplyClock) {
+    autoReplyClock = window.setInterval(paintAutoReplyWait, 1000);
+  }
+  paintAutoReplyWait();
+}
+
+function settleAutoReply(chatId: string): void {
+  autoReplyStarted.delete(chatId);
+  if (autoReplyStarted.size === 0 && autoReplyClock) {
+    window.clearInterval(autoReplyClock);
+    autoReplyClock = 0;
+  }
+  paintAutoReplyWait();
+}
+
+type ChatLlm = {
+  endpoint: string;
+  model: string;
+  apiKey: string;
+  protocol: string;
+  temperature: string;
+  topP: string;
+  maxTokens: string;
+  thinking: string;
+  extra: string;
+  context: string;
+  markAi: boolean;
+  interrupt: boolean;
+};
+
+const chatLlmCache = new Map<string, ChatLlm | null>();
+let chatLlmEditing = "";
+
+function chatHasOwnModel(chatId: string): boolean {
+  const saved = chatId ? chatLlmCache.get(chatId) : undefined;
+  return Boolean(saved && saved.endpoint.trim() && saved.model.trim());
+}
+
+function llmFromAgent(): ChatLlm {
+  return {
+    endpoint: agentConfig.endpoint,
+    model: agentConfig.model,
+    apiKey: agentConfig.apiKey,
+    protocol: agentConfig.protocol || "openai",
+    temperature: agentConfig.replyTemperature || "",
+    topP: agentConfig.replyTopP || "",
+    maxTokens: agentConfig.replyMaxTokens || "",
+    thinking: agentConfig.replyThinking || "off",
+    extra: agentConfig.replyExtra || "",
+    context: agentConfig.autoContext || "",
+    markAi: false,
+    interrupt: false,
+  };
+}
+
+function fillChatLlm(settings: ChatLlm, saved: boolean): void {
+  chatLlmProtocol.value = settings.protocol === "anthropic" || settings.protocol === "gemini" ? settings.protocol : "openai";
+  chatLlmEndpoint.value = settings.endpoint;
+  chatLlmModel.value = settings.model;
+  chatLlmKey.value = settings.apiKey;
+  chatLlmTemperature.value = settings.temperature;
+  chatLlmTopP.value = settings.topP;
+  chatLlmMaxTokens.value = settings.maxTokens;
+  chatLlmThinking.value = ["default", "off", "low", "medium", "high"].includes(settings.thinking) ? settings.thinking : "off";
+  chatLlmContext.value = settings.context;
+  chatLlmMarkAi.checked = settings.markAi === true;
+  chatLlmInterrupt.checked = settings.interrupt === true;
+  chatLlmExtra.value = settings.extra;
+  chatLlmUnsaved.hidden = saved;
+  chatLlmClear.disabled = !saved;
+}
+
+async function rememberChatLlm(chatId: string): Promise<ChatLlm | null> {
+  if (!chatId) {
+    return null;
+  }
+  try {
+    const saved = await invoke<ChatLlm | null>("get_chat_llm", { id: chatId });
+    chatLlmCache.set(chatId, saved);
+    return saved;
+  } catch {
+    return chatLlmCache.get(chatId) ?? null;
+  }
+}
+
+function paintAutoReply(chatId = openId): void {
+  const on = agentReady && autoReplyOn(chatId);
+  autoReplyButton.setAttribute("aria-pressed", on ? "true" : "false");
+  autoReplyButton.dataset.chat = chatId;
+  autoReplyButton.disabled = !chatId || (!agentReady && !chatHasOwnModel(chatId));
+  chatLlmButton.disabled = !chatId;
+  if (!chatId) {
+    autoReplyButton.title = t("autoReplyOff");
+  } else if (!agentProbeStarted) {
+    autoReplyButton.title = t("autoReplyChecking");
+  } else if (!agentReady) {
+    autoReplyButton.title = agentProbeError || t("autoReplyUnavailable");
+  } else {
+    autoReplyButton.title = on ? t("autoReplyOn") : t("autoReplyOff");
+  }
+  paintAutoReplyWait();
+}
+
+function ensureAgentProbe(): void {
+  if (agentProbed) {
+    return;
+  }
+  agentProbed = true;
+  void refreshAgentReady();
+}
+
+async function refreshAgentReady(): Promise<void> {
+  agentReady = false;
+  agentProbeError = "";
+  paintAutoReply();
+  try {
+    await invoke("agent_probe");
+    agentReady = true;
+  } catch (error) {
+    agentReady = false;
+    agentProbeError = error instanceof Error ? error.message : String(error);
+  }
+  agentProbeStarted = true;
+  paintAutoReply();
+}
+
+function queueAutoReply(chatId: string, messageId: string): void {
+  if (!chatId || !messageId || !agentReady || !autoReplyOn(chatId)) {
+    return;
+  }
+  const key = `${chatId}\u001f${messageId}`;
+  if (autoQueued.has(key)) {
+    return;
+  }
+  autoQueued.add(key);
+  window.clearTimeout(autoReplyTimers.get(chatId));
+  autoReplyTimers.set(chatId, window.setTimeout(() => {
+    void runAutoReply(chatId);
+  }, 800));
+}
+
+async function runAutoReply(chatId: string): Promise<void> {
+  if (!agentReady || !autoReplyOn(chatId)) {
+    return;
+  }
+  if (autoReplyBusy.has(chatId)) {
+    autoReplyAgain.add(chatId);
+    return;
+  }
+  const turns = autoThreads.get(chatId) ?? [];
+  const last = turns[turns.length - 1];
+  if (!last || last.mine) {
+    return;
+  }
+  autoReplyBusy.add(chatId);
+  if (autoReplyCancelNote === chatId) {
+    autoReplyCancelNote = "";
+  }
+  const token = autoReplyToken.get(chatId) ?? 0;
+  watchAutoReply(chatId);
+  if (chatId === openId) {
+    sendError.hidden = true;
+  }
+  try {
+    const text = await invoke<string>("agent_compose", {
+      chatId,
+      messages: turns.slice(-20).map((turn) => ({ mine: turn.mine, name: turn.name, text: turn.text })),
+    });
+    if ((autoReplyToken.get(chatId) ?? 0) !== token) {
+      return;
+    }
+    let reply = text.trim();
+    if (reply && chatLlmCache.get(chatId)?.markAi) {
+      const mark = t("chatLlmAiMark");
+      if (!reply.startsWith(mark)) {
+        reply = mark + reply;
+      }
+    }
+    if (reply && agentReady && autoReplyOn(chatId)) {
+      startSend(chatId, reply, null);
+      pushAutoTurn(chatId, { id: "", mine: true, name: "", text: reply });
+    }
+  } catch (error) {
+    if ((autoReplyToken.get(chatId) ?? 0) !== token) {
+      return;
+    }
+    if (chatId === openId) {
+      sendError.hidden = false;
+      sendError.textContent = error instanceof Error ? error.message : String(error);
+    }
+  } finally {
+    autoReplyBusy.delete(chatId);
+    const cancelled = (autoReplyToken.get(chatId) ?? 0) !== token;
+    if (!cancelled) {
+      settleAutoReply(chatId);
+    }
+    if (!cancelled && autoReplyAgain.delete(chatId)) {
+      void runAutoReply(chatId);
+    }
+  }
 }
 
 function startSend(chatId: string, text: string, reply: ReplyDraft | null, silent = false): void {
@@ -6003,6 +6576,7 @@ composerInput.addEventListener("keydown", (event) => {
 
 composerInput.addEventListener("input", () => {
   refreshSendButton();
+  interruptAutoReply();
 });
 
 let sendHold: number | null = null;
@@ -6080,6 +6654,20 @@ sendMenu.addEventListener("click", (event) => {
   if (choice === "normal") {
     void sendComposer(false);
   }
+});
+
+autoReplyButton.addEventListener("click", () => {
+  const chatId = autoReplyButton.dataset.chat || openId;
+  if (!chatId || chatId !== openId || !agentReady || autoReplyButton.disabled) {
+    return;
+  }
+  if (autoReplyOn(chatId)) {
+    delete autoReplyState[chatId];
+  } else {
+    autoReplyState[chatId] = true;
+  }
+  saveAutoReply();
+  paintAutoReply(chatId);
 });
 
 document.querySelector<HTMLFormElement>("#composer")!.addEventListener("submit", (event) => {
@@ -6283,6 +6871,8 @@ function showSheet(title: string, body: string): void {
   sheetAbout.hidden = true;
   sheetLanguage.hidden = true;
   sheetAgent.hidden = true;
+  sheetReply.hidden = true;
+  sheetChatLlm.hidden = true;
   sheet.hidden = false;
 }
 
@@ -6315,6 +6905,8 @@ function showAbout(): void {
   sheetAbout.hidden = false;
   sheetLanguage.hidden = true;
   sheetAgent.hidden = true;
+  sheetReply.hidden = true;
+  sheetChatLlm.hidden = true;
   sheet.hidden = false;
 }
 
@@ -6364,6 +6956,8 @@ function showLanguage(): void {
   sheetAbout.hidden = true;
   sheetLanguage.hidden = false;
   sheetAgent.hidden = true;
+  sheetReply.hidden = true;
+  sheetChatLlm.hidden = true;
   sheet.hidden = false;
 }
 
@@ -6375,6 +6969,7 @@ function refreshLocale(): void {
   }
   paintMicTest();
   paintLanguageCurrent();
+  paintAutoReply();
   if (statusKey) {
     setStatus(statusKey);
   }
@@ -6389,6 +6984,12 @@ function refreshLocale(): void {
       sheetTitle.textContent = t("language");
     } else if (!sheetAgent.hidden) {
       sheetTitle.textContent = t("agent");
+    } else if (!sheetReply.hidden) {
+      sheetTitle.textContent = t("autoReply");
+      paintReplyCurrent();
+    } else if (!sheetChatLlm.hidden) {
+      const row = rows.find((chat) => chat.id === chatLlmEditing);
+      sheetTitle.textContent = row?.name || t("chatLlm");
     } else if (!sheetSettings.hidden) {
       sheetTitle.textContent = t("settings");
       paintTextSize();
@@ -6511,13 +7112,17 @@ async function showSettings(): Promise<void> {
   sheetAbout.hidden = true;
   sheetLanguage.hidden = true;
   sheetAgent.hidden = true;
+  sheetReply.hidden = true;
+  sheetChatLlm.hidden = true;
   sheet.hidden = false;
   paintLanguageCurrent();
   paintAgentCurrent();
+  paintReplyCurrent();
   void invoke<AgentConfig>("get_agent_settings")
     .then((settings) => {
-      agentConfig = settings;
+      agentConfig = { ...EMPTY_AGENT, ...settings };
       paintAgentCurrent();
+      paintReplyCurrent();
       if (railMode === "agent") {
         paintAgent();
       }
@@ -6568,6 +7173,8 @@ languageOpen.addEventListener("click", () => {
 languageSave.addEventListener("click", () => {
   sheetLanguage.hidden = true;
   sheetAgent.hidden = true;
+  sheetReply.hidden = true;
+  sheetChatLlm.hidden = true;
   sheetSettings.hidden = false;
   setLanguage(pendingLanguage);
   sheetTitle.textContent = t("settings");
@@ -6587,6 +7194,201 @@ agentCancel.addEventListener("click", () => {
   dismissAgentSettings();
 });
 
+function fillReplySettings(): void {
+  replyTemperature.value = agentConfig.replyTemperature || "";
+  replyTopP.value = agentConfig.replyTopP || "";
+  replyMaxTokens.value = agentConfig.replyMaxTokens || "";
+  replyThinking.value = ["default", "off", "low", "medium", "high"].includes(agentConfig.replyThinking) ? agentConfig.replyThinking : "off";
+  agentAutoContext.value = agentConfig.autoContext || "";
+  replyExtra.value = agentConfig.replyExtra || "";
+  paintReplyCurrent();
+}
+
+async function showReplySettings(): Promise<void> {
+  sheetTitle.textContent = t("autoReply");
+  sheetBody.hidden = true;
+  sheetSettings.hidden = true;
+  sheetList.hidden = true;
+  sheetAbout.hidden = true;
+  sheetLanguage.hidden = true;
+  sheetAgent.hidden = true;
+  sheetReply.hidden = true;
+  sheetChatLlm.hidden = true;
+  sheetReply.hidden = false;
+  replySettingsNote.hidden = true;
+  sheet.hidden = false;
+  try {
+    agentConfig = { ...EMPTY_AGENT, ...(await invoke<AgentConfig>("get_agent_settings")) };
+  } catch (error) {
+    replySettingsNote.hidden = false;
+    replySettingsNote.textContent = error instanceof Error ? error.message : String(error);
+  }
+  fillReplySettings();
+  void loadMcp();
+}
+
+function dismissReplySettings(): void {
+  sheetReply.hidden = true;
+  sheetChatLlm.hidden = true;
+  replySettingsNote.hidden = true;
+  sheetSettings.hidden = false;
+  sheetTitle.textContent = t("settings");
+}
+
+replyOpen.addEventListener("click", () => {
+  void showReplySettings();
+});
+
+replyCancel.addEventListener("click", () => {
+  dismissReplySettings();
+});
+
+replySave.addEventListener("click", () => {
+  replySettingsNote.hidden = true;
+  replySave.disabled = true;
+  const settings = {
+    temperature: replyTemperature.value.trim(),
+    topP: replyTopP.value.trim(),
+    maxTokens: replyMaxTokens.value.trim(),
+    thinking: replyThinking.value,
+    extra: replyExtra.value.trim(),
+    autoContext: agentAutoContext.value.trim(),
+  };
+  void invoke("set_reply_settings", { settings })
+    .then(() => {
+      agentConfig = {
+        ...agentConfig,
+        replyTemperature: settings.temperature,
+        replyTopP: settings.topP,
+        replyMaxTokens: settings.maxTokens,
+        replyThinking: settings.thinking,
+        replyExtra: settings.extra,
+        autoContext: settings.autoContext,
+      };
+      dismissReplySettings();
+      paintReplyCurrent();
+    })
+    .catch((error: unknown) => {
+      replySettingsNote.hidden = false;
+      replySettingsNote.textContent = error instanceof Error ? error.message : String(error);
+    })
+    .finally(() => {
+      replySave.disabled = false;
+    });
+});
+
+function dismissChatLlm(): void {
+  sheetChatLlm.hidden = true;
+  chatLlmNote.hidden = true;
+  chatLlmEditing = "";
+  sheet.hidden = true;
+}
+
+async function showChatLlm(chatId: string): Promise<void> {
+  if (!chatId) {
+    return;
+  }
+  chatLlmEditing = chatId;
+  const row = rows.find((chat) => chat.id === chatId);
+  sheetTitle.textContent = row?.name || t("chatLlm");
+  sheetBody.hidden = true;
+  sheetSettings.hidden = true;
+  sheetList.hidden = true;
+  sheetAbout.hidden = true;
+  sheetLanguage.hidden = true;
+  sheetAgent.hidden = true;
+  sheetReply.hidden = true;
+  sheetChatLlm.hidden = false;
+  chatLlmNote.hidden = true;
+  sheet.hidden = false;
+  let saved = chatLlmCache.get(chatId) ?? null;
+  try {
+    saved = await rememberChatLlm(chatId);
+  } catch {
+    saved = chatLlmCache.get(chatId) ?? null;
+  }
+  if (chatLlmEditing !== chatId) {
+    return;
+  }
+  if (!agentConfig.endpoint && !agentConfig.model) {
+    try {
+      agentConfig = { ...EMPTY_AGENT, ...(await invoke<AgentConfig>("get_agent_settings")) };
+    } catch {
+      agentConfig = { ...EMPTY_AGENT, ...agentConfig };
+    }
+  }
+  fillChatLlm(saved ?? llmFromAgent(), Boolean(saved));
+  chatLlmEndpoint.focus();
+}
+
+chatLlmButton.addEventListener("click", () => {
+  if (!openId || chatLlmButton.disabled) {
+    return;
+  }
+  void showChatLlm(openId);
+});
+
+chatLlmCancel.addEventListener("click", () => {
+  dismissChatLlm();
+});
+
+chatLlmClear.addEventListener("click", () => {
+  const chatId = chatLlmEditing;
+  if (!chatId) {
+    return;
+  }
+  chatLlmNote.hidden = true;
+  chatLlmClear.disabled = true;
+  void invoke("clear_chat_llm", { id: chatId })
+    .then(() => {
+      chatLlmCache.set(chatId, null);
+      fillChatLlm(llmFromAgent(), false);
+      paintAutoReply(chatId);
+    })
+    .catch((error: unknown) => {
+      chatLlmNote.hidden = false;
+      chatLlmNote.textContent = error instanceof Error ? error.message : String(error);
+      chatLlmClear.disabled = false;
+    });
+});
+
+chatLlmSave.addEventListener("click", () => {
+  const chatId = chatLlmEditing;
+  if (!chatId) {
+    return;
+  }
+  chatLlmNote.hidden = true;
+  chatLlmSave.disabled = true;
+  const settings: ChatLlm = {
+    endpoint: chatLlmEndpoint.value.trim(),
+    model: chatLlmModel.value.trim(),
+    apiKey: chatLlmKey.value,
+    protocol: chatLlmProtocol.value,
+    temperature: chatLlmTemperature.value.trim(),
+    topP: chatLlmTopP.value.trim(),
+    maxTokens: chatLlmMaxTokens.value.trim(),
+    thinking: chatLlmThinking.value,
+    extra: chatLlmExtra.value.trim(),
+    context: chatLlmContext.value.trim(),
+    markAi: chatLlmMarkAi.checked,
+    interrupt: chatLlmInterrupt.checked,
+  };
+  void invoke("set_chat_llm", { id: chatId, settings })
+    .then(() => {
+      const saved = { ...settings, apiKey: settings.apiKey.trim() };
+      chatLlmCache.set(chatId, saved);
+      dismissChatLlm();
+      paintAutoReply(chatId);
+    })
+    .catch((error: unknown) => {
+      chatLlmNote.hidden = false;
+      chatLlmNote.textContent = error instanceof Error ? error.message : String(error);
+    })
+    .finally(() => {
+      chatLlmSave.disabled = false;
+    });
+});
+
 agentSave.addEventListener("click", () => {
   agentSettingsNote.hidden = true;
   agentSave.disabled = true;
@@ -6600,6 +7402,13 @@ agentSave.addEventListener("click", () => {
     maxTokens: agentMaxTokens.value.trim(),
     thinking: agentThinking.value,
     extra: agentExtra.value.trim(),
+    stream: agentStream.checked,
+    autoContext: agentConfig.autoContext,
+    replyTemperature: agentConfig.replyTemperature,
+    replyTopP: agentConfig.replyTopP,
+    replyMaxTokens: agentConfig.replyMaxTokens,
+    replyThinking: agentConfig.replyThinking || "off",
+    replyExtra: agentConfig.replyExtra,
   };
   void invoke("set_agent_settings", { settings })
     .then(() => {
@@ -6609,6 +7418,9 @@ agentSave.addEventListener("click", () => {
       if (railMode === "agent") {
         paintAgent();
       }
+      agentReady = false;
+      agentProbed = false;
+      ensureAgentProbe();
     })
     .catch((error: unknown) => {
       agentSettingsNote.hidden = false;
@@ -7249,6 +8061,10 @@ function applyPoll(payload: PollPayload): void {
       }
     }
     appendLiveMessage(update, followTail, batch);
+    if (update.incoming && update.thread?.id && update.thread.text?.trim()) {
+      pushAutoTurn(update.id, update.thread);
+      queueAutoReply(update.id, update.thread.id);
+    }
   }
   if (batch.end) {
     unreadFocus = "";
@@ -7298,6 +8114,10 @@ async function logout(): Promise<void> {
   }
   rows = [];
   clearAgentLog();
+  agentReady = false;
+  agentProbed = false;
+  agentProbeStarted = false;
+  agentProbeError = "";
   openId = "";
   discardAttachment();
   shownUrl = "";

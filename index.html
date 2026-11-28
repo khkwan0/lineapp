@@ -170,6 +170,25 @@
           </div>
           <div id="sticker-panel" hidden></div>
           <div id="attach-preview" hidden></div>
+          <div id="auto-reply-row">
+            <button id="auto-reply" type="button" aria-pressed="false" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 12.5 9.5 17 19 7.5" />
+              </svg>
+              <span data-i18n="autoReply">Auto reply</span>
+            </button>
+            <button id="chat-llm" type="button" data-i18n-aria="chatLlm" aria-label="This chat" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
+              </svg>
+            </button>
+            <p id="auto-reply-wait" hidden>
+              <span data-i18n="autoReplySent">Sent to the model</span>
+              <span id="auto-reply-elapsed">0:00</span>
+            </p>
+            <p id="auto-reply-cancelled" hidden data-i18n="chatLlmCancelled">Cancelled. You started typing.</p>
+          </div>
           <div id="composer-row">
             <button id="attach-file" type="button" data-i18n-aria="attachFile" aria-label="Attach a file">
               <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -220,7 +239,10 @@
       <section id="agent" hidden>
         <header id="agent-head">
           <h2 data-i18n="agent">Agent</h2>
-          <button id="agent-clear" type="button" data-i18n="agentClear">Clear chat</button>
+          <div id="agent-actions">
+            <button id="agent-settings" type="button" data-i18n="agentSettings">Model settings</button>
+            <button id="agent-clear" type="button" data-i18n="agentClear">Clear chat</button>
+          </div>
         </header>
         <div id="agent-log"></div>
         <form id="agent-form">
@@ -274,6 +296,15 @@
               <span data-i18n="agent">Agent</span>
             </span>
             <strong id="agent-current"></strong>
+          </button>
+          <button id="reply-open" type="button" class="language-row">
+            <span class="language-label">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 12.5 9.5 17 19 7.5" />
+              </svg>
+              <span data-i18n="autoReply">Auto reply</span>
+            </span>
+            <strong id="reply-current"></strong>
           </button>
           <button id="language-open" type="button" class="language-row">
             <span class="language-label">
@@ -371,7 +402,7 @@
           <p id="devices-note" class="devices-note" hidden></p>
         </form>
         <div id="sheet-agent" hidden>
-          <p class="settings-notice" data-i18n="agentEndpointHint">Full URL for the protocol you chose. Text the agent reads from your chats is sent there.</p>
+          <p class="settings-notice" data-i18n="agentEndpointHint">Full URL for the protocol you chose. Text the agent reads from your chats is sent there. For best results, use a model that supports tool calling.</p>
           <label class="agent-field">
             <span data-i18n="agentProtocol">Protocol</span>
             <select id="agent-protocol">
@@ -415,10 +446,27 @@
               <option value="high" data-i18n="agentThinkingHigh">High</option>
             </select>
           </label>
+          <label class="setting">
+            <input id="agent-stream" type="checkbox" checked />
+            <span>
+              <span data-i18n="agentStream">Stream replies</span>
+              <small data-i18n="agentStreamHint">Show the answer as it is written. Off waits and pulses thinking...</small>
+            </span>
+          </label>
           <label class="agent-field">
             <span data-i18n="agentExtra">Extra JSON</span>
             <textarea id="agent-extra" rows="4" spellcheck="false" autocomplete="off"></textarea>
           </label>
+          <section class="mcp-tools" data-mcp>
+            <h3 data-i18n="mcpTools">MCP tools</h3>
+            <p class="settings-notice" data-i18n="mcpToolsHint">Streamable HTTP addresses. Enabled servers are offered to the agent and to auto reply. Changes here are saved immediately.</p>
+            <div class="mcp-add">
+              <input type="url" data-mcp-url inputmode="url" placeholder="https://example.com/mcp" data-i18n-placeholder="mcpUrl" autocomplete="off" spellcheck="false" />
+              <button type="button" data-mcp-add data-i18n="mcpAdd">Add</button>
+            </div>
+            <ul class="mcp-list" data-mcp-list></ul>
+            <p class="devices-note" data-mcp-note hidden></p>
+          </section>
           <p id="agent-settings-note" class="devices-note" hidden></p>
           <div class="language-actions">
             <button id="agent-save" type="button">
@@ -428,6 +476,153 @@
               <span data-i18n="save">Save</span>
             </button>
             <button id="agent-cancel" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M7 7l10 10M17 7 7 17" />
+              </svg>
+              <span data-i18n="cancel">Cancel</span>
+            </button>
+          </div>
+        </div>
+        <div id="sheet-reply" hidden>
+          <p class="settings-notice" data-i18n="autoReplyHint">Defaults for chats that do not have their own model settings.</p>
+          <p class="settings-notice" data-i18n="autoReplyThinkingHint">Off sends the message itself. Default lets the model think first.</p>
+          <label class="agent-field">
+            <span data-i18n="agentTemperature">Temperature</span>
+            <input id="reply-temperature" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="agent-field">
+            <span data-i18n="agentTopP">Top-p</span>
+            <input id="reply-top-p" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="agent-field">
+            <span data-i18n="agentMaxTokens">Max tokens</span>
+            <input id="reply-max-tokens" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="agent-field">
+            <span data-i18n="agentThinking">Thinking</span>
+            <select id="reply-thinking">
+              <option value="off" data-i18n="agentThinkingOff" selected>Off</option>
+              <option value="default" data-i18n="agentThinkingDefault">Default</option>
+              <option value="low" data-i18n="agentThinkingLow">Low</option>
+              <option value="medium" data-i18n="agentThinkingMedium">Medium</option>
+              <option value="high" data-i18n="agentThinkingHigh">High</option>
+            </select>
+          </label>
+          <label class="agent-field">
+            <span data-i18n="agentAutoContext">Auto reply context</span>
+            <textarea id="agent-auto-context" rows="4" spellcheck="true"></textarea>
+          </label>
+          <p class="settings-notice" data-i18n="agentAutoContextHint">Guidance added to every automatic chat reply. Leave this blank to follow the thread.</p>
+          <label class="agent-field">
+            <span data-i18n="agentExtra">Extra JSON</span>
+            <textarea id="reply-extra" rows="4" spellcheck="false" autocomplete="off"></textarea>
+          </label>
+          <section class="mcp-tools" data-mcp>
+            <h3 data-i18n="mcpTools">MCP tools</h3>
+            <p class="settings-notice" data-i18n="mcpToolsHint">Streamable HTTP addresses. Enabled servers are offered to the agent and to auto reply. Changes here are saved immediately.</p>
+            <div class="mcp-add">
+              <input type="url" data-mcp-url inputmode="url" placeholder="https://example.com/mcp" data-i18n-placeholder="mcpUrl" autocomplete="off" spellcheck="false" />
+              <button type="button" data-mcp-add data-i18n="mcpAdd">Add</button>
+            </div>
+            <ul class="mcp-list" data-mcp-list></ul>
+            <p class="devices-note" data-mcp-note hidden></p>
+          </section>
+          <p id="reply-settings-note" class="devices-note" hidden></p>
+          <div class="language-actions">
+            <button id="reply-save" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 12.5 9.5 17 19 7.5" />
+              </svg>
+              <span data-i18n="save">Save</span>
+            </button>
+            <button id="reply-cancel" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M7 7l10 10M17 7 7 17" />
+              </svg>
+              <span data-i18n="cancel">Cancel</span>
+            </button>
+          </div>
+        </div>
+        <div id="sheet-chat-llm" hidden>
+          <p class="settings-notice" data-i18n="chatLlmHint">Endpoint, parameters, and context are saved for this conversation only.</p>
+          <p id="chat-llm-unsaved" class="settings-notice" data-i18n="chatLlmUnsaved" hidden>Not saved for this chat yet.</p>
+          <label class="agent-field">
+            <span data-i18n="agentProtocol">Protocol</span>
+            <select id="chat-llm-protocol">
+              <option value="openai" data-i18n="agentProtocolOpenAi">OpenAI-compatible</option>
+              <option value="anthropic" data-i18n="agentProtocolAnthropic">Anthropic</option>
+              <option value="gemini" data-i18n="agentProtocolGemini">Gemini</option>
+            </select>
+          </label>
+          <label class="agent-field">
+            <span data-i18n="agentEndpoint">Endpoint</span>
+            <input id="chat-llm-endpoint" type="url" inputmode="url" placeholder="http://127.0.0.1:11434/v1/chat/completions" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="agent-field">
+            <span data-i18n="agentModel">Model</span>
+            <input id="chat-llm-model" type="text" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="agent-field">
+            <span data-i18n="agentApiKey">API key</span>
+            <input id="chat-llm-key" type="password" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="agent-field">
+            <span data-i18n="agentTemperature">Temperature</span>
+            <input id="chat-llm-temperature" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="agent-field">
+            <span data-i18n="agentTopP">Top-p</span>
+            <input id="chat-llm-top-p" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="agent-field">
+            <span data-i18n="agentMaxTokens">Max tokens</span>
+            <input id="chat-llm-max-tokens" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="agent-field">
+            <span data-i18n="agentThinking">Thinking</span>
+            <select id="chat-llm-thinking">
+              <option value="off" data-i18n="agentThinkingOff" selected>Off</option>
+              <option value="default" data-i18n="agentThinkingDefault">Default</option>
+              <option value="low" data-i18n="agentThinkingLow">Low</option>
+              <option value="medium" data-i18n="agentThinkingMedium">Medium</option>
+              <option value="high" data-i18n="agentThinkingHigh">High</option>
+            </select>
+          </label>
+          <label class="agent-field">
+            <span data-i18n="agentAutoContext">Auto reply context</span>
+            <textarea id="chat-llm-context" rows="4" spellcheck="true"></textarea>
+          </label>
+          <p class="settings-notice" data-i18n="agentAutoContextHint">Guidance added to every automatic chat reply. Leave this blank to follow the thread.</p>
+          <label class="setting">
+            <input id="chat-llm-mark-ai" type="checkbox" />
+            <span>
+              <span data-i18n="chatLlmMarkAi">Mark replies as AI</span>
+              <small data-i18n="chatLlmMarkAiHint">Start each automatic reply with a note that it was written by AI.</small>
+            </span>
+          </label>
+          <label class="setting">
+            <input id="chat-llm-interrupt" type="checkbox" />
+            <span>
+              <span data-i18n="chatLlmInterrupt">Cancel when typing</span>
+              <small data-i18n="chatLlmInterruptHint">If you type while a reply is being written, drop that reply.</small>
+            </span>
+          </label>
+          <label class="agent-field">
+            <span data-i18n="agentExtra">Extra JSON</span>
+            <textarea id="chat-llm-extra" rows="4" spellcheck="false" autocomplete="off"></textarea>
+          </label>
+          <p id="chat-llm-note" class="devices-note" hidden></p>
+          <div class="language-actions">
+            <button id="chat-llm-save" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 12.5 9.5 17 19 7.5" />
+              </svg>
+              <span data-i18n="save">Save</span>
+            </button>
+            <button id="chat-llm-clear" type="button">
+              <span data-i18n="chatLlmClear">Use default</span>
+            </button>
+            <button id="chat-llm-cancel" type="button">
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M7 7l10 10M17 7 7 17" />
               </svg>

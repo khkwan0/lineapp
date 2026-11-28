@@ -111,7 +111,8 @@ if (remoteTag) {
 }
 
 const host = platform();
-const bundleDir = join(root, "src-tauri", "target", "release", "bundle");
+const cargoTarget = process.env.CARGO_TARGET_DIR || join(root, "src-tauri", "target");
+const bundleDir = join(cargoTarget, "release", "bundle");
 let bundleArgs;
 let packages;
 if (host === "darwin") {
@@ -122,12 +123,16 @@ if (host === "darwin") {
   packages = () => [
     bundleFile(join(bundleDir, "deb"), version, ".deb"),
     bundleFile(join(bundleDir, "appimage"), version, ".AppImage"),
+    bundleFile(join(bundleDir, "flatpak"), version, ".flatpak"),
   ];
 } else {
   fail("Release packages are built on Linux or macOS.");
 }
 
 run("npm", ["run", "tauri", "--", "build", "--bundles", bundleArgs]);
+if (host === "linux") {
+  run("node", ["scripts/flatpak.mjs"]);
+}
 
 requireReleaseTree();
 const info = JSON.parse(readFileSync(join(root, "build-info.json"), "utf8"));

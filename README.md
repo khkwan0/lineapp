@@ -1,6 +1,8 @@
 # lineapp
 
-Line App Client for Linux
+Line App Client for Linux and Mac
+
+This app does not support VoIP or video calls. LINE places those calls through a separate call service and a native media stack that ships inside the official desktop app. This client only speaks the messaging gateway, so it never opens a call, negotiates audio or video, or sends call media. A call that already happened is stored as a chat message, and the thread can show how long it lasted. The microphone records voice typing and voice messages. Those are files in the chat, not a live call.
 
 **BETA.** This app is an unfinished beta. It is incomplete, it breaks, and it changes without warning. Do not rely on it as a stable LINE client.
 
@@ -10,9 +12,9 @@ Sign-in and the window:
 
 - QR login. The phone app scans the code, confirms a PIN, and a saved certificate skips that PIN the next time.
 - The session stays in the app config directory. Log out clears it. Quit exits.
-- A tray icon shows the unread count. Closing the window can leave the app in the tray. The window can stay above other windows. A new message can raise the window and ask the taskbar for attention. A muted chat does neither.
+- The tray icon shows a red dot while anything is unread. The unread count is on the chat button in the window. Closing the window can leave the app in the tray. The window can stay above other windows. A new message can raise the window and ask the taskbar for attention. A muted chat does neither.
 - Settings covers language, font, and text size. The languages are English, Japanese, Korean, simplified and traditional Chinese, Thai, Vietnamese, Indonesian, Malay, Spanish, Portuguese, French, German, Italian, Russian, Arabic, Turkish, Greek, and Hindi, or the device language. Arabic is right to left. Fonts are Noto Sans, the system font, a serif, and a monospace face, at five sizes. Characters a chosen font does not include still use Noto Sans.
-- The notification sound has a volume and fourteen tones. Each chat can mute that sound on this machine. A chat LINE already muted stays quiet. The tray badge still updates.
+- The notification sound has a volume and fourteen tones. Each chat can mute that sound on this machine. A chat LINE already muted stays quiet. The red tray dot still appears.
 - The microphone chosen in Settings is used for voice typing, voice messages, and a test that plays the recording back and shows what the speech engine heard. Speakers and cameras are listed for reference.
 - About shows the build number and the time it was built. The chat list pane can be resized.
 
@@ -56,7 +58,7 @@ Sending and history:
 
 Calls:
 
-- There are no voice or video calls. Settings lists speakers and cameras, and those lists do nothing. The microphone is for voice typing, voice messages, and the mic test. This app has no LINE VoIP.
+- Settings lists speakers and cameras, and those lists do nothing. The microphone is for voice typing, voice messages, and the mic test.
 
 People, groups, and the rest of LINE:
 
@@ -66,7 +68,7 @@ People, groups, and the rest of LINE:
 - Official accounts appear in the list. Rich menus, coupons, and shop actions do not.
 - There is no OpenChat, LINE VOOM, Keep, albums, notes, LINE Pay, sticker shop, or LINE theme. Font and text size are local.
 - There is one account. Chats cannot be pinned, hidden, or archived. Notification settings on LINE's servers are not edited here. The sound mute, the tone, and the volume are local.
-- Help opens a note that help is not in this window yet. There is no desktop notification popup. A new message plays the chime, updates the tray badge, and can raise the window.
+- Help opens a note that help is not in this window yet. There is no desktop notification popup. A new message plays the chime, shows the red tray dot, and can raise the window.
 
 A small desktop client for the protocol the LINE desktop app speaks: Thrift
 TCompact POSTed to `legy-jp.line-apps.com`. This is not the public Bot /
@@ -107,6 +109,7 @@ To compile:
 
 - A C toolchain and `pkg-config`. On Debian or Ubuntu install `build-essential`, `pkg-config`, `libwebkit2gtk-4.1-dev`, `libdbus-1-dev`, and `libayatana-appindicator3-dev`. WebKitGTK 4.1 brings GTK 3 with it. The packager looks up `ayatana-appindicator3-0.1` through pkg-config. The runtime library `libayatana-appindicator3-1` does not ship that file; the `-dev` package does. SQLite is bundled, so there is no separate SQLite package.
 - An AppImage package also needs `file` and `patchelf` on the build machine. The first AppImage build downloads `linuxdeploy` and `appimagetool`.
+- A Flatpak also needs `flatpak` on the build machine, with Flathub available. The first build installs `org.flatpak.Builder` and the GNOME 51 SDK for the current user. That SDK is about a gigabyte. The package is built from the `.deb`, then packed as a single-file `.flatpak`.
 
 To run a development build or the `.deb`:
 
@@ -115,6 +118,8 @@ To run a development build or the `.deb`:
 - `ffmpeg` on `PATH` to send a voice message. Voice typing uses `whisper-cli` from `src-tauri/speech` or from `PATH`. The first transcription downloads the tiny Whisper model when that file is not already there.
 
 The AppImage carries WebKitGTK 4.1, GTK 3, their modules and schemas, the WebKit helper processes, and the tray library. It still uses the host C library, libstdc++, the GPU libraries (`libGL`, `libEGL`, `libdrm`), X11 or Wayland, and fontconfig. AppImage leaves those out: a bundled GPU driver only works on the build machine, and the format cannot carry glibc. Mounting the image needs `libfuse2`. `APPIMAGE_EXTRACT_AND_RUN=1` skips FUSE and unpacks it instead. The image runs where glibc and libstdc++ are at least as new as on the machine that built it.
+
+The Flatpak runs on the GNOME 51 runtime from Flathub. That runtime supplies WebKitGTK 4.1, GTK 3, `ffmpeg`, `pw-record`, and `pactl`, so a voice message does not need those tools on the host. The tray library is built inside the SDK and shipped in the app. The sandbox can reach the network, show a window on Wayland or X11, play and record audio, register a tray icon, open files through the desktop portal, and ask KWin to raise the window or keep it above others. Installing the `.flatpak` also installs that runtime from Flathub. The binary is the one in the `.deb`, so the machine that built it needs a glibc older than the runtime's. GNOME 51 currently has glibc 2.44.
 
 ### macOS
 
@@ -140,6 +145,7 @@ That starts Vite and opens the window against it. A production build compiles th
 . "$HOME/.cargo/env"
 cd ~/dev/lineapp
 npm run tauri build -- --bundles deb,appimage
+npm run flatpak
 ```
 
 On macOS:
@@ -152,10 +158,20 @@ npm run tauri build -- --bundles app,dmg
 
 - `src-tauri/target/release/bundle/deb/line_0.1.0_amd64.deb`
 - `src-tauri/target/release/bundle/appimage/LINE_0.1.0_amd64.AppImage`
+- `src-tauri/target/release/bundle/flatpak/LINE_0.1.0_amd64.flatpak`
 - `src-tauri/target/release/bundle/macos/LINE.app`
 - `src-tauri/target/release/bundle/dmg/LINE_0.1.0_aarch64.dmg` (or `x64` on an Intel Mac)
 
 `productName` is `LINE`, so the Debian package name is `line`. Installing it next to the official LINE package will collide. The first AppImage build downloads `linuxdeploy` and `appimagetool`. `linuxdeploy` copies the libraries the binary links, including WebKit and GTK, and its GTK plugin copies the modules and schemas. Mounting the finished image needs FUSE.
+
+`npm run flatpak` packs the `.deb` into `LINE_0.1.0_amd64.flatpak`. It reuses a `.deb` already in the bundle directory, and builds one when that file is missing. Voice typing is included when `src-tauri/speech/whisper-cli` is present; the engine is installed under `/app/share/lineapp/speech`. Someone who receives the file installs it with:
+
+```bash
+flatpak install --user src-tauri/target/release/bundle/flatpak/LINE_0.1.0_amd64.flatpak
+flatpak run dev.lineapp.desktop
+```
+
+`npm run release` on Linux publishes that file with the `.deb` and the AppImage. The app id inside Flatpak is `dev.lineapp.desktop`, the same id as the config directory. Flatpak stores that directory in the sandbox, at `~/.var/app/dev.lineapp.desktop/config/dev.lineapp.desktop`, so a Flatpak install does not read the session saved by the `.deb`.
 
 The session is stored in `lineapp.local.json` (mode 0600) under the app config
 directory. On Linux that is `$XDG_CONFIG_HOME/dev.lineapp.desktop`, or

@@ -1,0 +1,77 @@
+id: dev.lineapp.desktop
+runtime: org.gnome.Platform
+runtime-version: "51"
+sdk: org.gnome.Sdk
+command: lineapp
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --own-name=org.kde.StatusNotifierItem.*
+  - --talk-name=org.kde.KWin
+  - --filesystem=xdg-run/pipewire-0
+  - --filesystem=xdg-run/tray-icon:create
+  - --env=GTK_USE_PORTAL=1
+modules:
+  - modules/libayatana-appindicator/libayatana-appindicator-gtk3.json
+  - name: lineapp
+    buildsystem: simple
+    build-commands:
+      - mkdir -p deb-extract
+      - ar -x line.deb --output deb-extract
+      - tar -C deb-extract -xf deb-extract/data.tar.*
+      - install -Dm755 deb-extract/usr/bin/lineapp /app/bin/lineapp
+      - install -Dm755 qdbus /app/bin/qdbus
+      - install -Dm755 qdbus /app/bin/qdbus6
+      - install -Dm644 dev.lineapp.desktop.desktop /app/share/applications/dev.lineapp.desktop.desktop
+      - install -Dm644 dev.lineapp.desktop.metainfo.xml /app/share/metainfo/dev.lineapp.desktop.metainfo.xml
+      - install -Dm644 icon-16.png /app/share/icons/hicolor/16x16/apps/dev.lineapp.desktop.png
+      - install -Dm644 icon-22.png /app/share/icons/hicolor/22x22/apps/dev.lineapp.desktop.png
+      - install -Dm644 icon-32.png /app/share/icons/hicolor/32x32/apps/dev.lineapp.desktop.png
+      - install -Dm644 icon-48.png /app/share/icons/hicolor/48x48/apps/dev.lineapp.desktop.png
+      - install -Dm644 icon-64.png /app/share/icons/hicolor/64x64/apps/dev.lineapp.desktop.png
+      - install -Dm644 icon-128.png /app/share/icons/hicolor/128x128/apps/dev.lineapp.desktop.png
+      - install -Dm644 icon-256.png /app/share/icons/hicolor/256x256/apps/dev.lineapp.desktop.png
+      - install -Dm644 icon-512.png /app/share/icons/hicolor/512x512/apps/dev.lineapp.desktop.png
+      - if [ -x speech/whisper-cli ]; then mkdir -p /app/share/lineapp/speech && cp -a speech/. /app/share/lineapp/speech/ && chmod 755 /app/share/lineapp/speech/whisper-cli; fi
+      - strip --strip-unneeded /app/bin/lineapp
+    sources:
+      - type: file
+        path: stage/line.deb
+      - type: dir
+        path: stage/speech
+        dest: speech
+      - type: file
+        path: dev.lineapp.desktop.desktop
+      - type: file
+        path: dev.lineapp.desktop.metainfo.xml
+      - type: file
+        path: qdbus
+      - type: file
+        path: ../src-tauri/icons/16x16.png
+        dest-filename: icon-16.png
+      - type: file
+        path: ../src-tauri/icons/22x22.png
+        dest-filename: icon-22.png
+      - type: file
+        path: ../src-tauri/icons/32x32.png
+        dest-filename: icon-32.png
+      - type: file
+        path: ../src-tauri/icons/48x48.png
+        dest-filename: icon-48.png
+      - type: file
+        path: ../src-tauri/icons/64x64.png
+        dest-filename: icon-64.png
+      - type: file
+        path: ../src-tauri/icons/128x128.png
+        dest-filename: icon-128.png
+      - type: file
+        path: ../src-tauri/icons/256x256.png
+        dest-filename: icon-256.png
+      - type: file
+        path: ../src-tauri/icons/icon.png
+        dest-filename: icon-512.png

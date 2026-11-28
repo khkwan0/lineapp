@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=LINE
+Comment=Desktop client for LINE
+Exec=lineapp
+Icon=dev.lineapp.desktop
+StartupWMClass=lineapp
+Terminal=false
+Categories=Network;
