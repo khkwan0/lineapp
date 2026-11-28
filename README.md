@@ -8,6 +8,16 @@ This app does not support VoIP or video calls. LINE places those calls through a
 
 ## Implemented
 
+Language model:
+
+You bring your own model. Settings takes an OpenAI-compatible endpoint, Anthropic, or Gemini, plus the model name and an API key. A local server works. The endpoint, the key, and any per-chat model are stored in `lineapp.settings.json` next to the session file. Text the model reads from your chats is sent to that endpoint.
+
+The agent is its own chat. Ask it about a person, a group, or something that was said. It searches saved chats by name or by message text, lists them, and reads the newest messages in one of them. Answers stream as they are written. With streaming off, the window waits and shows a thinking pulse. Temperature, top-p, max tokens, a thinking level, and extra JSON are optional. Leave sampling blank and the model decides. Use a model that supports tool calling. From this chat the model cannot send, delete, or change a LINE message.
+
+Auto reply writes the next LINE message and sends it as you. Turn it on per chat, after the endpoint has answered a short check. It runs when the latest message is from the other person, and it sees the last 20 messages in that chat. Guidance you write is added to every automatic reply. The reply language can match the conversation or be one you pick. Temperature, top-p, max tokens, thinking, and extra JSON for replies are separate from the agent. A chat can keep its own endpoint, model, key, and those options, or copy them from another chat. A chat without its own settings uses the defaults. A chat can start each automatic reply with `AI: `. With cancel-when-typing on, typing while a reply is being written drops that reply.
+
+MCP tools are optional. Add up to 16 streamable HTTP or HTTPS servers. Enabled servers are offered to the agent and to auto reply. A server that does not answer is skipped. Auto reply may call those tools, then still has to come back with only the message to send.
+
 Sign-in and the window:
 
 - QR login. The phone app scans the code, confirms a PIN, and a saved certificate skips that PIN the next time.
@@ -40,18 +50,13 @@ People and groups:
 - A profile window shows a person's name, picture, cover, and status. From there you can favorite them, rename how they appear to you, open the chat, add them, block or unblock them, or report them. Someone who is not a friend gets a fraud warning. Your own profile is view only.
 - A group window lists members and can search them, invite friends, remove a member, rename the group, and turn automatic join on or off. A member's row opens their profile.
 
-Agent:
-
-- The agent answers questions about chats already saved on this computer. It can search those chats by name or message text, list them, and read the recent messages in one of them. It cannot send, delete, or change anything.
-- Settings points it at an OpenAI-compatible endpoint, Anthropic, or Gemini, with a model, an API key, and optional temperature, top-p, max tokens, thinking level, and extra JSON. The text it reads from your chats is sent to that endpoint. The endpoint and key are stored in `lineapp.settings.json` next to the session file.
-
 ## What the official LINE app does that this does not
 
 Sending and history:
 
 - Locations and contact cards cannot be sent. A received location or contact card is a label in the thread. Photos, videos, voice messages, and files you send show in the thread. The sticker button is that short published set, not the sticker shop.
-- There is no search box inside a chat. The chat list searches names. The agent can search message text that is already in the local database.
-- The thread shows the latest 40 messages. The local database keeps the latest 80, which is what the agent can read.
+- There is no search box inside a chat. The chat list searches names. Questions about saved message text go to the language model.
+- The thread shows the latest 40 messages. The local database keeps the latest 80. Auto reply sees the last 20 messages of the chat it is answering.
 - Letter sealing on send is one-to-one text, plus photos, videos, audio, and files when LINE asks for it. A message this client cannot unseal stays a label.
 - Holding the send button offers a send without notification. LINE still notifies the recipient, so that choice does not send.
 - There is no typing indicator, no way to announce a message, and no LINE albums, notes, or Keep. Several photos can be sent together. That is not the albums feature.
@@ -76,7 +81,7 @@ Messaging API.
 
 The window is a TypeScript Tauri app. Login, the chat list, history, send,
 letter sealing, photos, videos, audio, files, stickers, friends, groups, voice,
-link previews, and the agent run in Rust. A v3 access
+link previews, and the language model run in Rust. A v3 access
 token is a JWT and talks to `/S4` in the clear. Older `mid:secret` tokens go
 through LINE's encrypted LEGY gateway (`gf.line.naver.jp/enc`).
 
