@@ -1241,14 +1241,15 @@ fn deep_merge(base: &mut Json, extra: &Json) {
 }
 
 fn parse_reply(protocol: Protocol, payload: &Json) -> Result<Step, String> {
-    if let Some(message) = payload.pointer("/error/message").and_then(|value| value.as_str()).map(str::trim).filter(|text| !text.is_empty()) {
+    let sentence = error_sentence(payload);
+    if !sentence.is_empty() {
         let has_reply = match protocol {
             Protocol::OpenAi => payload.get("choices").is_some(),
             Protocol::Anthropic => payload.get("content").is_some(),
             Protocol::Gemini => payload.get("candidates").is_some(),
         };
         if !has_reply {
-            return Err(clip(message, 300));
+            return Err(present_endpoint_error(None, &sentence));
         }
     }
     match protocol {
@@ -1496,8 +1497,9 @@ impl StreamFold {
 
     fn consume_openai(&mut self, value: Json) -> (String, Vec<String>) {
         if value.get("choices").is_none() {
-            if let Some(message) = value.pointer("/error/message").and_then(|item| item.as_str()) {
-                self.note_error(message);
+            let sentence = error_sentence(&value);
+            if !sentence.is_empty() {
+                self.note_error(&present_endpoint_error(None, &sentence));
             }
         }
         if value.pointer("/choices/0/message").is_some() {
@@ -1568,8 +1570,9 @@ impl StreamFold {
 
     fn consume_anthropic(&mut self, value: Json) -> (String, Vec<String>) {
         if value.get("type").and_then(|item| item.as_str()) == Some("error") {
-            if let Some(message) = value.pointer("/error/message").and_then(|item| item.as_str()) {
-                self.note_error(message);
+            let sentence = error_sentence(&value);
+            if !sentence.is_empty() {
+                self.note_error(&present_endpoint_error(None, &sentence));
             }
             return (String::new(), Vec::new());
         }
@@ -1683,8 +1686,9 @@ impl StreamFold {
 
     fn consume_gemini(&mut self, value: Json) -> (String, Vec<String>) {
         if value.get("candidates").is_none() {
-            if let Some(message) = value.pointer("/error/message").and_then(|item| item.as_str()) {
-                self.note_error(message);
+            let sentence = error_sentence(&value);
+            if !sentence.is_empty() {
+                self.note_error(&present_endpoint_error(None, &sentence));
             }
         }
         let parts = value.pointer("/candidates/0/content/parts").and_then(|item| item.as_array()).cloned().unwrap_or_default();
@@ -1846,11 +1850,58 @@ fn read_json(response: ureq::Response) -> Result<Json, String> {
 
 fn http_failure(code: u16, body: &str) -> String {
     let parsed = serde_json::from_str::<Json>(body).ok();
-    let message = parsed.as_ref().and_then(|value| value.pointer("/error/message")).and_then(|value| value.as_str()).unwrap_or("").trim();
-    if message.is_empty() {
-        format!("The endpoint returned {code}.")
-    } else {
-        format!("The endpoint returned {code}: {}", clip(message, 240))
+    let sentence = parsed.as_ref().map(error_sentence).unwrap_or_default();
+    present_endpoint_error(Some(code), &sentence)
+}
+
+fn error_sentence(value: &Json) -> String {
+    let nested = value.pointer("/error/message").and_then(Json::as_str).unwrap_or("").trim();
+    if !nested.is_empty() {
+        return nested.to_string();
+    }
+    if let Some(text) = value.get("error").and_then(Json::as_str).map(str::trim).filter(|text| !text.is_empty()) {
+        return text.to_string();
+    }
+    value.get("message").and_then(Json::as_str).unwrap_or("").trim().to_string()
+}
+
+fn context_overflow(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "context length",
+        "context window",
+        "context size",
+        "maximum context",
+        "prompt is too long",
+        "too many tokens",
+        "exceeds the available context",
+        "exceed_context",
+        "input token count",
+        "input tokens exceed",
+        "n_ctx",
+    ]
+    .iter()
+    .any(|mark| lower.contains(mark))
+}
+
+fn present_endpoint_error(code: Option<u16>, sentence: &str) -> String {
+    let sentence = sentence.trim();
+    if context_overflow(sentence) {
+        let detail = clip(sentence, 240);
+        if detail.is_empty() {
+            return "The request is larger than the model's context window.".to_string();
+        }
+        return format!("The request is larger than the model's context window. {detail}");
+    }
+    if sentence.is_empty() {
+        return match code {
+            Some(code) => format!("The endpoint returned {code}."),
+            None => "The endpoint did not return a reply.".to_string(),
+        };
+    }
+    match code {
+        Some(code) => format!("The endpoint returned {code}: {}", clip(sentence, 240)),
+        None => clip(sentence, 300),
     }
 }
 
@@ -2290,6 +2341,19 @@ mod tests {
         let exported = openai_tools(&local);
         assert_eq!(exported.as_array().unwrap().len(), 4);
         assert_eq!(exported[0]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn a_context_overflow_is_told_apart_from_other_endpoint_errors() {
+        let ollama = http_failure(400, r#"{"error":"the request exceeds the available context size (4096 tokens)"}"#);
+        assert!(ollama.starts_with("The request is larger than the model's context window."));
+        assert!(ollama.contains("4096"));
+        let openai = http_failure(400, r#"{"error":{"message":"This model's maximum context length is 8192 tokens."}}"#);
+        assert!(openai.starts_with("The request is larger than the model's context window."));
+        let other = http_failure(401, r#"{"error":{"message":"Invalid API key."}}"#);
+        assert_eq!(other, "The endpoint returned 401: Invalid API key.");
+        let bare = http_failure(500, "nope");
+        assert_eq!(bare, "The endpoint returned 500.");
     }
 
     #[test]
