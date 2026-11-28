@@ -221,6 +221,7 @@ const sheetAgent = document.querySelector<HTMLElement>("#sheet-agent")!;
 const sheetReply = document.querySelector<HTMLElement>("#sheet-reply")!;
 const sheetChatLlm = document.querySelector<HTMLElement>("#sheet-chat-llm")!;
 const chatLlmButton = document.querySelector<HTMLButtonElement>("#chat-llm")!;
+const chatLlmModelLabel = document.querySelector<HTMLElement>("#chat-llm-model")!;
 const aiMark = document.querySelector<HTMLElement>("#ai-mark")!;
 const agentOpen = document.querySelector<HTMLButtonElement>("#agent-open")!;
 const replyOpen = document.querySelector<HTMLButtonElement>("#reply-open")!;
@@ -5570,6 +5571,14 @@ function chatHasOwnModel(chatId: string): boolean {
   return Boolean(saved && saved.endpoint.trim() && saved.model.trim());
 }
 
+function chatModelName(chatId: string): string {
+  const own = chatId ? chatLlmCache.get(chatId) : undefined;
+  if (own && own.model.trim()) {
+    return own.model.trim();
+  }
+  return agentConfig.model.trim();
+}
+
 function llmFromAgent(): ChatLlm {
   return {
     endpoint: agentConfig.endpoint,
@@ -5629,6 +5638,10 @@ function paintAutoReply(chatId = openId): void {
   autoReplyButton.dataset.chat = chatId;
   autoReplyButton.disabled = !chatId || (!agentReady && !chatHasOwnModel(chatId));
   chatLlmButton.disabled = !chatId;
+  const modelName = chatId ? chatModelName(chatId) : "";
+  chatLlmModelLabel.hidden = !modelName;
+  chatLlmModelLabel.textContent = modelName;
+  chatLlmButton.title = modelName;
   aiMark.hidden = !(chatId && chatLlmCache.get(chatId)?.markAi);
   if (!chatId) {
     autoReplyButton.title = t("autoReplyOff");

@@ -650,7 +650,9 @@ pub(crate) struct ComposeTurn {
     text: String,
 }
 
-const REPLY_SYSTEM: &str = "You are replying in a LINE chat as the account owner. Write only the next message to send. No quotes, labels, or explanation. Match the language and tone of the conversation.";
+const REPLY_SYSTEM: &str = "You are Me, a person texting in a LINE chat. The other people read your next message. Answer their last message in the first person, the way a friend texts. If they ask what you did and the chat never says, give a short ordinary answer as yourself and you may ask them back. Do not invent a long story. Do not tell anyone what they should say. Do not start with Suppose, Imagine, You could, or You can. Output only the message. Match the language and tone of the chat.";
+
+const REWRITE_AS_ME: &str = "That was advice about what to say. Send Me's own text instead. Answer the other person in the first person. Output only that text.";
 
 fn reply_language_name(id: &str) -> Option<&'static str> {
     Some(match id.trim() {
@@ -688,7 +690,7 @@ fn check_reply_language(raw: &str) -> Result<String, String> {
     Ok(language.to_string())
 }
 
-fn reply_transcript(messages: &[ComposeTurn]) -> String {
+fn reply_transcript(messages: &[ComposeTurn], language: &str) -> String {
     let mut lines = Vec::new();
     let start = messages.len().saturating_sub(20);
     for turn in &messages[start..] {
@@ -697,7 +699,7 @@ fn reply_transcript(messages: &[ComposeTurn]) -> String {
             continue;
         }
         let who = if turn.mine {
-            "You".to_string()
+            "Me".to_string()
         } else if turn.name.trim().is_empty() {
             "Them".to_string()
         } else {
@@ -705,19 +707,145 @@ fn reply_transcript(messages: &[ComposeTurn]) -> String {
         };
         lines.push(format!("{who}: {text}"));
     }
-    lines.join("\n")
+    if lines.is_empty() {
+        return String::new();
+    }
+    let other = last_other_name(messages);
+    format!(
+        "Messages:\n{}\n\nYou are Me. Text {other} back. Answer their last message in the first person, as a friend texting. If they asked what you did and the messages above do not say, answer briefly as yourself. Output only the text you send them. {}",
+        lines.join("\n"),
+        language_order(language)
+    )
+}
+
+fn language_order(name: &str) -> String {
+    if name.is_empty() {
+        "Reply in the same language as their last message.".to_string()
+    } else {
+        format!("Reply in {name}. Write only in {name}, even if earlier messages used another language.")
+    }
+}
+
+fn reply_language_for(messages: &[ComposeTurn], configured: &str) -> String {
+    if let Some(name) = reply_language_name(configured) {
+        return name.to_string();
+    }
+    let last = messages
+        .iter()
+        .rev()
+        .find(|turn| !turn.mine && !turn.text.trim().is_empty())
+        .map(|turn| turn.text.as_str())
+        .unwrap_or("");
+    detect_language_name(last).unwrap_or_default().to_string()
+}
+
+fn detect_language_name(text: &str) -> Option<&'static str> {
+    let mut hangul = 0usize;
+    let mut kana = 0usize;
+    let mut han = 0usize;
+    let mut thai = 0usize;
+    let mut arabic = 0usize;
+    let mut cyrillic = 0usize;
+    let mut greek = 0usize;
+    let mut devanagari = 0usize;
+    let mut latin = 0usize;
+    for ch in text.chars() {
+        match ch {
+            '\u{AC00}'..='\u{D7A3}' | '\u{1100}'..='\u{11FF}' => hangul += 1,
+            '\u{3040}'..='\u{30FF}' => kana += 1,
+            '\u{4E00}'..='\u{9FFF}' => han += 1,
+            '\u{0E00}'..='\u{0E7F}' => thai += 1,
+            '\u{0600}'..='\u{06FF}' => arabic += 1,
+            '\u{0400}'..='\u{04FF}' => cyrillic += 1,
+            '\u{0370}'..='\u{03FF}' => greek += 1,
+            '\u{0900}'..='\u{097F}' => devanagari += 1,
+            'A'..='Z' | 'a'..='z' => latin += 1,
+            _ => {}
+        }
+    }
+    let mut best = 0usize;
+    let mut name = "";
+    for (count, label) in [
+        (hangul, "Korean"),
+        (kana, "Japanese"),
+        (han, "Chinese"),
+        (thai, "Thai"),
+        (arabic, "Arabic"),
+        (cyrillic, "Russian"),
+        (greek, "Greek"),
+        (devanagari, "Hindi"),
+    ] {
+        if count > best {
+            best = count;
+            name = label;
+        }
+    }
+    if best >= 2 {
+        if kana > 0 {
+            return Some("Japanese");
+        }
+        return Some(name);
+    }
+    if latin < 3 {
+        return None;
+    }
+    let words: Vec<String> = text
+        .split(|ch: char| !ch.is_ascii_alphabetic())
+        .filter(|word| !word.is_empty())
+        .map(|word| word.to_ascii_lowercase())
+        .collect();
+    const ENGLISH: &[&str] = &[
+        "the", "a", "an", "i", "you", "your", "we", "what", "did", "do", "does", "last", "night", "how", "are", "is", "was", "were", "to", "of", "and", "my", "me", "coming", "hi", "hello", "hey", "sup",
+    ];
+    const MALAY: &[&str] = &["aku", "saya", "kau", "awak", "anda", "lah", "je", "tak", "apa", "buat", "yang", "ini", "itu", "nak", "dah", "pun", "kat"];
+    let english = words.iter().filter(|word| ENGLISH.contains(&word.as_str())).count();
+    let malay = words.iter().filter(|word| MALAY.contains(&word.as_str())).count();
+    if malay > english && malay > 0 {
+        return Some("Malay");
+    }
+    if english > 0 {
+        return Some("English");
+    }
+    None
+}
+
+fn last_other_name(messages: &[ComposeTurn]) -> String {
+    messages
+        .iter()
+        .rev()
+        .find_map(|turn| {
+            if turn.mine || turn.text.trim().is_empty() {
+                return None;
+            }
+            let name = turn.name.trim();
+            Some(if name.is_empty() { "them".to_string() } else { name.to_string() })
+        })
+        .unwrap_or_else(|| "them".to_string())
+}
+
+fn sounds_like_advice(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    const STARTS: &[&str] = &["suppose ", "imagine ", "you could ", "you can ", "you should ", "you might ", "perhaps you", "here's ", "here is "];
+    if STARTS.iter().any(|prefix| lower.starts_with(prefix)) {
+        return true;
+    }
+    const PHRASES: &[&str] = &["you can reply", "you could say", "you could reply", "what to say", "the best move", "side of the story"];
+    PHRASES.iter().any(|phrase| lower.contains(phrase))
 }
 
 fn reply_system(guidance: &str, language: &str) -> String {
     let base = match reply_language_name(language) {
-        Some(name) => format!("You are replying in a LINE chat as the account owner. Write only the next message to send. No quotes, labels, or explanation. Reply in {name}. Match the tone of the conversation."),
+        Some(name) => {
+            let rule = language_order(name);
+            format!("{rule}\n\n{}", REPLY_SYSTEM.replacen("Match the language and tone of the chat.", "Match the tone of the chat.", 1))
+        }
         None => REPLY_SYSTEM.to_string(),
     };
     let guidance = guidance.trim();
     if guidance.is_empty() {
         return base;
     }
-    format!("{base}\n\nGuidance from the user:\n{guidance}")
+    format!("{base}\n\nHow Me should sound when talking to the other people:\n{guidance}")
 }
 
 fn empty_reply_message(thinking: Thinking) -> String {
@@ -787,20 +915,27 @@ pub async fn agent_compose(messages: Vec<ComposeTurn>, chat_id: String) -> Resul
 }
 
 fn compose_reply(messages: Vec<ComposeTurn>, chat_id: &str) -> Result<String, String> {
-    let transcript = reply_transcript(&messages);
-    if transcript.is_empty() || last_is_mine(&messages) {
+    if last_is_mine(&messages) {
         return Ok(String::new());
     }
     let settings = settings_for_chat(chat_id)?;
     if settings.endpoint.is_empty() || settings.model.is_empty() {
         return Err("Set the endpoint and model for this chat.".to_string());
     }
+    let language = reply_language_for(&messages, &settings.reply_language);
+    let transcript = reply_transcript(&messages, &language);
+    if transcript.is_empty() {
+        return Ok(String::new());
+    }
     let knobs = reply_knobs(&settings)?;
     let mut system = reply_system(&settings.auto_context, &settings.reply_language);
+    if reply_language_name(&settings.reply_language).is_none() && !language.is_empty() {
+        system = system.replacen("Match the language and tone of the chat.", &format!("Reply in {language}. Match the tone of the chat."), 1);
+    }
     let (mut links, remote) = crate::mcp::prepare();
     let offered = mcp_tools(&remote);
     if !offered.is_empty() {
-        system.push_str("\n\nYou may call MCP tools before writing the message. After the tools return, reply with only the next chat message.");
+        system.push_str("\n\nYou may call MCP tools before writing the message. After the tools return, write only Me's next message to the other people in the chat.");
     }
     let mut transcript = match knobs.protocol {
         Protocol::OpenAi => vec![
@@ -810,9 +945,11 @@ fn compose_reply(messages: Vec<ComposeTurn>, chat_id: &str) -> Result<String, St
         Protocol::Anthropic => vec![json!({ "role": "user", "content": transcript })],
         Protocol::Gemini => vec![json!({ "role": "user", "parts": [{ "text": transcript }] })],
     };
-    let rounds = if offered.is_empty() { 0 } else { 3 };
-    for round in 0..=rounds {
-        let answering = round == rounds;
+    let mut retried = false;
+    let mut round = 0usize;
+    let tool_limit = if offered.is_empty() { 0 } else { 3 };
+    loop {
+        let answering = retried || round >= tool_limit;
         let use_tools: &[Tool] = if answering { &[] } else { &offered };
         let mut body = protocol_body(&knobs, &transcript, use_tools);
         match knobs.protocol {
@@ -829,6 +966,12 @@ fn compose_reply(messages: Vec<ComposeTurn>, chat_id: &str) -> Result<String, St
             if text.is_empty() {
                 return Err(empty_reply_message(knobs.thinking));
             }
+            if !retried && sounds_like_advice(&text) {
+                retried = true;
+                transcript.push(step.assistant);
+                nudge_rewrite(knobs.protocol, &mut transcript, &language_order(&language));
+                continue;
+            }
             return Ok(text);
         }
         transcript.push(step.assistant);
@@ -837,8 +980,19 @@ fn compose_reply(messages: Vec<ComposeTurn>, chat_id: &str) -> Result<String, St
             results.push(dispatch_tool(name, args, &mut links, &remote));
         }
         append_tool_results(knobs.protocol, &mut transcript, &step.calls, &results);
+        round += 1;
+        if round > tool_limit {
+            return Err(empty_reply_message(knobs.thinking));
+        }
     }
-    Err(empty_reply_message(knobs.thinking))
+}
+
+fn nudge_rewrite(protocol: Protocol, messages: &mut Vec<Json>, language: &str) {
+    let text = format!("{REWRITE_AS_ME} {language}");
+    match protocol {
+        Protocol::OpenAi | Protocol::Anthropic => messages.push(json!({ "role": "user", "content": text })),
+        Protocol::Gemini => messages.push(json!({ "role": "user", "parts": [{ "text": text }] })),
+    }
 }
 
 #[tauri::command]
@@ -2539,7 +2693,13 @@ mod tests {
             ComposeTurn { mine: false, name: "Ada".to_string(), text: "are you coming?".to_string() },
         ];
         assert!(!last_is_mine(&thread));
-        assert_eq!(reply_transcript(&thread), "You: hello\nAda: are you coming?");
+        assert_eq!(
+            reply_transcript(&thread, "English"),
+            "Messages:\nMe: hello\nAda: are you coming?\n\nYou are Me. Text Ada back. Answer their last message in the first person, as a friend texting. If they asked what you did and the messages above do not say, answer briefly as yourself. Output only the text you send them. Reply in English. Write only in English, even if earlier messages used another language."
+        );
+        assert_eq!(reply_language_for(&thread, ""), "English");
+        assert_eq!(reply_language_for(&thread, "ja"), "Japanese");
+        assert_eq!(detect_language_name("What did you do last night?"), Some("English"));
         assert!(reply_system("Be brief and friendly.", "").contains("Be brief and friendly."));
         assert_eq!(reply_system("  ", ""), REPLY_SYSTEM);
         let japanese = reply_system("", "ja");
@@ -2547,6 +2707,8 @@ mod tests {
         assert!(!japanese.contains("Match the language"));
         let own = vec![ComposeTurn { mine: false, name: "Ada".to_string(), text: "hi".to_string() }, ComposeTurn { mine: true, name: String::new(), text: "on my way".to_string() }];
         assert!(last_is_mine(&own));
+        assert!(sounds_like_advice("Suppose you enjoyed something special and want to hear your side of the story!"));
+        assert!(!sounds_like_advice("Not much, I stayed in. How was your night?"));
         assert!(check_auto_context(&"x".repeat(4001)).is_err());
         assert!(check_auto_context("Bring snacks.").is_ok());
     }
