@@ -144,39 +144,66 @@ cd ~/dev/lineapp
 npm run tauri dev
 ```
 
-That starts Vite and opens the window against it. A production build compiles the frontend, then a release binary, then the packages for the machine you are on. Linux uses `deb` and `appimage` from `src-tauri/tauri.conf.json`. macOS uses `app` and `dmg` from `src-tauri/tauri.macos.conf.json`.
+That starts Vite and opens the window against it. A production build compiles the frontend, then a release binary, then the packages for the machine you are on. Each package is built on that platform. A Linux machine produces the Linux packages. A Mac produces the Mac packages. There is no cross-compile setup, and no command that writes all of them in one run. There is no Windows package.
+
+Linux packages are 64-bit x86. A Mac package matches the Mac it was built on, Apple silicon or Intel. There is no universal Mac binary. Linux uses `deb` and `appimage` from `src-tauri/tauri.conf.json`. The Flatpak is a separate step. macOS uses `app` and `dmg` from `src-tauri/tauri.macos.conf.json`.
+
+On Linux, both Tauri packages:
 
 ```bash
 . "$HOME/.cargo/env"
 cd ~/dev/lineapp
 npm run tauri build -- --bundles deb,appimage
+```
+
+One Linux package:
+
+```bash
+npm run tauri build -- --bundles deb
+npm run tauri build -- --bundles appimage
+```
+
+The Flatpak, after those or on its own:
+
+```bash
 npm run flatpak
 ```
 
-On macOS:
+On macOS, both packages:
 
 ```bash
+. "$HOME/.cargo/env"
+cd ~/dev/lineapp
 npm run tauri build -- --bundles app,dmg
 ```
 
-`npm run tauri build` with no bundle list uses the config for the current system. Pass one target to build only that package. The packages are written to:
+One Mac package:
+
+```bash
+npm run tauri build -- --bundles app
+npm run tauri build -- --bundles dmg
+```
+
+`npm run tauri build` with no bundle list uses the config for the current system: `deb` and `appimage` on Linux, `app` and `dmg` on macOS. The names above are the only `--bundles` values. Flatpak is `npm run flatpak`, not a Tauri bundle name. The packages are written to:
 
 - `src-tauri/target/release/bundle/deb/line_0.1.0_amd64.deb`
 - `src-tauri/target/release/bundle/appimage/LINE_0.1.0_amd64.AppImage`
 - `src-tauri/target/release/bundle/flatpak/LINE_0.1.0_amd64.flatpak`
 - `src-tauri/target/release/bundle/macos/LINE.app`
-- `src-tauri/target/release/bundle/dmg/LINE_0.1.0_aarch64.dmg` (or `x64` on an Intel Mac)
+- `src-tauri/target/release/bundle/dmg/LINE_0.1.0_aarch64.dmg` on Apple silicon, or `LINE_0.1.0_x64.dmg` on an Intel Mac
 
 `productName` is `LINE`, so the Debian package name is `line`. Installing it next to the official LINE package will collide. The first AppImage build downloads `linuxdeploy` and `appimagetool`. `linuxdeploy` copies the libraries the binary links, including WebKit and GTK, and its GTK plugin copies the modules and schemas. Mounting the finished image needs FUSE.
 
-`npm run flatpak` packs the `.deb` into `LINE_0.1.0_amd64.flatpak`. It reuses a `.deb` already in the bundle directory, and builds one when that file is missing. Voice typing is included when `src-tauri/speech/whisper-cli` is present; the engine is installed under `/app/share/lineapp/speech`. Someone who receives the file installs it with:
+`npm run flatpak` packs the `.deb` into `LINE_0.1.0_amd64.flatpak`. It reuses a `.deb` already in the bundle directory, and builds one when that file is missing. That step does not build the AppImage. Voice typing is included when `src-tauri/speech/whisper-cli` is present; the engine is installed under `/app/share/lineapp/speech`. Someone who receives the file installs it with:
 
 ```bash
 flatpak install --user src-tauri/target/release/bundle/flatpak/LINE_0.1.0_amd64.flatpak
 flatpak run dev.lineapp.desktop
 ```
 
-`npm run release` on Linux publishes that file with the `.deb` and the AppImage. The app id inside Flatpak is `dev.lineapp.desktop`, the same id as the config directory. Flatpak stores that directory in the sandbox, at `~/.var/app/dev.lineapp.desktop/config/dev.lineapp.desktop`, so a Flatpak install does not read the session saved by the `.deb`.
+The app id inside Flatpak is `dev.lineapp.desktop`, the same id as the config directory. Flatpak stores that directory in the sandbox, at `~/.var/app/dev.lineapp.desktop/config/dev.lineapp.desktop`, so a Flatpak install does not read the session saved by the `.deb`.
+
+`npm run release` builds, then publishes. It needs the GitHub CLI installed and logged in (`gh auth login`). The git tree must be clean aside from `build-info.json`. The script refuses to run on anything other than Linux or macOS, and it refuses a tag that already exists locally or on `origin`. On Linux it builds the `.deb` and the AppImage, then the Flatpak, and uploads all three. On a Mac it builds the `.app` and the `.dmg`, and uploads only the `.dmg`. On either system it then commits `build-info.json`, creates an annotated tag `v0.1.0-build.N`, pushes the branch and that tag, and opens a GitHub release for the tag.
 
 The session is stored in `lineapp.local.json` (mode 0600) under the app config
 directory. On Linux that is `$XDG_CONFIG_HOME/dev.lineapp.desktop`, or
