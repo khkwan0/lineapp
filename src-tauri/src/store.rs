@@ -170,11 +170,33 @@ fn connect(path: &Path) -> Result<Connection, String> {
             sender TEXT NOT NULL DEFAULT '',
             reply_id TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (chat_id, msg_id)
+         );
+         CREATE TABLE IF NOT EXISTS llm_settings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            saved_at INTEGER NOT NULL,
+            chat_id TEXT NOT NULL,
+            chat_name TEXT NOT NULL,
+            chat_kind TEXT NOT NULL,
+            endpoint TEXT NOT NULL,
+            model TEXT NOT NULL,
+            api_key TEXT NOT NULL,
+            protocol TEXT NOT NULL,
+            temperature TEXT NOT NULL,
+            top_p TEXT NOT NULL,
+            max_tokens TEXT NOT NULL,
+            thinking TEXT NOT NULL,
+            extra TEXT NOT NULL,
+            context TEXT NOT NULL,
+            language TEXT NOT NULL,
+            mark_ai INTEGER NOT NULL,
+            interrupt INTEGER NOT NULL,
+            history INTEGER NOT NULL DEFAULT 20
          );",
     )
     .map_err(|err| err.to_string())?;
     ensure_sender_column(&conn)?;
     ensure_reply_column(&conn)?;
+    ensure_llm_history_column(&conn)?;
     let _ = fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600));
     Ok(conn)
 }
@@ -190,6 +212,21 @@ fn ensure_sender_column(conn: &Connection) -> Result<(), String> {
         return Ok(());
     }
     conn.execute("ALTER TABLE messages ADD COLUMN sender TEXT NOT NULL DEFAULT ''", [])
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn ensure_llm_history_column(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn.prepare("PRAGMA table_info(llm_settings)").map_err(|err| err.to_string())?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|err| err.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    if names.iter().any(|name| name == "history") {
+        return Ok(());
+    }
+    conn.execute("ALTER TABLE llm_settings ADD COLUMN history INTEGER NOT NULL DEFAULT 20", [])
         .map_err(|err| err.to_string())?;
     Ok(())
 }
@@ -225,8 +262,77 @@ fn set_mid(conn: &Connection, mid: &str) -> Result<(), String> {
 }
 
 fn wipe(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch("DELETE FROM messages; DELETE FROM chats; DELETE FROM profile; DELETE FROM meta;")
+    conn.execute_batch("DELETE FROM messages; DELETE FROM chats; DELETE FROM profile; DELETE FROM meta; DELETE FROM llm_settings;")
         .map_err(|err| err.to_string())
+}
+
+pub(crate) struct LlmSettingsSave {
+    pub chat_id: String,
+    pub endpoint: String,
+    pub model: String,
+    pub api_key: String,
+    pub protocol: String,
+    pub temperature: String,
+    pub top_p: String,
+    pub max_tokens: String,
+    pub thinking: String,
+    pub extra: String,
+    pub context: String,
+    pub language: String,
+    pub mark_ai: bool,
+    pub interrupt: bool,
+    pub history: u32,
+}
+
+pub(crate) fn append_llm_settings(saved: &LlmSettingsSave) -> Result<(), String> {
+    with_db(|conn| {
+        let (name, raw_kind) = conn
+            .query_row("SELECT name, kind FROM chats WHERE id = ?1", params![saved.chat_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .optional()
+            .map_err(|err| err.to_string())?
+            .unwrap_or_default();
+        let kind = match raw_kind.as_str() {
+            "friend" => "person",
+            "group" | "room" => "group",
+            other => other,
+        };
+        let saved_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as i64)
+            .unwrap_or(0);
+        conn.execute(
+            "INSERT INTO llm_settings (
+                saved_at, chat_id, chat_name, chat_kind,
+                endpoint, model, api_key, protocol,
+                temperature, top_p, max_tokens, thinking,
+                extra, context, language, mark_ai, interrupt, history
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            params![
+                saved_at,
+                saved.chat_id,
+                name,
+                kind,
+                saved.endpoint,
+                saved.model,
+                saved.api_key,
+                saved.protocol,
+                saved.temperature,
+                saved.top_p,
+                saved.max_tokens,
+                saved.thinking,
+                saved.extra,
+                saved.context,
+                saved.language,
+                saved.mark_ai,
+                saved.interrupt,
+                saved.history,
+            ],
+        )
+        .map_err(|err| err.to_string())?;
+        Ok(())
+    })
 }
 
 fn claim(conn: &Connection, mid: &str) -> Result<bool, String> {

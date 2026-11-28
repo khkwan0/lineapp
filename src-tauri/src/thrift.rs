@@ -45,6 +45,8 @@ pub enum Field {
     List(u8, Vec<Field>),
     Set(u8, Vec<Field>),
     MapBin(Vec<(Vec<u8>, Vec<u8>)>),
+    /// Compact map. The two `u8`s are the key and value wire types.
+    Map(u8, u8, Vec<(Field, Field)>),
 }
 
 #[allow(dead_code)]
@@ -107,7 +109,7 @@ fn wire_type(value: &Field) -> u8 {
         Field::Struct(_) => STRUCT,
         Field::List(_, _) => LIST,
         Field::Set(_, _) => SET,
-        Field::MapBin(_) => MAP,
+        Field::MapBin(_) | Field::Map(_, _, _) => MAP,
     }
 }
 
@@ -144,6 +146,18 @@ fn write_value(buf: &mut Vec<u8>, value: &Field) {
             for (key, item) in mapping {
                 write_value(buf, &Field::Bin(key.clone()));
                 write_value(buf, &Field::Bin(item.clone()));
+            }
+        }
+        Field::Map(key_type, val_type, pairs) => {
+            if pairs.is_empty() {
+                buf.push(0);
+                return;
+            }
+            write_varint(buf, pairs.len() as u64);
+            buf.push((key_type << 4) | val_type);
+            for (key, item) in pairs {
+                write_value(buf, key);
+                write_value(buf, item);
             }
         }
     }
@@ -393,5 +407,37 @@ mod tests {
         let Value::Struct(fields) = message.fields.get(&1).unwrap() else { panic!("struct") };
         let Value::List(items) = fields.get(&3).unwrap() else { panic!("set") };
         assert_eq!(items, &vec![Value::Bytes(b"ua".to_vec()), Value::Bytes(b"ub".to_vec())]);
+    }
+
+    #[test]
+    fn an_i32_struct_map_round_trips() {
+        let frame = write_call(
+            "updateProfileAttributes",
+            &[(
+                2,
+                Field::Struct(vec![(
+                    1,
+                    Field::Map(
+                        I32,
+                        STRUCT,
+                        vec![(
+                            Field::I32(2),
+                            Field::Struct(vec![
+                                (1, bin("Ada")),
+                                (2, Field::Map(BINARY, BINARY, Vec::new())),
+                            ]),
+                        )],
+                    ),
+                )]),
+            )],
+        );
+        let message = read_message(&frame).unwrap();
+        let Value::Struct(request) = message.fields.get(&2).unwrap() else { panic!("request") };
+        let Value::Map(pairs) = request.get(&1).unwrap() else { panic!("map") };
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, Value::Int(2));
+        let Value::Struct(content) = &pairs[0].1 else { panic!("content") };
+        assert_eq!(content.get(&1), Some(&Value::Bytes(b"Ada".to_vec())));
+        assert_eq!(content.get(&2), Some(&Value::Map(Vec::new())));
     }
 }

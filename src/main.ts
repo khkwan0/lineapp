@@ -1,8 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import QRCode from "qrcode";
-import { FONT_IDS, fontStack, readAppearance, saveAppearance, type FontId } from "./appearance";
-import { applyI18n, intlLocale, languageName, languagePreference, LOCALES, onLocaleChange, setLanguage, t, type MessageKey } from "./i18n";
+import { FONT_IDS, fontStack, readAppearance, saveAppearance, toggleTheme, type FontId } from "./appearance";
+import { applyI18n, intlLocale, languageName, languagePreference, LOCALES, onLocaleChange, resolvedLanguage, setLanguage, t, type MessageKey } from "./i18n";
 
 type LoginEvent = {
   type: string;
@@ -94,7 +94,7 @@ type HistoryPayload = {
 
 type ChatPayload = {
   type: string;
-  profile: { name: string; picture: string; mid?: string };
+  profile: { name: string; picture: string; mid?: string; status?: string };
   chats: ChatRow[];
   failures: { name: string; error: string }[];
   unreadTotal: number | null;
@@ -128,7 +128,18 @@ const voiceHoldWaves = document.querySelector<HTMLElement>("#voice-hold-waves")!
 const voiceHoldHint = document.querySelector<HTMLElement>("#voice-hold-hint")!;
 const dictateMeter = document.querySelector<HTMLElement>("#dictate-meter")!;
 const dictateFill = document.querySelector<HTMLElement>("#dictate-meter-fill")!;
+const stickerSuggest = document.querySelector<HTMLElement>("#sticker-suggest")!;
 const stickerPanel = document.querySelector<HTMLElement>("#sticker-panel")!;
+const stickerTabMine = document.querySelector<HTMLButtonElement>("#sticker-tab-mine")!;
+const stickerTabShop = document.querySelector<HTMLButtonElement>("#sticker-tab-shop")!;
+const stickerPacks = document.querySelector<HTMLElement>("#sticker-packs")!;
+const stickerOffer = document.querySelector<HTMLElement>("#sticker-offer")!;
+const stickerOfferText = document.querySelector<HTMLElement>("#sticker-offer-text")!;
+const stickerBuy = document.querySelector<HTMLButtonElement>("#sticker-buy")!;
+const stickerElsewhere = document.querySelector<HTMLElement>("#sticker-elsewhere")!;
+const stickerStoreLink = document.querySelector<HTMLButtonElement>("#sticker-store-link")!;
+const stickerGrid = document.querySelector<HTMLElement>("#sticker-grid")!;
+const stickerNote = document.querySelector<HTMLElement>("#sticker-note")!;
 const fileInput = document.querySelector<HTMLInputElement>("#file-input")!;
 const sendButton = document.querySelector<HTMLButtonElement>("#send-message")!;
 const sendMenu = document.querySelector<HTMLElement>("#send-menu")!;
@@ -212,20 +223,33 @@ const replyText = document.querySelector<HTMLElement>("#reply-text")!;
 const replyThumb = document.querySelector<HTMLImageElement>("#reply-thumb")!;
 const sheetList = document.querySelector<HTMLElement>("#sheet-list")!;
 const sheetLanguage = document.querySelector<HTMLElement>("#sheet-language")!;
+const sheetProfile = document.querySelector<HTMLElement>("#sheet-profile")!;
+const profileOpen = document.querySelector<HTMLButtonElement>("#profile-open")!;
+const profileCurrent = document.querySelector<HTMLElement>("#profile-current")!;
+const profileCoverImg = document.querySelector<HTMLImageElement>("#profile-cover-img")!;
+const profileFaceImg = document.querySelector<HTMLImageElement>("#profile-face-img")!;
+const profileFaceLetter = document.querySelector<HTMLElement>("#profile-face-letter")!;
+const profilePhotoChange = document.querySelector<HTMLButtonElement>("#profile-photo-change")!;
+const profilePhotoRemove = document.querySelector<HTMLButtonElement>("#profile-photo-remove")!;
+const profileCoverChange = document.querySelector<HTMLButtonElement>("#profile-cover-change")!;
+const profileNameInput = document.querySelector<HTMLInputElement>("#profile-name")!;
+const profileStatusInput = document.querySelector<HTMLInputElement>("#profile-status")!;
+const profileNote = document.querySelector<HTMLElement>("#profile-note")!;
+const profileSave = document.querySelector<HTMLButtonElement>("#profile-save")!;
+const profileCancel = document.querySelector<HTMLButtonElement>("#profile-cancel")!;
+const profileFile = document.querySelector<HTMLInputElement>("#profile-file")!;
+const railMe = document.querySelector<HTMLButtonElement>("#rail-me")!;
 const languageCurrent = document.querySelector<HTMLElement>("#language-current")!;
 const languageList = document.querySelector<HTMLUListElement>("#language-list")!;
 const languageOpen = document.querySelector<HTMLButtonElement>("#language-open")!;
 const languageSave = document.querySelector<HTMLButtonElement>("#language-save")!;
 const languageCancel = document.querySelector<HTMLButtonElement>("#language-cancel")!;
 const sheetAgent = document.querySelector<HTMLElement>("#sheet-agent")!;
-const sheetReply = document.querySelector<HTMLElement>("#sheet-reply")!;
 const sheetChatLlm = document.querySelector<HTMLElement>("#sheet-chat-llm")!;
 const chatLlmButton = document.querySelector<HTMLButtonElement>("#chat-llm")!;
-const chatLlmModelLabel = document.querySelector<HTMLElement>("#chat-llm-model")!;
+const chatLlmModelLabel = document.querySelector<HTMLElement>("#chat-llm-name")!;
 const aiMark = document.querySelector<HTMLElement>("#ai-mark")!;
 const agentOpen = document.querySelector<HTMLButtonElement>("#agent-open")!;
-const replyOpen = document.querySelector<HTMLButtonElement>("#reply-open")!;
-const replyCurrent = document.querySelector<HTMLElement>("#reply-current")!;
 const agentCurrent = document.querySelector<HTMLElement>("#agent-current")!;
 const agentEndpoint = document.querySelector<HTMLInputElement>("#agent-endpoint")!;
 const agentModel = document.querySelector<HTMLInputElement>("#agent-model")!;
@@ -244,9 +268,6 @@ const replyMaxTokens = document.querySelector<HTMLInputElement>("#reply-max-toke
 const replyThinking = document.querySelector<HTMLSelectElement>("#reply-thinking")!;
 const agentAutoContext = document.querySelector<HTMLTextAreaElement>("#agent-auto-context")!;
 const replyExtra = document.querySelector<HTMLTextAreaElement>("#reply-extra")!;
-const replySettingsNote = document.querySelector<HTMLElement>("#reply-settings-note")!;
-const replySave = document.querySelector<HTMLButtonElement>("#reply-save")!;
-const replyCancel = document.querySelector<HTMLButtonElement>("#reply-cancel")!;
 const chatLlmProtocol = document.querySelector<HTMLSelectElement>("#chat-llm-protocol")!;
 const chatLlmEndpoint = document.querySelector<HTMLInputElement>("#chat-llm-endpoint")!;
 const chatLlmModel = document.querySelector<HTMLInputElement>("#chat-llm-model")!;
@@ -256,11 +277,13 @@ const chatLlmTopP = document.querySelector<HTMLInputElement>("#chat-llm-top-p")!
 const chatLlmMaxTokens = document.querySelector<HTMLInputElement>("#chat-llm-max-tokens")!;
 const chatLlmThinking = document.querySelector<HTMLSelectElement>("#chat-llm-thinking")!;
 const chatLlmLanguage = document.querySelector<HTMLSelectElement>("#chat-llm-language")!;
+const chatLlmHistory = document.querySelector<HTMLInputElement>("#chat-llm-history")!;
 const chatLlmContext = document.querySelector<HTMLTextAreaElement>("#chat-llm-context")!;
 const chatLlmMarkAi = document.querySelector<HTMLInputElement>("#chat-llm-mark-ai")!;
 const chatLlmInterrupt = document.querySelector<HTMLInputElement>("#chat-llm-interrupt")!;
 const chatLlmExtra = document.querySelector<HTMLTextAreaElement>("#chat-llm-extra")!;
 const autoReplyCancelled = document.querySelector<HTMLElement>("#auto-reply-cancelled")!;
+const autoReplyError = document.querySelector<HTMLElement>("#auto-reply-error")!;
 const chatLlmUnsaved = document.querySelector<HTMLElement>("#chat-llm-unsaved")!;
 const chatLlmNote = document.querySelector<HTMLElement>("#chat-llm-note")!;
 const chatLlmSave = document.querySelector<HTMLButtonElement>("#chat-llm-save")!;
@@ -276,8 +299,13 @@ const agentCancel = document.querySelector<HTMLButtonElement>("#agent-cancel")!;
 let statusKey: MessageKey | "" = "";
 let shownUrl = "";
 let myName = "";
+let myStatus = "";
 let myPicture = "";
+let myCover = "";
 let myMid = "";
+let profileBusy = false;
+let profileFromSettings = false;
+let profilePick: "photo" | "cover" = "photo";
 let rows: ChatRow[] = [];
 let filter = "all";
 let selected = 0;
@@ -346,6 +374,9 @@ type AttachmentDraft = {
   mime: string;
   kind: "image" | "video" | "audio" | "file";
   previewUrl: string;
+  voice?: boolean;
+  duration?: number;
+  peaks?: number[];
 };
 let replyDraft: ReplyDraft | null = null;
 const IMAGE_CAP = 10;
@@ -1101,11 +1132,11 @@ function showThread(chat: ChatRow | undefined): void {
     unreadFocus = "";
     closeGallery();
     closeReactionPicker();
+    composerInput.disabled = true;
     closeStickerPanel();
     abandonDictation();
     void abandonVoice();
     stopVoicePlayback();
-    composerInput.disabled = true;
     attachFile.disabled = true;
     stickerOpen.disabled = true;
     discardAttachment();
@@ -1164,6 +1195,7 @@ function showThread(chat: ChatRow | undefined): void {
   refreshSendButton();
   if (!sheetChatLlm.hidden && chatLlmEditing !== chat.id) {
     sheetChatLlm.hidden = true;
+    sheetProfile.hidden = true;
     sheet.hidden = true;
   }
   void rememberChatLlm(chat.id).then(() => {
@@ -3060,8 +3092,8 @@ function showReport(row: HTMLElement): void {
   sheetAbout.hidden = true;
   sheetLanguage.hidden = true;
   sheetAgent.hidden = true;
-  sheetReply.hidden = true;
   sheetChatLlm.hidden = true;
+  sheetProfile.hidden = true;
   sheetList.hidden = false;
   sheetList.replaceChildren();
   for (const reason of REPORT_REASONS) {
@@ -3093,8 +3125,8 @@ function showShare(text: string): void {
   sheetAbout.hidden = true;
   sheetLanguage.hidden = true;
   sheetAgent.hidden = true;
-  sheetReply.hidden = true;
   sheetChatLlm.hidden = true;
+  sheetProfile.hidden = true;
   sheetList.hidden = false;
   sheetList.replaceChildren();
   const choices = rows.filter((row) => row.id && row.name);
@@ -3824,19 +3856,14 @@ function renderChats(payload: ChatPayload): void {
   const profile = payload.profile;
   myName = profile.name;
   myPicture = profile.picture;
+  if (typeof profile.status === "string") {
+    myStatus = profile.status;
+  }
   if (profile.mid) {
     myMid = profile.mid;
   }
-  if (profile.picture) {
-    railPhoto.hidden = false;
-    railPhoto.src = profile.picture;
-    railInitial.hidden = true;
-    railPhoto.addEventListener("error", () => {
-      railPhoto.hidden = true;
-      railInitial.hidden = false;
-    });
-  }
-  railInitial.textContent = (profile.name.trim()[0] || "L").toUpperCase();
+  paintRailMe();
+  paintProfileCurrent();
   failures.hidden = payload.failures.length === 0;
   failures.textContent = payload.failures.map((failure) => `${failure.name}: ${failure.error}`).join(" ");
   paintUnread();
@@ -4399,26 +4426,6 @@ function paintAgentCurrent(): void {
   agentCurrent.textContent = agentEndpointSummary(agentConfig.endpoint);
 }
 
-function replyThinkingLabel(value: string): string {
-  if (value === "default") {
-    return t("agentThinkingDefault");
-  }
-  if (value === "low") {
-    return t("agentThinkingLow");
-  }
-  if (value === "medium") {
-    return t("agentThinkingMedium");
-  }
-  if (value === "high") {
-    return t("agentThinkingHigh");
-  }
-  return t("agentThinkingOff");
-}
-
-function paintReplyCurrent(): void {
-  replyCurrent.textContent = replyThinkingLabel(agentConfig.replyThinking);
-}
-
 function syncAgentSend(): void {
   agentSend.disabled = agentBusy || agentInput.value.trim().length === 0;
 }
@@ -4437,7 +4444,7 @@ function appendAgentCalls(names: string[]): void {
     seen.add(name);
     const chip = document.createElement("span");
     const key = AGENT_CALL_KEYS[name];
-    chip.textContent = key ? t(key) : name;
+    chip.textContent = key ? t(key) : name.replace(/_/g, " ");
     calls.append(chip);
   }
   agentLog.append(calls);
@@ -4479,8 +4486,8 @@ function paintAgent(): void {
 
 function dismissAgentSettings(): void {
   sheetAgent.hidden = true;
-  sheetReply.hidden = true;
   sheetChatLlm.hidden = true;
+  sheetProfile.hidden = true;
   agentSettingsNote.hidden = true;
   if (agentSettingsFromAgent) {
     agentSettingsFromAgent = false;
@@ -4580,6 +4587,87 @@ function paintMcp(): void {
   }
 }
 
+type ListedTool = { name: string; description: string };
+type ListedServer = { url: string; ok: boolean; error?: string; tools?: ListedTool[] };
+type ToolCatalog = { chats?: ListedTool[]; line?: ListedTool[]; servers?: ListedServer[] };
+
+function isListedTool(value: ListedTool | undefined): value is ListedTool {
+  return !!value && typeof value.name === "string" && typeof value.description === "string";
+}
+
+function toolRow(tool: ListedTool): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "tool-row";
+  const name = document.createElement("strong");
+  name.textContent = tool.name;
+  const description = document.createElement("span");
+  description.textContent = tool.description;
+  row.append(name, description);
+  return row;
+}
+
+function toolGroup(titleKey: MessageKey, tools: ListedTool[]): HTMLElement {
+  const block = document.createElement("section");
+  const heading = document.createElement("h4");
+  heading.dataset.i18n = titleKey;
+  heading.textContent = t(titleKey);
+  block.append(heading);
+  for (const tool of tools) {
+    block.append(toolRow(tool));
+  }
+  return block;
+}
+
+async function loadAgentTools(): Promise<void> {
+  const list = document.querySelector<HTMLElement>("[data-agent-tools-list]");
+  const note = document.querySelector<HTMLElement>("[data-agent-tools-note]");
+  if (!list || !note) {
+    return;
+  }
+  note.hidden = false;
+  note.textContent = t("agentToolsLoading");
+  list.replaceChildren();
+  try {
+    const catalog = await invoke<ToolCatalog>("list_agent_tools");
+    note.hidden = true;
+    const chats = (catalog.chats ?? []).filter(isListedTool);
+    const line = (catalog.line ?? []).filter(isListedTool);
+    const servers = catalog.servers ?? [];
+    list.append(toolGroup("agentToolsChats", chats));
+    list.append(toolGroup("agentToolsLine", line));
+    const remote = document.createElement("section");
+    const heading = document.createElement("h4");
+    heading.dataset.i18n = "agentToolsRemote";
+    heading.textContent = t("agentToolsRemote");
+    remote.append(heading);
+    if (servers.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "tool-server";
+      empty.dataset.i18n = "agentToolsNone";
+      empty.textContent = t("agentToolsNone");
+      remote.append(empty);
+    }
+    for (const server of servers) {
+      if (!server || typeof server.url !== "string") {
+        continue;
+      }
+      const label = document.createElement("p");
+      label.className = "tool-server";
+      const problem = server.ok ? "" : server.error || "";
+      label.textContent = problem ? `${server.url} — ${problem}` : server.url;
+      remote.append(label);
+      const tools = (server.tools ?? []).filter(isListedTool);
+      for (const tool of tools) {
+        remote.append(toolRow(tool));
+      }
+    }
+    list.append(remote);
+  } catch (error) {
+    note.hidden = false;
+    note.textContent = error instanceof Error ? error.message : String(error);
+  }
+}
+
 async function loadMcp(): Promise<void> {
   try {
     mcpServers = await invoke<McpServer[]>("get_mcp_servers");
@@ -4611,6 +4699,9 @@ async function commitMcp(next: McpServer[], section: HTMLElement): Promise<void>
       note.hidden = true;
     }
     paintMcp();
+    if (!sheetAgent.hidden) {
+      void loadAgentTools();
+    }
   } catch (error) {
     if (note) {
       note.hidden = false;
@@ -4651,8 +4742,8 @@ async function showAgentSettings(): Promise<void> {
   sheetAbout.hidden = true;
   sheetLanguage.hidden = true;
   sheetAgent.hidden = false;
-  sheetReply.hidden = true;
   sheetChatLlm.hidden = true;
+  sheetProfile.hidden = true;
   agentSettingsNote.hidden = true;
   sheet.hidden = false;
   try {
@@ -4671,9 +4762,15 @@ async function showAgentSettings(): Promise<void> {
   agentThinking.value = ["default", "off", "low", "medium", "high"].includes(agentConfig.thinking) ? agentConfig.thinking : "default";
   agentStream.checked = agentConfig.stream !== false;
   agentExtra.value = agentConfig.extra;
+  replyTemperature.value = agentConfig.replyTemperature || "";
+  replyTopP.value = agentConfig.replyTopP || "";
+  replyMaxTokens.value = agentConfig.replyMaxTokens || "";
+  replyThinking.value = ["default", "off", "low", "medium", "high"].includes(agentConfig.replyThinking) ? agentConfig.replyThinking : "off";
+  agentAutoContext.value = agentConfig.autoContext || "";
+  replyExtra.value = agentConfig.replyExtra || "";
   paintAgentCurrent();
-  paintReplyCurrent();
   void loadMcp();
+  void loadAgentTools();
 }
 
 function setRail(mode: RailMode): void {
@@ -5420,6 +5517,8 @@ function dispatchSend(item: Outgoing): Promise<void> {
 }
 
 const AUTO_REPLY_KEY = "lineapp.autoReply";
+const DEFAULT_HISTORY = 20;
+const MAX_HISTORY = 100;
 type AutoTurn = { id: string; mine: boolean; name: string; text: string };
 const autoThreads = new Map<string, AutoTurn[]>();
 const autoQueued = new Set<string>();
@@ -5474,7 +5573,7 @@ function replaceAutoThread(chatId: string, messages: HistoryMessage[]): void {
     }
     turns.push({ id: message.id || "", mine: message.mine, name: message.name || "", text });
   }
-  autoThreads.set(chatId, turns.slice(-20));
+  autoThreads.set(chatId, turns.slice(-MAX_HISTORY));
 }
 
 function pushAutoTurn(chatId: string, message: { id?: string; mine: boolean; name?: string; text?: string }): void {
@@ -5491,13 +5590,14 @@ function pushAutoTurn(chatId: string, message: { id?: string; mine: boolean; nam
   } else {
     turns.push(next);
   }
-  autoThreads.set(chatId, turns.slice(-20));
+  autoThreads.set(chatId, turns.slice(-MAX_HISTORY));
 }
 
 const autoReplyStarted = new Map<string, number>();
 const autoReplyToken = new Map<string, number>();
 let autoReplyClock = 0;
 let autoReplyCancelNote = "";
+const autoReplyErrors = new Map<string, string>();
 
 function formatElapsed(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -5510,6 +5610,9 @@ function paintAutoReplyWait(): void {
   const started = openId ? autoReplyStarted.get(openId) : undefined;
   const cancelled = Boolean(openId) && autoReplyCancelNote === openId && !started;
   autoReplyCancelled.hidden = !cancelled;
+  const failure = openId ? autoReplyErrors.get(openId) || "" : "";
+  autoReplyError.hidden = !failure || Boolean(started);
+  autoReplyError.textContent = failure;
   if (!started) {
     autoReplyWait.hidden = true;
     return;
@@ -5561,7 +5664,25 @@ type ChatLlm = {
   language: string;
   markAi: boolean;
   interrupt: boolean;
+  history: number;
 };
+
+function chatHistoryLimit(chatId: string): number {
+  const saved = chatId ? chatLlmCache.get(chatId) : undefined;
+  const raw = saved?.history;
+  if (!raw || raw < 1) {
+    return DEFAULT_HISTORY;
+  }
+  return Math.min(MAX_HISTORY, Math.floor(raw));
+}
+
+function historyField(value: string): number {
+  const raw = Number(value.trim());
+  if (!value.trim() || !Number.isFinite(raw) || raw < 1) {
+    return DEFAULT_HISTORY;
+  }
+  return Math.floor(raw);
+}
 
 const chatLlmCache = new Map<string, ChatLlm | null>();
 let chatLlmEditing = "";
@@ -5594,6 +5715,7 @@ function llmFromAgent(): ChatLlm {
     language: "",
     markAi: false,
     interrupt: false,
+    history: DEFAULT_HISTORY,
   };
 }
 
@@ -5610,6 +5732,7 @@ function fillChatLlm(settings: ChatLlm, saved: boolean): void {
   if (chatLlmLanguage.value !== (settings.language || "")) {
     chatLlmLanguage.value = "";
   }
+  chatLlmHistory.value = String(historyField(String(settings.history ?? DEFAULT_HISTORY)));
   chatLlmContext.value = settings.context;
   chatLlmMarkAi.checked = settings.markAi === true;
   chatLlmInterrupt.checked = settings.interrupt === true;
@@ -5633,7 +5756,8 @@ async function rememberChatLlm(chatId: string): Promise<ChatLlm | null> {
 }
 
 function paintAutoReply(chatId = openId): void {
-  const on = agentReady && autoReplyOn(chatId);
+  const usable = agentReady || chatHasOwnModel(chatId);
+  const on = usable && autoReplyOn(chatId);
   autoReplyButton.setAttribute("aria-pressed", on ? "true" : "false");
   autoReplyButton.dataset.chat = chatId;
   autoReplyButton.disabled = !chatId || (!agentReady && !chatHasOwnModel(chatId));
@@ -5647,7 +5771,7 @@ function paintAutoReply(chatId = openId): void {
     autoReplyButton.title = t("autoReplyOff");
   } else if (!agentProbeStarted) {
     autoReplyButton.title = t("autoReplyChecking");
-  } else if (!agentReady) {
+  } else if (!usable) {
     autoReplyButton.title = agentProbeError || t("autoReplyUnavailable");
   } else {
     autoReplyButton.title = on ? t("autoReplyOn") : t("autoReplyOff");
@@ -5679,7 +5803,7 @@ async function refreshAgentReady(): Promise<void> {
 }
 
 function queueAutoReply(chatId: string, messageId: string): void {
-  if (!chatId || !messageId || !agentReady || !autoReplyOn(chatId)) {
+  if (!chatId || !messageId || !autoReplyOn(chatId) || (!agentReady && !chatHasOwnModel(chatId))) {
     return;
   }
   const key = `${chatId}\u001f${messageId}`;
@@ -5694,7 +5818,7 @@ function queueAutoReply(chatId: string, messageId: string): void {
 }
 
 async function runAutoReply(chatId: string): Promise<void> {
-  if (!agentReady || !autoReplyOn(chatId)) {
+  if (!autoReplyOn(chatId) || (!agentReady && !chatHasOwnModel(chatId))) {
     return;
   }
   if (autoReplyBusy.has(chatId)) {
@@ -5711,6 +5835,7 @@ async function runAutoReply(chatId: string): Promise<void> {
     autoReplyCancelNote = "";
   }
   const token = autoReplyToken.get(chatId) ?? 0;
+  autoReplyErrors.delete(chatId);
   watchAutoReply(chatId);
   if (chatId === openId) {
     sendError.hidden = true;
@@ -5718,7 +5843,7 @@ async function runAutoReply(chatId: string): Promise<void> {
   try {
     const text = await invoke<string>("agent_compose", {
       chatId,
-      messages: turns.slice(-20).map((turn) => ({ mine: turn.mine, name: turn.name, text: turn.text })),
+      messages: turns.slice(-chatHistoryLimit(chatId)).map((turn) => ({ mine: turn.mine, name: turn.name, text: turn.text })),
     });
     if ((autoReplyToken.get(chatId) ?? 0) !== token) {
       return;
@@ -5730,7 +5855,11 @@ async function runAutoReply(chatId: string): Promise<void> {
         reply = mark + reply;
       }
     }
-    if (reply && agentReady && autoReplyOn(chatId)) {
+    if (reply && (agentReady || chatHasOwnModel(chatId)) && autoReplyOn(chatId)) {
+      autoReplyErrors.delete(chatId);
+      if (chatId === openId) {
+        sendError.hidden = true;
+      }
       startSend(chatId, reply, null);
       pushAutoTurn(chatId, { id: "", mine: true, name: "", text: reply });
     }
@@ -5738,9 +5867,11 @@ async function runAutoReply(chatId: string): Promise<void> {
     if ((autoReplyToken.get(chatId) ?? 0) !== token) {
       return;
     }
+    const message = error instanceof Error ? error.message : String(error);
+    autoReplyErrors.set(chatId, message.trim() || "The endpoint did not respond.");
     if (chatId === openId) {
       sendError.hidden = false;
-      sendError.textContent = error instanceof Error ? error.message : String(error);
+      sendError.textContent = autoReplyErrors.get(chatId) || "";
     }
   } finally {
     autoReplyBusy.delete(chatId);
@@ -5820,37 +5951,301 @@ function onSent(payload: SendResult): void {
   }
 };
 
+void listen<SendResult>("line-sent", (event) => {
+  try {
+    onSent(event.payload);
+  } catch (error) {
+    setStatusText(error instanceof Error ? error.message : String(error));
+  }
+});
+
+void listen<{ id?: string; settings?: ChatLlm | null }>("chat-llm", (event) => {
+  const id = event.payload?.id || "";
+  if (!id) {
+    return;
+  }
+  const settings = event.payload.settings ?? null;
+  chatLlmCache.set(id, settings);
+  if (openId === id) {
+    paintAutoReply(id);
+  }
+  if (chatLlmEditing === id && !sheetChatLlm.hidden) {
+    fillChatLlm(settings ?? llmFromAgent(), Boolean(settings));
+    void paintChatLlmCopy(id);
+  }
+});
+
 const MEDIA_LIMIT = 40_000_000;
-const STICKER_PACK: { packageId: string; stickerId: string; animated: boolean }[] = [
-  ...["1988", "1989", "1990", "1991", "1992"].map((stickerId) => ({ packageId: "446", stickerId, animated: false })),
-  ...Array.from({ length: 11 }, (_, index) => ({ packageId: "11537", stickerId: String(52002734 + index), animated: true })),
-];
+
+type StickerSale = "free" | "coins" | "store" | "premium" | "none";
+
+type StickerPack = {
+  id: string;
+  name: string;
+  animated: boolean;
+  stickerIds: string[];
+  owned: boolean;
+  price: string;
+  coins: string;
+  sale: StickerSale;
+};
+
+let stickerShelf: { owned: StickerPack[]; shop: StickerPack[]; shopError: string } | null = null;
+let stickerTab: "mine" | "shop" = "mine";
+let stickerPackId = "";
+let stickerLoad = 0;
+let stickerBuying = false;
+let stickerNoteText = "";
 
 function closeStickerPanel(): void {
   stickerPanel.hidden = true;
   stickerOpen.setAttribute("aria-expanded", "false");
+  scheduleStickerSuggest();
+}
+
+function stickerList(): StickerPack[] {
+  if (!stickerShelf) {
+    return [];
+  }
+  return stickerTab === "mine" ? stickerShelf.owned : stickerShelf.shop;
+}
+
+function selectedStickerPack(): StickerPack | null {
+  const packs = stickerList();
+  return packs.find((pack) => pack.id === stickerPackId) || packs[0] || null;
+}
+
+function asStickerSale(value: unknown): StickerSale {
+  if (value === "free" || value === "coins" || value === "store" || value === "premium" || value === "none") {
+    return value;
+  }
+  return "none";
+}
+
+function asStickerPack(value: unknown): StickerPack | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const row = value as Record<string, unknown>;
+  const id = String(row.id || "");
+  if (!/^\d{1,16}$/.test(id)) {
+    return null;
+  }
+  const stickerIds = Array.isArray(row.stickerIds) ? row.stickerIds.map((item) => String(item)).filter((item) => /^\d{1,16}$/.test(item)) : [];
+  return {
+    id,
+    name: String(row.name || id),
+    animated: Boolean(row.animated),
+    stickerIds,
+    owned: Boolean(row.owned),
+    price: String(row.price || ""),
+    coins: String(row.coins || ""),
+    sale: asStickerSale(row.sale),
+  };
+}
+
+function stickerImageUrl(stickerId: string, animated: boolean): string {
+  const asset = animated ? "sticker_animation.png" : "sticker.png";
+  return `https://stickershop.line-scdn.net/stickershop/v1/sticker/${stickerId}/android/${asset}`;
+}
+
+function showStickerNote(text: string): void {
+  stickerNote.hidden = text.length === 0;
+  stickerNote.textContent = text;
+}
+
+const STICKER_STORE = "https://store.line.me/stickershop";
+
+function stickerStoreUrl(): string {
+  const pack = stickerTab === "shop" ? selectedStickerPack() : null;
+  return pack ? `${STICKER_STORE}/product/${pack.id}` : STICKER_STORE;
+}
+
+function paintStickerElsewhere(): void {
+  const show = stickerTab === "shop";
+  stickerElsewhere.hidden = !show;
+  if (!show) {
+    return;
+  }
+  const url = stickerStoreUrl();
+  stickerStoreLink.title = url;
+  stickerStoreLink.setAttribute("aria-label", url);
+}
+
+function paintStickerOffer(): void {
+  const pack = selectedStickerPack();
+  if (!pack || pack.owned) {
+    stickerOffer.hidden = true;
+    return;
+  }
+  stickerOffer.hidden = false;
+  stickerBuy.hidden = pack.sale !== "free" && pack.sale !== "coins";
+  stickerBuy.disabled = stickerBuying;
+  if (pack.sale === "free") {
+    stickerOfferText.textContent = t("stickerFree");
+    stickerBuy.textContent = stickerBuying ? t("stickerBuying") : t("stickerGet");
+    return;
+  }
+  if (pack.sale === "coins") {
+    const raw = pack.price || pack.coins;
+    const price = /^\d+$/.test(raw) ? `${raw} LINE Coins` : raw;
+    stickerOfferText.textContent = price;
+    stickerBuy.textContent = stickerBuying ? t("stickerBuying") : t("stickerBuy", { price });
+    return;
+  }
+  const key = pack.sale === "store" ? "stickerStoreOnly" : pack.sale === "premium" ? "stickerPremiumOnly" : "stickerUnavailable";
+  stickerOfferText.textContent = t(key);
 }
 
 function paintStickerPanel(): void {
-  if (stickerPanel.childElementCount > 0) {
-    return;
-  }
-  for (const sticker of STICKER_PACK) {
+  stickerTabMine.setAttribute("aria-selected", stickerTab === "mine" ? "true" : "false");
+  stickerTabShop.setAttribute("aria-selected", stickerTab === "shop" ? "true" : "false");
+  const packs = stickerList();
+  const selected = selectedStickerPack();
+  stickerPackId = selected?.id || "";
+  stickerPacks.replaceChildren();
+  for (const pack of packs) {
     const button = document.createElement("button");
     button.type = "button";
-    const asset = sticker.animated ? "sticker_animation.png" : "sticker.png";
+    button.title = pack.owned ? `${pack.name} · ${t("stickerOwned")}` : pack.name;
+    button.setAttribute("aria-selected", pack.id === stickerPackId ? "true" : "false");
     const img = document.createElement("img");
-    img.alt = "";
-    img.src = `https://stickershop.line-scdn.net/stickershop/v1/sticker/${sticker.stickerId}/android/${asset}`;
+    img.alt = pack.name;
+    img.src = `https://stickershop.line-scdn.net/stickershop/v1/product/${pack.id}/android/tab_on.png`;
+    img.addEventListener("error", () => {
+      img.src = `https://stickershop.line-scdn.net/stickershop/v1/product/${pack.id}/android/main.png`;
+    }, { once: true });
     button.append(img);
     button.addEventListener("click", () => {
-      if (!openId || composerInput.disabled) {
-        return;
-      }
-      closeStickerPanel();
-      startSticker(openId, sticker);
+      stickerPackId = pack.id;
+      paintStickerPanel();
+      void fillStickerPack(pack);
     });
-    stickerPanel.append(button);
+    stickerPacks.append(button);
+  }
+  stickerGrid.replaceChildren();
+  if (selected) {
+    for (const stickerId of selected.stickerIds) {
+      const button = document.createElement("button");
+      button.type = "button";
+      if (!selected.owned) {
+        button.dataset.locked = "true";
+      }
+      const img = document.createElement("img");
+      img.alt = "";
+      img.src = stickerImageUrl(stickerId, selected.animated);
+      button.append(img);
+      button.addEventListener("click", () => {
+        if (!selected.owned || !openId || composerInput.disabled) {
+          return;
+        }
+        closeStickerPanel();
+        startSticker(openId, { packageId: selected.id, stickerId, animated: selected.animated });
+      });
+      stickerGrid.append(button);
+    }
+  }
+  paintStickerOffer();
+  paintStickerElsewhere();
+  if (!stickerShelf) {
+    showStickerNote(stickerNoteText || t("stickerLoading"));
+    return;
+  }
+  if (stickerNoteText) {
+    showStickerNote(stickerNoteText);
+    return;
+  }
+  if (packs.length === 0) {
+    showStickerNote(stickerTab === "shop" && stickerShelf.shopError ? stickerShelf.shopError : t("stickerEmpty"));
+    return;
+  }
+  showStickerNote("");
+}
+
+function replaceStickerPack(pack: StickerPack): void {
+  if (!stickerShelf) {
+    return;
+  }
+  for (const list of [stickerShelf.owned, stickerShelf.shop]) {
+    const index = list.findIndex((item) => item.id === pack.id);
+    if (index >= 0) {
+      list[index] = { ...list[index], ...pack, owned: list[index].owned || pack.owned };
+    }
+  }
+  if (pack.owned && !stickerShelf.owned.some((item) => item.id === pack.id)) {
+    stickerShelf.owned.unshift(pack);
+  }
+}
+
+async function fillStickerPack(pack: StickerPack): Promise<void> {
+  if (pack.stickerIds.length > 0 && (pack.owned || pack.sale === "free" || pack.sale === "store" || pack.sale === "premium" || pack.sale === "none" || pack.price)) {
+    return;
+  }
+  try {
+    const loaded = asStickerPack(await invoke("sticker_pack", { productId: pack.id }));
+    if (loaded) {
+      replaceStickerPack(loaded);
+      paintStickerPanel();
+    }
+  } catch (error) {
+    showStickerNote(error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function loadStickerShelf(): Promise<void> {
+  const ticket = stickerLoad + 1;
+  stickerLoad = ticket;
+  stickerNoteText = "";
+  if (!stickerShelf) {
+    paintStickerPanel();
+  }
+  try {
+    const payload = await invoke<{ owned?: unknown; shop?: unknown; shopError?: unknown }>("list_stickers");
+    if (ticket !== stickerLoad) {
+      return;
+    }
+    const owned = Array.isArray(payload.owned) ? payload.owned.map(asStickerPack).filter((pack): pack is StickerPack => Boolean(pack)) : [];
+    const shop = Array.isArray(payload.shop) ? payload.shop.map(asStickerPack).filter((pack): pack is StickerPack => Boolean(pack)) : [];
+    stickerShelf = { owned, shop, shopError: String(payload.shopError || "") };
+    if (!stickerList().some((pack) => pack.id === stickerPackId)) {
+      stickerPackId = stickerList()[0]?.id || "";
+    }
+    paintStickerPanel();
+    const selected = selectedStickerPack();
+    if (selected) {
+      void fillStickerPack(selected);
+    }
+  } catch (error) {
+    if (ticket !== stickerLoad) {
+      return;
+    }
+    stickerNoteText = error instanceof Error ? error.message : String(error);
+    paintStickerPanel();
+  }
+}
+
+async function buySelectedSticker(): Promise<void> {
+  const pack = selectedStickerPack();
+  if (!pack || pack.owned || stickerBuying || (pack.sale !== "free" && pack.sale !== "coins")) {
+    return;
+  }
+  stickerBuying = true;
+  stickerNoteText = "";
+  paintStickerOffer();
+  try {
+    const result = await invoke<{ owned?: boolean; confirmUrl?: string; pack?: unknown }>("buy_sticker", { productId: pack.id });
+    if (result.confirmUrl?.startsWith("https://")) {
+      stickerNoteText = t("stickerConfirm");
+      void invoke("open_link", { url: result.confirmUrl });
+      return;
+    }
+    const loaded = asStickerPack(result.pack);
+    replaceStickerPack(loaded ? { ...loaded, owned: true } : { ...pack, owned: true });
+  } catch (error) {
+    stickerNoteText = error instanceof Error ? error.message : String(error);
+  } finally {
+    stickerBuying = false;
+    paintStickerPanel();
   }
 }
 
@@ -6000,6 +6395,7 @@ function paintDictate(): void {
   dictateButton.setAttribute("aria-pressed", listening || dictatePhase === "transcribe" ? "true" : "false");
   const key = dictatePhase === "prepare" ? "dictatePrepare" : dictatePhase === "transcribe" ? "dictateWorking" : listening ? "dictateStop" : "dictate";
   dictateButton.setAttribute("aria-label", t(key));
+  dictateButton.title = t(key);
 }
 
 function insertDictation(text: string): void {
@@ -6019,6 +6415,7 @@ function insertDictation(text: string): void {
   composerInput.setSelectionRange(caret, caret);
   sendError.hidden = true;
   refreshSendButton();
+  scheduleStickerSuggest();
   composerInput.focus();
 }
 
@@ -6255,24 +6652,33 @@ async function beginVoice(gen: number): Promise<void> {
   }, 90);
 }
 
-function sendVoice(chatId: string, clip: VoiceClip, reply: ReplyDraft | null): void {
-  const url = URL.createObjectURL(new Blob([decodeBase64(clip.data)], { type: clip.mime || "audio/mp4" }));
-  void queueOutgoing({
-    localId: `local-${Date.now()}-${outgoingSeq += 1}`,
-    chatId,
-    text: t("voiceMessage"),
-    reply,
-    time: Date.now(),
-    state: "sending",
-    error: "",
-    knownIds: chatId === openId ? paintedIds : "",
-    kind: "audio",
-    previewUrl: url,
-    duration: clip.duration,
-    peaks: clip.peaks,
-    voice: true,
-    file: { name: "voice.m4a", mime: clip.mime || "audio/mp4", data: clip.data },
-  });
+function stageVoiceClip(chatId: string, clip: VoiceClip): void {
+  const mime = clip.mime || "audio/mp4";
+  const blob = new Blob([decodeBase64(clip.data)], { type: mime });
+  const previewUrl = URL.createObjectURL(blob);
+  const kept = attachmentDrafts.filter((draft) => !draft.voice);
+  for (const draft of attachmentDrafts) {
+    if (draft.voice && draft.previewUrl) {
+      URL.revokeObjectURL(draft.previewUrl);
+    }
+  }
+  attachmentDrafts = [
+    ...kept,
+    {
+      chatId,
+      file: new File([blob], "voice.m4a", { type: mime }),
+      name: "voice.m4a",
+      mime,
+      kind: "audio",
+      previewUrl,
+      voice: true,
+      duration: clip.duration,
+      peaks: clip.peaks,
+    },
+  ];
+  attachmentEpoch += 1;
+  paintAttachment();
+  composerInput.focus();
 }
 
 async function finishVoice(forceCancel: boolean): Promise<void> {
@@ -6300,10 +6706,7 @@ async function finishVoice(forceCancel: boolean): Promise<void> {
     if (gen !== voiceGen || !openId) {
       return;
     }
-    const reply = replyDraft;
-    replyDraft = null;
-    paintReplyBar();
-    sendVoice(openId, clip, reply);
+    stageVoiceClip(openId, clip);
   } catch (error) {
     if (gen === voiceGen) {
       sendError.hidden = false;
@@ -6394,7 +6797,9 @@ function paintAttachment(): void {
   attachmentDrafts.forEach((draft, index) => {
     const item = document.createElement("span");
     item.className = "attach-item";
-    if ((draft.kind === "image" || draft.kind === "video") && draft.previewUrl) {
+    if (draft.voice && draft.previewUrl) {
+      item.append(voiceCard("", draft.duration || 0, draft.previewUrl, "", draft.peaks || []));
+    } else if ((draft.kind === "image" || draft.kind === "video") && draft.previewUrl) {
       const thumb = document.createElement(draft.kind === "video" ? "video" : "img");
       thumb.className = "attach-thumb";
       thumb.src = draft.previewUrl;
@@ -6426,6 +6831,7 @@ function paintAttachment(): void {
 }
 
 function discardAttachment(): void {
+  stopVoicePlayback();
   for (const draft of attachmentDrafts) {
     if (draft.previewUrl) {
       URL.revokeObjectURL(draft.previewUrl);
@@ -6470,9 +6876,11 @@ function stageFiles(chatId: string, files: File[]): void {
     sendError.textContent = t("fileTooLarge");
     return;
   }
-  const prior = imageBatch && attachmentDrafts.every((draft) => draft.kind === "image") ? attachmentDrafts : [];
+  const voices = attachmentDrafts.filter((draft) => draft.voice);
+  const rest = attachmentDrafts.filter((draft) => !draft.voice);
+  const prior = imageBatch && rest.every((draft) => draft.kind === "image") ? rest : [];
   if (prior.length === 0) {
-    for (const draft of attachmentDrafts) {
+    for (const draft of rest) {
       if (draft.previewUrl) {
         URL.revokeObjectURL(draft.previewUrl);
       }
@@ -6496,7 +6904,7 @@ function stageFiles(chatId: string, files: File[]): void {
       previewUrl: kind === "image" || kind === "video" || kind === "audio" ? URL.createObjectURL(file) : "",
     };
   });
-  attachmentDrafts = imageBatch ? [...prior, ...added] : added;
+  attachmentDrafts = [...(imageBatch ? [...prior, ...added] : added), ...voices];
   attachmentEpoch += 1;
   const overflow = fitting.length > taken.length;
   sendError.hidden = !(tooLarge || overflow);
@@ -6513,6 +6921,7 @@ async function submitComposer(silent = false): Promise<void> {
   if (sendBusy || !openId || composerInput.disabled) {
     return;
   }
+  stopVoicePlayback();
   sendNote.hidden = true;
   const text = composerInput.value.trim();
   const drafts = attachmentDrafts.slice();
@@ -6546,6 +6955,7 @@ async function submitComposer(silent = false): Promise<void> {
   replyDraft = null;
   paintReplyBar();
   composerInput.value = "";
+  hideStickerSuggest();
   if (drafts.length > 0) {
     attachmentDrafts = [];
     attachmentEpoch += 1;
@@ -6554,14 +6964,42 @@ async function submitComposer(silent = false): Promise<void> {
   sendBusy = false;
   sendError.hidden = true;
   refreshSendButton();
-  const album = drafts.length > 1 && drafts.every((draft) => draft.kind === "image")
+  const media = drafts.filter((draft) => !draft.voice);
+  const album = media.length > 1 && media.every((draft) => draft.kind === "image")
     ? `${Date.now()}${Math.floor(Math.random() * 100000).toString().padStart(5, "0")}`
     : "";
-  const albumUrls = album ? drafts.map((draft) => draft.previewUrl) : [];
+  const albumUrls = album ? media.map((draft) => draft.previewUrl) : [];
+  let mediaIndex = 0;
   for (let index = 0; index < drafts.length; index += 1) {
     const draft = drafts[index];
+    if (draft.voice) {
+      await queueOutgoing({
+        localId: `local-${Date.now()}-${outgoingSeq += 1}`,
+        chatId,
+        text: t("voiceMessage"),
+        reply: text ? null : reply,
+        time: Date.now(),
+        state: "sending",
+        error: "",
+        knownIds: chatId === openId ? paintedIds : "",
+        kind: "audio",
+        previewUrl: draft.previewUrl,
+        duration: draft.duration || 0,
+        peaks: draft.peaks,
+        voice: true,
+        file: {
+          name: draft.name,
+          mime: draft.mime,
+          data: encoded[index],
+        },
+        silent,
+      });
+      continue;
+    }
     const preview = draft.kind === "image" || draft.kind === "video";
     const duration = draft.kind === "audio" ? await probeDuration(draft.previewUrl) : 0;
+    const seq = album ? mediaIndex + 1 : 0;
+    mediaIndex += 1;
     await queueOutgoing({
       localId: `local-${Date.now()}-${outgoingSeq += 1}`,
       chatId,
@@ -6574,17 +7012,17 @@ async function submitComposer(silent = false): Promise<void> {
       kind: draft.kind,
       previewUrl: draft.previewUrl,
       duration,
-      albumUrls: index === 0 ? albumUrls : undefined,
+      albumUrls: seq === 1 ? albumUrls : undefined,
       file: {
         name: draft.name,
         mime: draft.mime,
         data: encoded[index],
         groupId: album,
-        groupSeq: album ? index + 1 : 0,
-        groupCount: album ? drafts.length : 0,
+        groupSeq: seq,
+        groupCount: album ? media.length : 0,
       },
       silent,
-    }, !album || index === 0);
+    }, seq <= 1);
   }
   if (text) {
     startSend(chatId, text, reply, silent);
@@ -6602,6 +7040,7 @@ composerInput.addEventListener("keydown", (event) => {
 composerInput.addEventListener("input", () => {
   refreshSendButton();
   interruptAutoReply();
+  scheduleStickerSuggest();
 });
 
 let sendHold: number | null = null;
@@ -6683,7 +7122,7 @@ sendMenu.addEventListener("click", (event) => {
 
 autoReplyButton.addEventListener("click", () => {
   const chatId = autoReplyButton.dataset.chat || openId;
-  if (!chatId || chatId !== openId || !agentReady || autoReplyButton.disabled) {
+  if (!chatId || chatId !== openId || autoReplyButton.disabled) {
     return;
   }
   if (autoReplyOn(chatId)) {
@@ -6877,9 +7316,128 @@ stickerOpen.addEventListener("click", () => {
   if (!openId || composerInput.disabled) {
     return;
   }
+  if (!stickerPanel.hidden) {
+    closeStickerPanel();
+    return;
+  }
+  hideStickerSuggest();
+  stickerPanel.hidden = false;
+  stickerOpen.setAttribute("aria-expanded", "true");
+  void loadStickerShelf();
+});
+
+let suggestTimer = 0;
+let suggestTicket = 0;
+
+function hideStickerSuggest(): void {
+  suggestTicket += 1;
+  window.clearTimeout(suggestTimer);
+  stickerSuggest.hidden = true;
+  stickerSuggest.replaceChildren();
+}
+
+function scheduleStickerSuggest(): void {
+  window.clearTimeout(suggestTimer);
+  const text = composerInput.value.trim();
+  if (!openId || composerInput.disabled || text.length === 0 || !stickerPanel.hidden) {
+    hideStickerSuggest();
+    return;
+  }
+  suggestTimer = window.setTimeout(() => {
+    void loadStickerSuggest(text);
+  }, 160);
+}
+
+async function loadStickerSuggest(text: string): Promise<void> {
+  const ticket = suggestTicket + 1;
+  suggestTicket = ticket;
+  let stickers: Array<{ packageId: string; stickerId: string; animated: boolean }> = [];
+  try {
+    const payload = await invoke<{ stickers?: unknown }>("suggest_stickers", {
+      query: text.slice(0, 80),
+      language: resolvedLanguage(),
+    });
+    if (Array.isArray(payload.stickers)) {
+      for (const item of payload.stickers) {
+        if (!item || typeof item !== "object") {
+          continue;
+        }
+        const row = item as Record<string, unknown>;
+        const packageId = String(row.packageId || "");
+        const stickerId = String(row.stickerId || "");
+        if (!/^\d{1,16}$/.test(packageId) || !/^\d{1,16}$/.test(stickerId)) {
+          continue;
+        }
+        stickers.push({ packageId, stickerId, animated: Boolean(row.animated) });
+      }
+    }
+  } catch {
+    stickers = [];
+  }
+  if (ticket !== suggestTicket || composerInput.value.trim() !== text || !stickerPanel.hidden) {
+    return;
+  }
+  stickerSuggest.replaceChildren();
+  stickerSuggest.setAttribute("aria-label", t("stickers"));
+  if (stickers.length === 0) {
+    stickerSuggest.hidden = true;
+    return;
+  }
+  for (const sticker of stickers) {
+    const button = document.createElement("button");
+    button.type = "button";
+    const img = document.createElement("img");
+    img.alt = "";
+    img.src = stickerImageUrl(sticker.stickerId, sticker.animated);
+    img.addEventListener("error", () => {
+      img.src = stickerImageUrl(sticker.stickerId, false);
+    }, { once: true });
+    button.append(img);
+    button.addEventListener("click", () => {
+      if (!openId || composerInput.disabled) {
+        return;
+      }
+      hideStickerSuggest();
+      composerInput.value = "";
+      refreshSendButton();
+      interruptAutoReply();
+      startSticker(openId, sticker);
+    });
+    stickerSuggest.append(button);
+  }
+  stickerSuggest.hidden = false;
+}
+
+stickerTabMine.addEventListener("click", () => {
+  stickerTab = "mine";
+  stickerNoteText = "";
+  stickerPackId = stickerList()[0]?.id || "";
   paintStickerPanel();
-  stickerPanel.hidden = !stickerPanel.hidden;
-  stickerOpen.setAttribute("aria-expanded", stickerPanel.hidden ? "false" : "true");
+  const selected = selectedStickerPack();
+  if (selected) {
+    void fillStickerPack(selected);
+  }
+});
+
+stickerTabShop.addEventListener("click", () => {
+  stickerTab = "shop";
+  stickerNoteText = "";
+  stickerPackId = stickerList()[0]?.id || "";
+  paintStickerPanel();
+  const selected = selectedStickerPack();
+  if (selected) {
+    void fillStickerPack(selected);
+  }
+});
+
+stickerBuy.addEventListener("click", () => {
+  void buySelectedSticker();
+});
+
+stickerStoreLink.addEventListener("click", () => {
+  void invoke("open_link", { url: stickerStoreUrl() }).catch((error: unknown) => {
+    showStickerNote(error instanceof Error ? error.message : String(error));
+  });
 });
 
 function closeMenu(): void {
@@ -6896,8 +7454,8 @@ function showSheet(title: string, body: string): void {
   sheetAbout.hidden = true;
   sheetLanguage.hidden = true;
   sheetAgent.hidden = true;
-  sheetReply.hidden = true;
   sheetChatLlm.hidden = true;
+  sheetProfile.hidden = true;
   sheet.hidden = false;
 }
 
@@ -6930,8 +7488,8 @@ function showAbout(): void {
   sheetAbout.hidden = false;
   sheetLanguage.hidden = true;
   sheetAgent.hidden = true;
-  sheetReply.hidden = true;
   sheetChatLlm.hidden = true;
+  sheetProfile.hidden = true;
   sheet.hidden = false;
 }
 
@@ -6981,13 +7539,16 @@ function showLanguage(): void {
   sheetAbout.hidden = true;
   sheetLanguage.hidden = false;
   sheetAgent.hidden = true;
-  sheetReply.hidden = true;
   sheetChatLlm.hidden = true;
+  sheetProfile.hidden = true;
   sheet.hidden = false;
 }
 
 function refreshLocale(): void {
   applyI18n();
+  if (!stickerPanel.hidden) {
+    paintStickerPanel();
+  }
   paintDictate();
   if (voiceLive) {
     voiceHoldHint.textContent = t(voiceCanceling ? "voiceRelease" : "voiceSlide");
@@ -7009,12 +7570,11 @@ function refreshLocale(): void {
       sheetTitle.textContent = t("language");
     } else if (!sheetAgent.hidden) {
       sheetTitle.textContent = t("agent");
-    } else if (!sheetReply.hidden) {
-      sheetTitle.textContent = t("autoReply");
-      paintReplyCurrent();
     } else if (!sheetChatLlm.hidden) {
       const row = rows.find((chat) => chat.id === chatLlmEditing);
       sheetTitle.textContent = row?.name || t("chatLlm");
+    } else if (!sheetProfile.hidden) {
+      sheetTitle.textContent = t("profile");
     } else if (!sheetSettings.hidden) {
       sheetTitle.textContent = t("settings");
       paintTextSize();
@@ -7137,17 +7697,16 @@ async function showSettings(): Promise<void> {
   sheetAbout.hidden = true;
   sheetLanguage.hidden = true;
   sheetAgent.hidden = true;
-  sheetReply.hidden = true;
   sheetChatLlm.hidden = true;
+  sheetProfile.hidden = true;
   sheet.hidden = false;
   paintLanguageCurrent();
+  paintProfileCurrent();
   paintAgentCurrent();
-  paintReplyCurrent();
   void invoke<AgentConfig>("get_agent_settings")
     .then((settings) => {
       agentConfig = { ...EMPTY_AGENT, ...settings };
       paintAgentCurrent();
-      paintReplyCurrent();
       if (railMode === "agent") {
         paintAgent();
       }
@@ -7191,6 +7750,268 @@ async function showSettings(): Promise<void> {
   }
 }
 
+type AccountCard = {
+  id?: string;
+  name?: string;
+  status?: string;
+  picture?: string;
+  cover?: string;
+};
+
+function profileSay(text: string): void {
+  profileNote.hidden = text.length === 0;
+  profileNote.textContent = text;
+}
+
+function paintProfileCurrent(): void {
+  profileCurrent.textContent = myName.trim();
+}
+
+function paintRailMe(): void {
+  const label = myName.trim();
+  railInitial.textContent = (label[0] || "L").toUpperCase();
+  if (!myPicture) {
+    railPhoto.hidden = true;
+    railPhoto.removeAttribute("src");
+    railInitial.hidden = false;
+    return;
+  }
+  railInitial.hidden = true;
+  railPhoto.hidden = false;
+  railPhoto.onerror = () => {
+    railPhoto.hidden = true;
+    railInitial.hidden = false;
+  };
+  if (railPhoto.getAttribute("src") !== myPicture) {
+    railPhoto.src = myPicture;
+  }
+}
+
+function paintProfileMedia(): void {
+  const label = myName.trim();
+  profileFaceLetter.textContent = (label[0] || "L").toUpperCase();
+  profilePhotoRemove.hidden = myPicture.length === 0;
+  if (myPicture) {
+    profileFaceImg.hidden = false;
+    profileFaceLetter.hidden = true;
+    profileFaceImg.onerror = () => {
+      profileFaceImg.hidden = true;
+      profileFaceLetter.hidden = false;
+    };
+    if (profileFaceImg.getAttribute("src") !== myPicture) {
+      profileFaceImg.src = myPicture;
+    }
+  } else {
+    profileFaceImg.hidden = true;
+    profileFaceImg.removeAttribute("src");
+    profileFaceLetter.hidden = false;
+  }
+  if (myCover) {
+    profileCoverImg.hidden = false;
+    profileCoverImg.onerror = () => {
+      profileCoverImg.hidden = true;
+    };
+    if (profileCoverImg.getAttribute("src") !== myCover) {
+      profileCoverImg.src = myCover;
+    }
+  } else {
+    profileCoverImg.hidden = true;
+    profileCoverImg.removeAttribute("src");
+  }
+}
+
+function fillProfileForm(): void {
+  profileNameInput.value = myName;
+  profileStatusInput.value = myStatus;
+  paintProfileMedia();
+}
+
+function rememberAccount(card: AccountCard, fields: boolean): void {
+  if (typeof card.name === "string") {
+    myName = card.name;
+  }
+  if (typeof card.status === "string") {
+    myStatus = card.status;
+  }
+  if (typeof card.picture === "string") {
+    myPicture = card.picture;
+  }
+  if (typeof card.cover === "string") {
+    myCover = card.cover;
+  }
+  paintRailMe();
+  paintProfileCurrent();
+  if (fields) {
+    fillProfileForm();
+  } else {
+    paintProfileMedia();
+  }
+}
+
+function profileLock(on: boolean): void {
+  profileBusy = on;
+  profileSave.disabled = on;
+  profileCancel.disabled = on;
+  profilePhotoChange.disabled = on;
+  profilePhotoRemove.disabled = on || myPicture.length === 0;
+  profileCoverChange.disabled = on;
+  profileNameInput.disabled = on;
+  profileStatusInput.disabled = on;
+}
+
+async function showProfile(fromSettings: boolean): Promise<void> {
+  profileFromSettings = fromSettings;
+  sheetTitle.textContent = t("profile");
+  sheetBody.hidden = true;
+  sheetSettings.hidden = true;
+  sheetList.hidden = true;
+  sheetAbout.hidden = true;
+  sheetLanguage.hidden = true;
+  sheetAgent.hidden = true;
+  sheetChatLlm.hidden = true;
+  sheetProfile.hidden = false;
+  sheet.hidden = false;
+  profileSay("");
+  fillProfileForm();
+  profileLock(true);
+  try {
+    rememberAccount(await invoke<AccountCard>("get_my_profile"), true);
+  } catch (error) {
+    profileSay(error instanceof Error ? error.message : String(error));
+  } finally {
+    profileLock(false);
+  }
+}
+
+function leaveProfile(): void {
+  sheetProfile.hidden = true;
+  profileSay("");
+  if (profileFromSettings) {
+    sheetSettings.hidden = false;
+    sheetTitle.textContent = t("settings");
+    paintProfileCurrent();
+    return;
+  }
+  sheet.hidden = true;
+}
+
+async function saveProfile(): Promise<void> {
+  if (profileBusy) {
+    return;
+  }
+  const name = profileNameInput.value.trim();
+  const status = profileStatusInput.value.trim();
+  if (!name) {
+    profileSay(t("profileNameRequired"));
+    profileNameInput.focus();
+    return;
+  }
+  if ([...name].length > 20) {
+    profileSay(t("nameTooLong"));
+    return;
+  }
+  if ([...status].length > 500) {
+    profileSay(t("statusTooLong"));
+    return;
+  }
+  profileLock(true);
+  profileSay("");
+  try {
+    rememberAccount(await invoke<AccountCard>("set_my_profile", { name, status }), true);
+    leaveProfile();
+  } catch (error) {
+    profileSay(error instanceof Error ? error.message : String(error));
+    profileLock(false);
+  }
+}
+
+function fileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const raw = String(reader.result || "");
+      const comma = raw.indexOf(",");
+      resolve(comma >= 0 ? raw.slice(comma + 1) : raw);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("that photo could not be read"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function useProfileFile(file: File): Promise<void> {
+  profileLock(true);
+  profileSay("");
+  try {
+    const data = await fileAsBase64(file);
+    const command = profilePick === "cover" ? "set_my_cover" : "set_my_picture";
+    rememberAccount(await invoke<AccountCard>(command, { data }), false);
+  } catch (error) {
+    profileSay(error instanceof Error ? error.message : String(error));
+  } finally {
+    profileLock(false);
+  }
+}
+
+railMe.addEventListener("click", () => {
+  closeMenu();
+  void showProfile(false);
+});
+
+profileOpen.addEventListener("click", () => {
+  void showProfile(true);
+});
+
+profileSave.addEventListener("click", () => {
+  void saveProfile();
+});
+
+profileCancel.addEventListener("click", () => {
+  if (!profileBusy) {
+    leaveProfile();
+  }
+});
+
+profileNameInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    void saveProfile();
+  }
+});
+
+profilePhotoChange.addEventListener("click", () => {
+  profilePick = "photo";
+  profileFile.click();
+});
+
+profileCoverChange.addEventListener("click", () => {
+  profilePick = "cover";
+  profileFile.click();
+});
+
+profilePhotoRemove.addEventListener("click", () => {
+  if (profileBusy || !myPicture) {
+    return;
+  }
+  profileLock(true);
+  profileSay("");
+  void invoke<AccountCard>("clear_my_picture")
+    .then((card) => rememberAccount(card, false))
+    .catch((error: unknown) => {
+      profileSay(error instanceof Error ? error.message : String(error));
+    })
+    .finally(() => {
+      profileLock(false);
+    });
+});
+
+profileFile.addEventListener("change", () => {
+  const file = profileFile.files?.[0];
+  profileFile.value = "";
+  if (file) {
+    void useProfileFile(file);
+  }
+});
+
 languageOpen.addEventListener("click", () => {
   showLanguage();
 });
@@ -7198,8 +8019,8 @@ languageOpen.addEventListener("click", () => {
 languageSave.addEventListener("click", () => {
   sheetLanguage.hidden = true;
   sheetAgent.hidden = true;
-  sheetReply.hidden = true;
   sheetChatLlm.hidden = true;
+  sheetProfile.hidden = true;
   sheetSettings.hidden = false;
   setLanguage(pendingLanguage);
   sheetTitle.textContent = t("settings");
@@ -7219,91 +8040,9 @@ agentCancel.addEventListener("click", () => {
   dismissAgentSettings();
 });
 
-function fillReplySettings(): void {
-  replyTemperature.value = agentConfig.replyTemperature || "";
-  replyTopP.value = agentConfig.replyTopP || "";
-  replyMaxTokens.value = agentConfig.replyMaxTokens || "";
-  replyThinking.value = ["default", "off", "low", "medium", "high"].includes(agentConfig.replyThinking) ? agentConfig.replyThinking : "off";
-  agentAutoContext.value = agentConfig.autoContext || "";
-  replyExtra.value = agentConfig.replyExtra || "";
-  paintReplyCurrent();
-}
-
-async function showReplySettings(): Promise<void> {
-  sheetTitle.textContent = t("autoReply");
-  sheetBody.hidden = true;
-  sheetSettings.hidden = true;
-  sheetList.hidden = true;
-  sheetAbout.hidden = true;
-  sheetLanguage.hidden = true;
-  sheetAgent.hidden = true;
-  sheetReply.hidden = true;
-  sheetChatLlm.hidden = true;
-  sheetReply.hidden = false;
-  replySettingsNote.hidden = true;
-  sheet.hidden = false;
-  try {
-    agentConfig = { ...EMPTY_AGENT, ...(await invoke<AgentConfig>("get_agent_settings")) };
-  } catch (error) {
-    replySettingsNote.hidden = false;
-    replySettingsNote.textContent = error instanceof Error ? error.message : String(error);
-  }
-  fillReplySettings();
-  void loadMcp();
-}
-
-function dismissReplySettings(): void {
-  sheetReply.hidden = true;
-  sheetChatLlm.hidden = true;
-  replySettingsNote.hidden = true;
-  sheetSettings.hidden = false;
-  sheetTitle.textContent = t("settings");
-}
-
-replyOpen.addEventListener("click", () => {
-  void showReplySettings();
-});
-
-replyCancel.addEventListener("click", () => {
-  dismissReplySettings();
-});
-
-replySave.addEventListener("click", () => {
-  replySettingsNote.hidden = true;
-  replySave.disabled = true;
-  const settings = {
-    temperature: replyTemperature.value.trim(),
-    topP: replyTopP.value.trim(),
-    maxTokens: replyMaxTokens.value.trim(),
-    thinking: replyThinking.value,
-    extra: replyExtra.value.trim(),
-    autoContext: agentAutoContext.value.trim(),
-  };
-  void invoke("set_reply_settings", { settings })
-    .then(() => {
-      agentConfig = {
-        ...agentConfig,
-        replyTemperature: settings.temperature,
-        replyTopP: settings.topP,
-        replyMaxTokens: settings.maxTokens,
-        replyThinking: settings.thinking,
-        replyExtra: settings.extra,
-        autoContext: settings.autoContext,
-      };
-      dismissReplySettings();
-      paintReplyCurrent();
-    })
-    .catch((error: unknown) => {
-      replySettingsNote.hidden = false;
-      replySettingsNote.textContent = error instanceof Error ? error.message : String(error);
-    })
-    .finally(() => {
-      replySave.disabled = false;
-    });
-});
-
 function dismissChatLlm(): void {
   sheetChatLlm.hidden = true;
+  sheetProfile.hidden = true;
   chatLlmNote.hidden = true;
   chatLlmEditing = "";
   sheet.hidden = true;
@@ -7322,7 +8061,6 @@ async function showChatLlm(chatId: string): Promise<void> {
   sheetAbout.hidden = true;
   sheetLanguage.hidden = true;
   sheetAgent.hidden = true;
-  sheetReply.hidden = true;
   sheetChatLlm.hidden = false;
   sheetChatLlm.scrollTop = 0;
   chatLlmNote.hidden = true;
@@ -7467,6 +8205,7 @@ chatLlmSave.addEventListener("click", () => {
     language: chatLlmLanguage.value,
     extra: chatLlmExtra.value.trim(),
     context: chatLlmContext.value.trim(),
+    history: historyField(chatLlmHistory.value),
     markAi: chatLlmMarkAi.checked,
     interrupt: chatLlmInterrupt.checked,
   };
@@ -7489,6 +8228,14 @@ chatLlmSave.addEventListener("click", () => {
 agentSave.addEventListener("click", () => {
   agentSettingsNote.hidden = true;
   agentSave.disabled = true;
+  const reply = {
+    temperature: replyTemperature.value.trim(),
+    topP: replyTopP.value.trim(),
+    maxTokens: replyMaxTokens.value.trim(),
+    thinking: replyThinking.value,
+    extra: replyExtra.value.trim(),
+    autoContext: agentAutoContext.value.trim(),
+  };
   const settings: AgentConfig = {
     endpoint: agentEndpoint.value.trim(),
     model: agentModel.value.trim(),
@@ -7500,18 +8247,20 @@ agentSave.addEventListener("click", () => {
     thinking: agentThinking.value,
     extra: agentExtra.value.trim(),
     stream: agentStream.checked,
-    autoContext: agentConfig.autoContext,
-    replyTemperature: agentConfig.replyTemperature,
-    replyTopP: agentConfig.replyTopP,
-    replyMaxTokens: agentConfig.replyMaxTokens,
-    replyThinking: agentConfig.replyThinking || "off",
-    replyExtra: agentConfig.replyExtra,
+    autoContext: reply.autoContext,
+    replyTemperature: reply.temperature,
+    replyTopP: reply.topP,
+    replyMaxTokens: reply.maxTokens,
+    replyThinking: reply.thinking || "off",
+    replyExtra: reply.extra,
   };
   void invoke("set_agent_settings", { settings })
+    .then(() => invoke("set_reply_settings", { settings: reply }))
     .then(() => {
       agentConfig = { ...settings, apiKey: settings.apiKey.trim() };
       dismissAgentSettings();
       paintAgentCurrent();
+      paintAutoReply();
       if (railMode === "agent") {
         paintAgent();
       }
@@ -7540,10 +8289,25 @@ railMore.addEventListener("click", (event) => {
   railMore.setAttribute("aria-expanded", railMenu.hidden ? "false" : "true");
 });
 
+function syncThemeToggle(): void {
+  const themeButton = railMenu.querySelector<HTMLButtonElement>("[data-action='theme']");
+  if (!themeButton) {
+    return;
+  }
+  themeButton.setAttribute("aria-checked", document.documentElement.dataset.theme === "dark" ? "true" : "false");
+}
+
+syncThemeToggle();
+document.addEventListener("lineapp-appearance", syncThemeToggle);
+
 railMenu.addEventListener("click", (event) => {
   event.stopPropagation();
   const action = (event.target as HTMLElement).closest("button")?.dataset.action;
   if (!action) {
+    return;
+  }
+  if (action === "theme") {
+    toggleTheme();
     return;
   }
   closeMenu();
@@ -8190,7 +8954,12 @@ function applyPoll(payload: PollPayload): void {
 async function logout(): Promise<void> {
   signedIn = false;
   trayBadge = -1;
+  myName = "";
+  myStatus = "";
+  myPicture = "";
+  myCover = "";
   myMid = "";
+  paintRailMe();
   readHeld.clear();
   readSent.clear();
   readWant.clear();

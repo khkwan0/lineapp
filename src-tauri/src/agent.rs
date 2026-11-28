@@ -1,5 +1,5 @@
 //! Local agent. The user picks an OpenAI-compatible, Anthropic, or Gemini endpoint.
-//! Tools only read chats and messages already stored in the SQLite database.
+//! Saved-chat tools read the local database. LINE tools use the signed-in account.
 
 use std::io::{BufRead, BufReader};
 use std::time::Duration;
@@ -13,8 +13,10 @@ use tauri::Emitter;
 use crate::line;
 use crate::store;
 
-const ROUNDS: usize = 5;
+const ROUNDS: usize = 8;
 const HISTORY: usize = 24;
+const DEFAULT_REPLY_HISTORY: u32 = 20;
+const MAX_REPLY_HISTORY: u32 = 100;
 const TURN_CHARS: usize = 8_000;
 
 #[derive(serde::Deserialize)]
@@ -100,7 +102,7 @@ struct Step {
     assistant: Json,
 }
 
-const SYSTEM: &str = "You are the assistant inside a LINE desktop app. Answer questions about chats saved in the local database on this computer. Use the tools to look up chats and messages. When the user asks for the latest or recent messages in a chat, call latest_messages once with that chat's name, then answer. The database keeps only recent messages for each chat. Do not invent messages, names, or times. If a tool returns nothing, say that. You cannot send, delete, or change messages. Reply in the same language as the user's question.";
+const SYSTEM: &str = "You are the assistant inside a LINE desktop app. Use the tools to look up saved chats and messages, and to use the signed-in LINE account. When the user asks for the latest or recent messages in a chat, call latest_messages once with that chat's name, then answer. The database keeps only recent messages for each chat. search_users finds a person by LINE ID or phone number and also matches saved friends by name. Reading tools include get_profile, get_my_profile, list_friends, friend_recommendations, list_group_members, list_invite_candidates, and fetch_chat. send_text, send_sticker, unsend_message, react_to_message, mark_chat_read, add_friend, set_blocked, set_favorite, rename_friend, create_group, rename_group, invite_to_group, remove_group_member, set_group_auto_join, and report_message change the account. Call one of those only when the user asked for that action. chat_llm lists, reads, saves, or deletes the model settings stored for one chat. Save or delete those settings only when the user asked. Do not invent messages, names, ids, or times. If a tool returns nothing, say that. Reply in the same language as the user's question.";
 
 const ANSWER_NOW: &str = "Answer the user's last question now from the tool results above. Do not call tools.";
 
@@ -164,6 +166,38 @@ fn tools() -> Vec<Tool> {
                     "name": { "type": "string", "description": "Optional part of the person's or group's name." },
                     "limit": { "type": "integer", "description": "Maximum chats, from 1 to 40. Defaults to 20." }
                 }
+            }),
+        },
+        Tool {
+            name: "chat_llm".into(),
+            description: "Create, read, update, or delete the model settings for one chat. action is list, get, save, or delete. list needs no chat. get, save, and delete take a chat id or name. save writes that chat's own endpoint, model, and reply options. A chat without its own settings uses the defaults. On save, include only the fields to change. endpoint and model are required when the chat has no settings yet. protocol is openai, anthropic, or gemini. thinking is off, default, low, medium, or high. language is empty to match the chat, or en, ja, ko, zh-Hans, zh-Hant, th, vi, id, ms, es, pt, fr, de, it, ru, ar, tr, el, or hi. history is how many recent messages an automatic reply includes, from 1 to 100, and defaults to 20. Call save or delete only when the user asked.".into(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "description": "list, get, save, or delete." },
+                    "chat": { "type": "string", "description": "Chat id or name. Required for get, save, and delete." },
+                    "settings": {
+                        "type": "object",
+                        "description": "Fields to write. Omitted fields stay as they are.",
+                        "properties": {
+                            "endpoint": { "type": "string" },
+                            "model": { "type": "string" },
+                            "apiKey": { "type": "string" },
+                            "protocol": { "type": "string" },
+                            "temperature": { "type": "string" },
+                            "topP": { "type": "string" },
+                            "maxTokens": { "type": "string" },
+                            "thinking": { "type": "string" },
+                            "extra": { "type": "string" },
+                            "context": { "type": "string" },
+                            "language": { "type": "string" },
+                            "markAi": { "type": "boolean" },
+                            "interrupt": { "type": "boolean" },
+                            "history": { "type": "integer", "description": "Recent messages included with each automatic reply, from 1 to 100. Defaults to 20." }
+                        }
+                    }
+                },
+                "required": ["action"]
             }),
         },
     ]
@@ -478,6 +512,12 @@ pub(crate) struct ChatLlm {
     mark_ai: bool,
     #[serde(default)]
     interrupt: bool,
+    #[serde(default = "default_reply_history")]
+    history: u32,
+}
+
+fn default_reply_history() -> u32 {
+    DEFAULT_REPLY_HISTORY
 }
 
 fn check_chat_key(id: &str) -> Result<(), String> {
@@ -519,7 +559,17 @@ fn chat_llm_from_json(value: &Json) -> ChatLlm {
         language: reply_language_name(&string_field(value, "language")).map(|_| string_field(value, "language")).unwrap_or_default(),
         mark_ai: bool_field(value, "markAi"),
         interrupt: bool_field(value, "interrupt"),
+        history: history_field(value),
     }
+}
+
+fn history_field(value: &Json) -> u32 {
+    let raw = match value.get("history") {
+        Some(Json::Number(number)) => number.as_u64().unwrap_or(0) as u32,
+        Some(Json::String(text)) => text.trim().parse::<u32>().unwrap_or(0),
+        _ => 0,
+    };
+    check_history(raw).unwrap_or(DEFAULT_REPLY_HISTORY)
 }
 
 fn bool_field(value: &Json, key: &str) -> bool {
@@ -606,15 +656,13 @@ fn chat_llm_ids(root: &Json) -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn set_chat_llm(id: String, settings: ChatLlm) -> Result<(), String> {
-    let id = id.trim();
-    check_chat_key(id)?;
+fn validate_chat_llm(settings: ChatLlm) -> Result<ChatLlm, String> {
     let endpoint = check_endpoint(&settings.endpoint)?;
     let model = check_model(&settings.model)?;
     if endpoint.is_empty() || model.is_empty() {
         return Err("Enter an endpoint and a model for this chat.".to_string());
     }
-    let saved = ChatLlm {
+    Ok(ChatLlm {
         endpoint,
         model,
         api_key: check_key(&settings.api_key)?,
@@ -628,10 +676,55 @@ pub fn set_chat_llm(id: String, settings: ChatLlm) -> Result<(), String> {
         language: check_reply_language(&settings.language)?,
         mark_ai: settings.mark_ai,
         interrupt: settings.interrupt,
-    };
+        history: check_history(settings.history)?,
+    })
+}
+
+fn check_history(raw: u32) -> Result<u32, String> {
+    if raw == 0 {
+        return Ok(DEFAULT_REPLY_HISTORY);
+    }
+    if raw > MAX_REPLY_HISTORY {
+        return Err(format!("Use between 1 and {MAX_REPLY_HISTORY} messages of history."));
+    }
+    Ok(raw)
+}
+
+fn reply_history_limit(chat_id: &str) -> usize {
+    load_chat_llm(chat_id)
+        .ok()
+        .flatten()
+        .map(|chat| chat.history as usize)
+        .filter(|count| *count > 0)
+        .unwrap_or(DEFAULT_REPLY_HISTORY as usize)
+        .min(MAX_REPLY_HISTORY as usize)
+}
+
+#[tauri::command]
+pub fn set_chat_llm(id: String, settings: ChatLlm) -> Result<(), String> {
+    let id = id.trim();
+    check_chat_key(id)?;
+    let saved = validate_chat_llm(settings)?;
     let mut value = load_object()?;
-    upsert_chat_llm(&mut value, id, saved);
-    write_object(&value)
+    upsert_chat_llm(&mut value, id, saved.clone());
+    write_object(&value)?;
+    store::append_llm_settings(&store::LlmSettingsSave {
+        chat_id: id.to_string(),
+        endpoint: saved.endpoint,
+        model: saved.model,
+        api_key: saved.api_key,
+        protocol: saved.protocol,
+        temperature: saved.temperature,
+        top_p: saved.top_p,
+        max_tokens: saved.max_tokens,
+        thinking: saved.thinking,
+        extra: saved.extra,
+        context: saved.context,
+        language: saved.language,
+        mark_ai: saved.mark_ai,
+        interrupt: saved.interrupt,
+        history: saved.history,
+    })
 }
 
 #[tauri::command]
@@ -690,9 +783,10 @@ fn check_reply_language(raw: &str) -> Result<String, String> {
     Ok(language.to_string())
 }
 
-fn reply_transcript(messages: &[ComposeTurn], language: &str) -> String {
+fn reply_transcript(messages: &[ComposeTurn], language: &str, limit: usize) -> String {
     let mut lines = Vec::new();
-    let start = messages.len().saturating_sub(20);
+    let keep = limit.clamp(1, MAX_REPLY_HISTORY as usize);
+    let start = messages.len().saturating_sub(keep);
     for turn in &messages[start..] {
         let text = clip(turn.text.trim(), 500);
         if text.is_empty() {
@@ -923,7 +1017,7 @@ fn compose_reply(messages: Vec<ComposeTurn>, chat_id: &str) -> Result<String, St
         return Err("Set the endpoint and model for this chat.".to_string());
     }
     let language = reply_language_for(&messages, &settings.reply_language);
-    let transcript = reply_transcript(&messages, &language);
+    let transcript = reply_transcript(&messages, &language, reply_history_limit(chat_id));
     if transcript.is_empty() {
         return Ok(String::new());
     }
@@ -1007,10 +1101,26 @@ fn emit_agent(app: &tauri::AppHandle, payload: Json) {
 }
 
 fn ask(app: &tauri::AppHandle, messages: Vec<TurnIn>) -> Result<AgentAnswer, String> {
-    ask_with(messages, &mut |payload| emit_agent(app, payload))
+    let app = app.clone();
+    ask_with(messages, &mut |payload| emit_agent(&app, payload), &mut |name, result| publish_line_action(&app, name, result))
 }
 
-fn ask_with(messages: Vec<TurnIn>, emit: &mut dyn FnMut(Json)) -> Result<AgentAnswer, String> {
+fn publish_line_action(app: &tauri::AppHandle, name: &str, result: &str) {
+    let Ok(value) = serde_json::from_str::<Json>(result) else {
+        return;
+    };
+    if (name == "send_text" || name == "send_sticker") && value.get("ok") == Some(&Json::Bool(true)) {
+        let _ = app.emit("line-sent", &value);
+    }
+    if name == "chat_llm" && value.get("changed") == Some(&Json::Bool(true)) {
+        let _ = app.emit("chat-llm", json!({
+            "id": value.get("id").cloned().unwrap_or(Json::Null),
+            "settings": value.get("settings").cloned().unwrap_or(Json::Null),
+        }));
+    }
+}
+
+fn ask_with(messages: Vec<TurnIn>, emit: &mut dyn FnMut(Json), on_tool: &mut dyn FnMut(&str, &str)) -> Result<AgentAnswer, String> {
     let settings = get_agent_settings()?;
     if settings.endpoint.is_empty() {
         return Err("Set the agent endpoint in Settings.".to_string());
@@ -1020,11 +1130,7 @@ fn ask_with(messages: Vec<TurnIn>, emit: &mut dyn FnMut(Json)) -> Result<AgentAn
     }
     let knobs = resolve_knobs(&settings)?;
     let (mut links, remote) = crate::mcp::prepare();
-    let offered = {
-        let mut combined = tools();
-        combined.extend(mcp_tools(&remote));
-        combined
-    };
+    let offered = offered_tools(&remote);
     let mut kept = Vec::new();
     for turn in messages.iter().rev().filter(|turn| turn.role == "user" || turn.role == "assistant") {
         let content = clip(turn.content.trim(), TURN_CHARS);
@@ -1075,11 +1181,27 @@ fn ask_with(messages: Vec<TurnIn>, emit: &mut dyn FnMut(Json)) -> Result<AgentAn
         let mut results = Vec::new();
         for (_id, name, args) in &step.calls {
             calls.push(crate::mcp::chip_name(&remote, name).unwrap_or_else(|| name.clone()));
-            results.push(dispatch_tool(name, args, &mut links, &remote));
+            let result = dispatch_tool(name, args, &mut links, &remote);
+            on_tool(name, &result);
+            results.push(result);
         }
         append_tool_results(knobs.protocol, &mut transcript, &step.calls, &results);
     }
     Err("The agent stopped after several lookups without a reply.".to_string())
+}
+
+fn offered_tools(remote: &[crate::mcp::McpTool]) -> Vec<Tool> {
+    let mut combined = tools();
+    combined.extend(line_agent_tools());
+    combined.extend(mcp_tools(remote));
+    combined
+}
+
+fn line_agent_tools() -> Vec<Tool> {
+    crate::line_tools::offered()
+        .into_iter()
+        .map(|tool| Tool { name: tool.name, description: tool.description, schema: tool.schema })
+        .collect()
 }
 
 fn mcp_tools(remote: &[crate::mcp::McpTool]) -> Vec<Tool> {
@@ -1100,7 +1222,22 @@ fn dispatch_tool(name: &str, arguments: &Json, links: &mut [crate::mcp::Link], r
     if let Some(result) = crate::mcp::invoke(links, remote, name, arguments) {
         return result;
     }
+    if crate::line_tools::handles(name) {
+        return crate::line_tools::invoke(name, arguments).to_string();
+    }
     run_tool(name, arguments)
+}
+
+#[tauri::command]
+pub async fn list_agent_tools() -> Result<Json, String> {
+    tauri::async_runtime::spawn_blocking(tool_catalog).await.map_err(|err| err.to_string())?
+}
+
+fn tool_catalog() -> Result<Json, String> {
+    let chats: Vec<Json> = tools().iter().map(|tool| json!({ "name": tool.name, "description": tool.description })).collect();
+    let line: Vec<Json> = crate::line_tools::offered().iter().map(|tool| json!({ "name": tool.name, "description": tool.description })).collect();
+    let servers = crate::mcp::connect_all().servers;
+    Ok(json!({ "chats": chats, "line": line, "servers": servers }))
 }
 
 fn strip_tools(body: &mut Json) {
@@ -1654,7 +1791,7 @@ fn post_stream(endpoint: &str, key: &str, body: &Json, protocol: Protocol, timeo
             let text = response.into_string().unwrap_or_default();
             return Err(http_failure(code, &text));
         }
-        Err(_) => return Err("The endpoint did not answer.".to_string()),
+        Err(err) => return Err(endpoint_unreachable(&err.to_string())),
     };
     let mut reader = BufReader::new(response.into_reader());
     let mut line = String::new();
@@ -2062,7 +2199,7 @@ fn post_chat(endpoint: &str, key: &str, body: &Json, protocol: Protocol, timeout
             let text = response.into_string().unwrap_or_default();
             Err(http_failure(code, &text))
         }
-        Err(_) => Err("The endpoint did not answer.".to_string()),
+        Err(err) => Err(endpoint_unreachable(&err.to_string())),
     }
 }
 
@@ -2074,7 +2211,21 @@ fn read_json(response: ureq::Response) -> Result<Json, String> {
 fn http_failure(code: u16, body: &str) -> String {
     let parsed = serde_json::from_str::<Json>(body).ok();
     let sentence = parsed.as_ref().map(error_sentence).unwrap_or_default();
+    if sentence.is_empty() {
+        let plain = body.trim();
+        if !plain.is_empty() {
+            return format!("The endpoint returned {code}: {}", clip(plain, 180));
+        }
+    }
     present_endpoint_error(Some(code), &sentence)
+}
+
+fn endpoint_unreachable(detail: &str) -> String {
+    let detail = detail.trim();
+    if detail.is_empty() {
+        return "The endpoint did not respond.".to_string();
+    }
+    format!("The endpoint did not respond. {}", clip(detail, 180))
 }
 
 fn error_sentence(value: &Json) -> String {
@@ -2149,8 +2300,246 @@ fn call_tool(conn: &Connection, name: &str, args: &Json) -> Json {
         "get_messages" => get_messages(conn, args),
         "latest_messages" => latest_messages(conn, args),
         "list_chats" => list_chats(conn, args),
+        "chat_llm" => chat_llm_tool(conn, args),
         _ => json!({ "error": "Unknown tool." }),
     }
+}
+
+fn chat_llm_tool(conn: &Connection, args: &Json) -> Json {
+    let action = field(args, "action").to_ascii_lowercase();
+    match action.as_str() {
+        "list" => list_chat_models(conn),
+        "get" | "read" => one_chat_model(conn, args),
+        "save" | "create" | "update" => save_chat_model(conn, args),
+        "delete" => delete_chat_model(conn, args),
+        _ => json!({ "error": "Pass action as list, get, save, or delete." }),
+    }
+}
+
+fn list_chat_models(conn: &Connection) -> Json {
+    let root = match load_object() {
+        Ok(root) => root,
+        Err(err) => return json!({ "error": err }),
+    };
+    let chats: Vec<Json> = chat_llm_ids(&root)
+        .into_iter()
+        .filter_map(|id| {
+            let settings = read_chat_llm(&root, &id)?;
+            Some(json!({
+                "id": id,
+                "name": chat_label(conn, &id),
+                "endpoint": settings.endpoint,
+                "model": settings.model,
+                "protocol": settings.protocol,
+                "thinking": settings.thinking,
+                "language": settings.language,
+                "markAi": settings.mark_ai,
+                "interrupt": settings.interrupt,
+                "history": settings.history,
+                "hasKey": !settings.api_key.is_empty(),
+            }))
+        })
+        .collect();
+    json!({ "chats": chats })
+}
+
+fn one_chat_model(conn: &Connection, args: &Json) -> Json {
+    let hit = match require_chat(conn, args) {
+        Ok(hit) => hit,
+        Err(error) => return error,
+    };
+    match load_chat_llm(&hit.id) {
+        Ok(Some(settings)) => json!({
+            "id": hit.id,
+            "name": hit.name,
+            "usesDefaults": false,
+            "settings": serde_json::to_value(&settings).unwrap_or(json!({})),
+        }),
+        Ok(None) => json!({
+            "id": hit.id,
+            "name": hit.name,
+            "usesDefaults": true,
+            "settings": Json::Null,
+        }),
+        Err(err) => json!({ "error": err }),
+    }
+}
+
+fn save_chat_model(conn: &Connection, args: &Json) -> Json {
+    let hit = match require_chat(conn, args) {
+        Ok(hit) => hit,
+        Err(error) => return error,
+    };
+    let patch = match settings_object(args) {
+        Ok(patch) => patch,
+        Err(err) => return json!({ "error": err }),
+    };
+    let existing = match load_chat_llm(&hit.id) {
+        Ok(existing) => existing,
+        Err(err) => return json!({ "error": err }),
+    };
+    let merged = match merge_chat_llm(existing, &patch) {
+        Ok(merged) => merged,
+        Err(err) => return json!({ "error": err }),
+    };
+    let saved = match validate_chat_llm(merged) {
+        Ok(saved) => saved,
+        Err(err) => return json!({ "error": err }),
+    };
+    let settings = serde_json::to_value(&saved).unwrap_or(json!({}));
+    if let Err(err) = set_chat_llm(hit.id.clone(), saved) {
+        return json!({ "error": err });
+    }
+    json!({
+        "ok": true,
+        "action": "save",
+        "changed": true,
+        "id": hit.id,
+        "name": hit.name,
+        "settings": settings,
+    })
+}
+
+fn delete_chat_model(conn: &Connection, args: &Json) -> Json {
+    let hit = match require_chat(conn, args) {
+        Ok(hit) => hit,
+        Err(error) => return error,
+    };
+    if let Err(err) = clear_chat_llm(hit.id.clone()) {
+        return json!({ "error": err });
+    }
+    json!({
+        "ok": true,
+        "action": "delete",
+        "changed": true,
+        "id": hit.id,
+        "name": hit.name,
+        "settings": Json::Null,
+    })
+}
+
+fn require_chat(conn: &Connection, args: &Json) -> Result<ChatHit, Json> {
+    let chat = field(args, "chat");
+    if chat.is_empty() {
+        return Err(json!({ "error": "Pass the chat id or name." }));
+    }
+    match resolve_chat(conn, &chat) {
+        Ok(Some(Resolved::One(hit))) => Ok(hit),
+        Ok(Some(Resolved::Many(chats))) => Err(json!({
+            "error": "Several chats match that name. Call again with a chat id.",
+            "chats": chats,
+        })),
+        Ok(None) => Err(json!({ "error": "No chat matches that name." })),
+        Err(err) => Err(json!({ "error": err })),
+    }
+}
+
+fn settings_object(args: &Json) -> Result<Json, String> {
+    match args.get("settings") {
+        None => Ok(json!({})),
+        Some(value) if value.is_object() => Ok(value.clone()),
+        Some(Json::String(text)) if text.trim().is_empty() => Ok(json!({})),
+        Some(Json::String(text)) => serde_json::from_str::<Json>(text)
+            .ok()
+            .filter(Json::is_object)
+            .ok_or_else(|| "Settings must be an object.".to_string()),
+        _ => Err("Settings must be an object.".to_string()),
+    }
+}
+
+fn merge_chat_llm(existing: Option<ChatLlm>, patch: &Json) -> Result<ChatLlm, String> {
+    let mut settings = existing.unwrap_or(ChatLlm {
+        endpoint: String::new(),
+        model: String::new(),
+        api_key: String::new(),
+        protocol: "openai".to_string(),
+        temperature: String::new(),
+        top_p: String::new(),
+        max_tokens: String::new(),
+        thinking: "off".to_string(),
+        extra: String::new(),
+        context: String::new(),
+        language: String::new(),
+        mark_ai: false,
+        interrupt: false,
+        history: DEFAULT_REPLY_HISTORY,
+    });
+    assign_string(&mut settings.endpoint, patch, "endpoint")?;
+    assign_string(&mut settings.model, patch, "model")?;
+    assign_string(&mut settings.api_key, patch, "apiKey")?;
+    assign_string(&mut settings.protocol, patch, "protocol")?;
+    assign_string(&mut settings.temperature, patch, "temperature")?;
+    assign_string(&mut settings.top_p, patch, "topP")?;
+    assign_string(&mut settings.max_tokens, patch, "maxTokens")?;
+    assign_string(&mut settings.thinking, patch, "thinking")?;
+    assign_string(&mut settings.extra, patch, "extra")?;
+    assign_string(&mut settings.context, patch, "context")?;
+    assign_string(&mut settings.language, patch, "language")?;
+    assign_bool(&mut settings.mark_ai, patch, "markAi")?;
+    assign_bool(&mut settings.interrupt, patch, "interrupt")?;
+    assign_history(&mut settings.history, patch)?;
+    Ok(settings)
+}
+
+fn assign_history(current: &mut u32, patch: &Json) -> Result<(), String> {
+    match patch.get("history") {
+        None => Ok(()),
+        Some(Json::Number(number)) => {
+            *current = check_history(number.as_u64().unwrap_or(0) as u32)?;
+            Ok(())
+        }
+        Some(Json::String(text)) => {
+            let raw = text.trim().parse::<u32>().map_err(|_| "Use between 1 and 100 messages of history.".to_string())?;
+            *current = check_history(raw)?;
+            Ok(())
+        }
+        Some(Json::Null) => {
+            *current = DEFAULT_REPLY_HISTORY;
+            Ok(())
+        }
+        _ => Err("Use between 1 and 100 messages of history.".to_string()),
+    }
+}
+
+fn assign_string(current: &mut String, patch: &Json, key: &str) -> Result<(), String> {
+    match patch.get(key) {
+        None => Ok(()),
+        Some(Json::Null) => {
+            *current = String::new();
+            Ok(())
+        }
+        Some(Json::String(text)) => {
+            *current = text.trim().to_string();
+            Ok(())
+        }
+        Some(Json::Number(number)) => {
+            *current = number.to_string();
+            Ok(())
+        }
+        _ => Err(format!("{key} must be text.")),
+    }
+}
+
+fn assign_bool(current: &mut bool, patch: &Json, key: &str) -> Result<(), String> {
+    match patch.get(key) {
+        None => Ok(()),
+        Some(Json::Bool(value)) => {
+            *current = *value;
+            Ok(())
+        }
+        Some(Json::String(text)) if text.eq_ignore_ascii_case("true") || text.eq_ignore_ascii_case("false") => {
+            *current = text.eq_ignore_ascii_case("true");
+            Ok(())
+        }
+        _ => Err(format!("{key} must be true or false.")),
+    }
+}
+
+fn chat_label(conn: &Connection, id: &str) -> String {
+    conn.query_row("SELECT name FROM chats WHERE id = ?1", params![id], |row| row.get::<_, String>(0))
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| id.to_string())
 }
 
 fn field(args: &Json, key: &str) -> String {
@@ -2560,10 +2949,56 @@ mod tests {
     fn tools_are_named_and_described() {
         let local = tools();
         let names: Vec<_> = local.iter().map(|tool| tool.name.as_str()).collect();
-        assert_eq!(names, ["search_conversations", "get_messages", "latest_messages", "list_chats"]);
+        assert_eq!(names, ["search_conversations", "get_messages", "latest_messages", "list_chats", "chat_llm"]);
         let exported = openai_tools(&local);
-        assert_eq!(exported.as_array().unwrap().len(), 4);
+        assert_eq!(exported.as_array().unwrap().len(), 5);
         assert_eq!(exported[0]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn chat_llm_rejects_a_bad_action_and_merges_a_partial_save() {
+        let conn = db();
+        chat(&conn, "u1", "Ada", "friend", "hi", 20, None);
+        let missing = call_tool(&conn, "chat_llm", &json!({ "action": "get" }));
+        assert_eq!(missing["error"], "Pass the chat id or name.");
+        let unknown = call_tool(&conn, "chat_llm", &json!({ "action": "save", "chat": "Nobody", "settings": { "model": "m" } }));
+        assert_eq!(unknown["error"], "No chat matches that name.");
+        let bad = call_tool(&conn, "chat_llm", &json!({ "action": "rename" }));
+        assert_eq!(bad["error"], "Pass action as list, get, save, or delete.");
+        let merged = merge_chat_llm(
+            Some(ChatLlm {
+                endpoint: "http://127.0.0.1:11434/v1/chat/completions".into(),
+                model: "kept".into(),
+                api_key: "secret".into(),
+                protocol: "openai".into(),
+                temperature: String::new(),
+                top_p: String::new(),
+                max_tokens: String::new(),
+                thinking: "off".into(),
+                extra: String::new(),
+                context: "be brief".into(),
+                language: String::new(),
+                mark_ai: false,
+                interrupt: true,
+                history: DEFAULT_REPLY_HISTORY,
+            }),
+            &json!({ "temperature": "0.4", "markAi": true }),
+        )
+        .unwrap();
+        assert_eq!(merged.api_key, "secret");
+        assert_eq!(merged.model, "kept");
+        assert_eq!(merged.context, "be brief");
+        assert_eq!(merged.temperature, "0.4");
+        assert!(merged.mark_ai);
+        assert!(merged.interrupt);
+        let created = merge_chat_llm(None, &json!({ "endpoint": "http://127.0.0.1:11434/v1/chat/completions", "model": "qwen" })).unwrap();
+        let saved = validate_chat_llm(created).unwrap();
+        assert_eq!(saved.model, "qwen");
+        assert_eq!(saved.thinking, "off");
+        assert_eq!(saved.history, DEFAULT_REPLY_HISTORY);
+        assert_eq!(saved.protocol, "openai");
+        let bare = merge_chat_llm(None, &json!({})).unwrap();
+        assert!(validate_chat_llm(bare).is_err());
     }
 
     #[test]
@@ -2576,7 +3011,9 @@ mod tests {
         let other = http_failure(401, r#"{"error":{"message":"Invalid API key."}}"#);
         assert_eq!(other, "The endpoint returned 401: Invalid API key.");
         let bare = http_failure(500, "nope");
-        assert_eq!(bare, "The endpoint returned 500.");
+        assert_eq!(bare, "The endpoint returned 500: nope");
+        assert_eq!(http_failure(502, "   "), "The endpoint returned 502.");
+        assert!(endpoint_unreachable("connection refused").contains("connection refused"));
     }
 
     #[test]
@@ -2591,6 +3028,10 @@ mod tests {
         let names: Vec<_> = body["tools"].as_array().unwrap().iter().map(|tool| tool["function"]["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"search_conversations"));
         assert!(names.contains(&"mcp0_ping"));
+        let catalog = offered_tools(&[]);
+        assert!(catalog.iter().any(|tool| tool.name == "search_users"));
+        assert!(catalog.iter().any(|tool| tool.name == "list_chats"));
+        assert!(catalog.iter().any(|tool| tool.name == "send_text"));
         let anthropic = request_with(&knobs(Protocol::Anthropic), &hi(Protocol::Anthropic), &offered);
         assert!(anthropic["system"].as_str().unwrap().contains("MCP tools"));
     }
@@ -2694,9 +3135,12 @@ mod tests {
         ];
         assert!(!last_is_mine(&thread));
         assert_eq!(
-            reply_transcript(&thread, "English"),
+            reply_transcript(&thread, "English", DEFAULT_REPLY_HISTORY as usize),
             "Messages:\nMe: hello\nAda: are you coming?\n\nYou are Me. Text Ada back. Answer their last message in the first person, as a friend texting. If they asked what you did and the messages above do not say, answer briefly as yourself. Output only the text you send them. Reply in English. Write only in English, even if earlier messages used another language."
         );
+        let newest = reply_transcript(&thread, "English", 1);
+        assert!(newest.contains("Ada: are you coming?"));
+        assert!(!newest.contains("Me: hello"));
         assert_eq!(reply_language_for(&thread, ""), "English");
         assert_eq!(reply_language_for(&thread, "ja"), "Japanese");
         assert_eq!(detect_language_name("What did you do last night?"), Some("English"));
@@ -2730,12 +3174,14 @@ mod tests {
             language: "en".into(),
             mark_ai: false,
             interrupt: false,
+            history: 12,
         };
         let second = ChatLlm { context: "Reply in Thai.".into(), model: "other".into(), ..first.clone() };
         upsert_chat_llm(&mut root, "u111", first);
         upsert_chat_llm(&mut root, "u222", second);
         assert_eq!(root["minimizeToTray"], true);
         assert_eq!(read_chat_llm(&root, "u111").unwrap().context, "Reply in English.");
+        assert_eq!(read_chat_llm(&root, "u111").unwrap().history, 12);
         assert_eq!(read_chat_llm(&root, "u222").unwrap().model, "other");
         assert!(read_chat_llm(&root, "u333").is_none());
         remove_chat_llm(&mut root, "u111");
@@ -2868,7 +3314,7 @@ mod tests {
         assert_eq!(body["generationConfig"]["thinkingConfig"]["thinkingLevel"], "high");
         assert!(body["generationConfig"]["thinkingConfig"].get("thinkingBudget").is_none());
         assert_eq!(body["generationConfig"]["temperature"], 0.4);
-        assert_eq!(body["tools"][0]["functionDeclarations"].as_array().unwrap().len(), 4);
+        assert_eq!(body["tools"][0]["functionDeclarations"].as_array().unwrap().len(), 5);
         knobs.thinking = Thinking::Off;
         knobs.temperature = None;
         let off = build_request(&knobs, &hi(Protocol::Gemini));

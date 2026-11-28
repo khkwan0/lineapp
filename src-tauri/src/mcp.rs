@@ -110,44 +110,72 @@ fn check_mcp_url(raw: &str) -> Result<String, String> {
     Ok(url.to_string())
 }
 
+pub(crate) struct Prepared {
+    pub links: Vec<Link>,
+    pub tools: Vec<McpTool>,
+    pub servers: Vec<Json>,
+}
+
 /// Connect to each enabled server and list its tools. A server that does not
 /// answer is skipped so the agent can still reply.
 pub(crate) fn prepare() -> (Vec<Link>, Vec<McpTool>) {
+    let prepared = connect_all();
+    (prepared.links, prepared.tools)
+}
+
+pub(crate) fn connect_all() -> Prepared {
     let servers = match load_object() {
         Ok(root) => servers_from(&root),
         Err(err) => {
             eprintln!("lineapp: MCP settings were not read: {err}");
-            return (Vec::new(), Vec::new());
+            return Prepared {
+                links: Vec::new(),
+                tools: Vec::new(),
+                servers: vec![json!({ "url": "", "ok": false, "error": err, "tools": [] })],
+            };
         }
     };
     let mut links = Vec::new();
+    let mut notes = Vec::new();
     for server in servers.into_iter().filter(|server| server.enabled) {
         match Link::connect(&server.url) {
             Ok(link) => links.push(link),
-            Err(err) => eprintln!("lineapp: MCP server skipped: {err}"),
+            Err(err) => {
+                eprintln!("lineapp: MCP server skipped: {err}");
+                notes.push((server.url, err));
+            }
         }
     }
     let mut tools = Vec::new();
     let mut used = HashSet::new();
+    let mut listed = Vec::new();
     for (index, link) in links.iter_mut().enumerate() {
         let found = match link.list_tools() {
             Ok(found) => found,
             Err(err) => {
                 eprintln!("lineapp: MCP tools were not listed: {err}");
+                listed.push(json!({ "url": link.url, "ok": false, "error": err, "tools": [] }));
                 continue;
             }
         };
+        let mut exposed_tools = Vec::new();
         for remote in found {
+            let exposed = expose_name(index, &remote.name, &mut used);
+            exposed_tools.push(json!({ "name": exposed, "description": remote.description }));
             tools.push(McpTool {
-                exposed: expose_name(index, &remote.name, &mut used),
+                exposed,
                 remote: remote.name,
                 description: remote.description,
                 schema: remote.schema,
                 link: index,
             });
         }
+        listed.push(json!({ "url": link.url, "ok": true, "tools": exposed_tools }));
     }
-    (links, tools)
+    for (url, error) in notes {
+        listed.push(json!({ "url": url, "ok": false, "error": error, "tools": [] }));
+    }
+    Prepared { links, tools, servers: listed }
 }
 
 pub(crate) fn invoke(links: &mut [Link], tools: &[McpTool], name: &str, arguments: &Json) -> Option<String> {

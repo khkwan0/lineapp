@@ -3,6 +3,7 @@ mod e2ee;
 mod h2gate;
 mod legy;
 mod line;
+mod line_tools;
 mod mcp;
 mod preview;
 mod speech;
@@ -21,9 +22,6 @@ struct LoginState {
     inbox: Mutex<Option<Arc<AtomicBool>>>,
 }
 
-/// One Talk send at a time. Photo upload and the caption share the session,
-/// and overlapping sends used to be answered with an older message.
-static TALK_SEND: Mutex<()> = Mutex::new(());
 
 struct AppPrefs {
     minimize_to_tray: AtomicBool,
@@ -260,6 +258,69 @@ async fn add_profile(id: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || line::Client::new().add_contact(&id).map_err(|err| err.to_string()))
         .await
         .map_err(|err| format!("could not add this friend: {err}"))?
+}
+
+#[tauri::command]
+fn show_own_profile(app: &AppHandle, card: &serde_json::Value) {
+    let Some(id) = card.get("id").and_then(|value| value.as_str()) else { return };
+    let Some(window) = app.get_webview_window(&format!("p{id}")) else { return };
+    show_profile(&window, card);
+}
+
+fn decode_photo(data: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.trim())
+        .map_err(|_| "that photo could not be read".to_string())?;
+    if bytes.is_empty() || bytes.len() > 20_000_000 {
+        return Err("that photo is too large".into());
+    }
+    Ok(bytes)
+}
+
+#[tauri::command]
+async fn get_my_profile() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| line::Client::new().my_profile().map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not load your profile: {err}"))?
+}
+
+#[tauri::command]
+async fn set_my_profile(app: AppHandle, name: String, status: String) -> Result<serde_json::Value, String> {
+    let card = tauri::async_runtime::spawn_blocking(move || line::Client::new().update_account(&name, &status).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not update your profile: {err}"))??;
+    show_own_profile(&app, &card);
+    Ok(card)
+}
+
+#[tauri::command]
+async fn set_my_picture(app: AppHandle, data: String) -> Result<serde_json::Value, String> {
+    let bytes = decode_photo(&data)?;
+    let card = tauri::async_runtime::spawn_blocking(move || line::Client::new().update_account_picture(&bytes).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not update your photo: {err}"))??;
+    show_own_profile(&app, &card);
+    Ok(card)
+}
+
+#[tauri::command]
+async fn clear_my_picture(app: AppHandle) -> Result<serde_json::Value, String> {
+    let card = tauri::async_runtime::spawn_blocking(|| line::Client::new().clear_account_picture().map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not update your photo: {err}"))??;
+    show_own_profile(&app, &card);
+    Ok(card)
+}
+
+#[tauri::command]
+async fn set_my_cover(app: AppHandle, data: String) -> Result<serde_json::Value, String> {
+    let bytes = decode_photo(&data)?;
+    let card = tauri::async_runtime::spawn_blocking(move || line::Client::new().update_account_cover(&bytes).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not update your cover: {err}"))??;
+    show_own_profile(&app, &card);
+    Ok(card)
 }
 
 #[tauri::command]
@@ -663,7 +724,7 @@ async fn send_media(app: AppHandle, id: String, name: String, mime: String, data
         }
     });
     let mut value = tauri::async_runtime::spawn_blocking(move || {
-        let _send = TALK_SEND.lock().unwrap_or_else(|err| err.into_inner());
+        let _send = line::TALK_SEND.lock().unwrap_or_else(|err| err.into_inner());
         line::Client::new().send_media_for_window(&id, &name, &mime, &bytes, album, silent, duration_ms, voice)
     })
         .await
@@ -690,7 +751,7 @@ async fn send_sticker(app: AppHandle, id: String, package_id: String, sticker_id
     let local_id = local_send_id(local_id.unwrap_or_default().trim());
     let chat = id.clone();
     let mut value = tauri::async_runtime::spawn_blocking(move || {
-        let _send = TALK_SEND.lock().unwrap_or_else(|err| err.into_inner());
+        let _send = line::TALK_SEND.lock().unwrap_or_else(|err| err.into_inner());
         line::Client::new().send_sticker_for_window(&id, &package_id, &sticker_id, animated)
     })
         .await
@@ -707,6 +768,41 @@ async fn send_sticker(app: AppHandle, id: String, package_id: String, sticker_id
 }
 
 #[tauri::command]
+async fn suggest_stickers(query: String, language: Option<String>) -> Result<serde_json::Value, String> {
+    let query = query.trim().to_string();
+    if query.is_empty() || query.chars().count() > 80 {
+        return Ok(serde_json::json!({ "stickers": [] }));
+    }
+    let language = language.unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().suggest_stickers(&query, &language).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not look up stickers: {err}"))?
+}
+
+#[tauri::command]
+async fn list_stickers() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| line::Client::new().sticker_shelf().map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not load stickers: {err}"))?
+}
+
+#[tauri::command]
+async fn sticker_pack(product_id: String) -> Result<serde_json::Value, String> {
+    let product_id = product_id.trim().to_string();
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().sticker_pack(&product_id).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not open that sticker set: {err}"))?
+}
+
+#[tauri::command]
+async fn buy_sticker(product_id: String) -> Result<serde_json::Value, String> {
+    let product_id = product_id.trim().to_string();
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().buy_sticker(&product_id).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not buy that sticker set: {err}"))?
+}
+
+#[tauri::command]
 async fn send_message(app: AppHandle, id: String, text: String, related_id: Option<String>, local_id: Option<String>, silent: Option<bool>) -> Result<(), String> {
     chat_id(&id)?;
     let body = text.trim().to_string();
@@ -720,7 +816,7 @@ async fn send_message(app: AppHandle, id: String, text: String, related_id: Opti
     let local_id = local_send_id(local_id.unwrap_or_default().trim());
     let chat = id.clone();
     let mut value = tauri::async_runtime::spawn_blocking(move || {
-        let _send = TALK_SEND.lock().unwrap_or_else(|err| err.into_inner());
+        let _send = line::TALK_SEND.lock().unwrap_or_else(|err| err.into_inner());
         line::Client::new().send_for_window(&id, &body, &related, silent.unwrap_or(false))
     })
         .await
@@ -744,7 +840,7 @@ async fn unsend_message(id: String, message_id: String) -> Result<(), String> {
     }
     let checked = message_id.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let _send = TALK_SEND.lock().unwrap_or_else(|err| err.into_inner());
+        let _send = line::TALK_SEND.lock().unwrap_or_else(|err| err.into_inner());
         line::Client::new().unsend_message(&checked).map_err(|err| unsend_reason(&err))
     })
         .await
@@ -1639,7 +1735,7 @@ pub fn run() {
             tauri::webview::PermissionKind::Microphone | tauri::webview::PermissionKind::Camera => tauri::webview::PermissionResponse::Allow,
             _ => tauri::webview::PermissionResponse::Default,
         })
-        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, save_download, read_dropped_file, send_message, send_media, send_sticker, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_always_on_top, set_focus_on_message, focus_for_message, attention_for_message, clear_attention, set_tray_badge, list_media_devices, speech::dictate_start, speech::dictate_stop, speech::dictate_cancel, speech::dictate_level, speech::mic_test_stop, speech::voice_start, speech::voice_stop, speech::voice_cancel, speech::voice_level, agent::get_agent_settings, agent::set_agent_settings, agent::set_reply_settings, agent::get_chat_llm, agent::set_chat_llm, agent::clear_chat_llm, agent::list_chat_llm, agent::agent_ask, agent::agent_probe, agent::agent_compose, mcp::get_mcp_servers, mcp::set_mcp_servers, open_profile, block_profile, add_profile, open_fraud_help, open_link, link_preview, rename_profile, favorite_profile, open_friend_chat, open_members, group_roster, rename_group, set_group_auto_join, invite_into_group, remove_group_member, group_invite_candidates, list_friends, friend_recommendations, find_person, create_group])
+        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, save_download, read_dropped_file, send_message, send_media, send_sticker, list_stickers, suggest_stickers, sticker_pack, buy_sticker, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_always_on_top, set_focus_on_message, focus_for_message, attention_for_message, clear_attention, set_tray_badge, list_media_devices, speech::dictate_start, speech::dictate_stop, speech::dictate_cancel, speech::dictate_level, speech::mic_test_stop, speech::voice_start, speech::voice_stop, speech::voice_cancel, speech::voice_level, agent::get_agent_settings, agent::set_agent_settings, agent::set_reply_settings, agent::get_chat_llm, agent::set_chat_llm, agent::clear_chat_llm, agent::list_chat_llm, agent::agent_ask, agent::agent_probe, agent::agent_compose, agent::list_agent_tools, mcp::get_mcp_servers, mcp::set_mcp_servers, open_profile, block_profile, add_profile, open_fraud_help, open_link, link_preview, rename_profile, favorite_profile, open_friend_chat, open_members, group_roster, rename_group, set_group_auto_join, invite_into_group, remove_group_member, group_invite_candidates, list_friends, friend_recommendations, find_person, create_group, get_my_profile, set_my_profile, set_my_picture, clear_my_picture, set_my_cover])
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;

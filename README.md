@@ -12,11 +12,11 @@ Language model:
 
 You bring your own model. Settings takes an OpenAI-compatible endpoint, Anthropic, or Gemini, plus the model name and an API key. A local server works. The endpoint, the key, and any per-chat model are stored in `lineapp.settings.json` next to the session file. Text the model reads from your chats is sent to that endpoint.
 
-The agent is its own chat. Ask it about a person, a group, or something that was said. It searches saved chats by name or by message text, lists them, and reads the newest messages in one of them. Answers stream as they are written. With streaming off, the window waits and shows a thinking pulse. Temperature, top-p, max tokens, a thinking level, and extra JSON are optional. Leave sampling blank and the model decides. Use a model that supports tool calling. From this chat the model cannot send, delete, or change a LINE message.
+The agent is its own chat. Ask it about a person, a group, or something that was said. It searches saved chats by name or by message text, lists them, and reads the newest messages in one of them. It can also search LINE for a person by LINE ID or phone number, and it can use the other account actions this client already supports: friends, profiles, groups, a text or sticker, a reaction, unsend, and the friend and group changes in the window. It does those only when you ask. Answers stream as they are written. With streaming off, the window waits and shows a thinking pulse. Temperature, top-p, max tokens, a thinking level, and extra JSON are optional. Leave sampling blank and the model decides. Use a model that supports tool calling. Agent settings lists every tool, including tools from MCP servers you added. This is not the Official Account Messaging API, so rich menus, broadcasts, quotas, and webhooks are not in that list.
 
 Auto reply writes the next LINE message and sends it as you. Turn it on per chat, after the endpoint has answered a short check. It runs when the latest message is from the other person, and it sees the last 20 messages in that chat. Guidance you write is added to every automatic reply. The reply language can match the conversation or be one you pick. Temperature, top-p, max tokens, thinking, and extra JSON for replies are separate from the agent. A chat can keep its own endpoint, model, key, and those options, or copy them from another chat. A chat without its own settings uses the defaults. A chat can start each automatic reply with `AI: `. With cancel-when-typing on, typing while a reply is being written drops that reply.
 
-MCP tools are optional. Add up to 16 streamable HTTP or HTTPS servers. Enabled servers are offered to the agent and to auto reply. A server that does not answer is skipped. Auto reply may call those tools, then still has to come back with only the message to send.
+MCP tools are optional. Add up to 16 streamable HTTP or HTTPS servers. Enabled servers are offered to the agent and to auto reply. A server that does not answer is skipped. Auto reply may call those tools, then still has to come back with only the message to send. Auto reply does not get the LINE account tools.
 
 Sign-in and the window:
 
@@ -33,7 +33,7 @@ Chats:
 - The chat list covers friends, groups, rooms, and official accounts. Tabs and a name search filter that list. New activity arrives while the window is open.
 - Opening a chat loads the latest 40 messages, scrolls to the first unread one, and marks the chat read. Your own messages show Read, or Read and a count when more than one person has read them. A long message collapses until you expand it.
 - The composer sends text, including a reply that quotes another message. The quote scrolls to that message when it is in the loaded history. A failed send can be retried.
-- Photos, videos, audio, and other files can be attached or dropped onto the thread. Up to ten photos go out together and show as one grid. The send follows the desktop object-storage flow: a content-typed message, then the bytes uploaded to LINE. A chat that requires letter sealing encrypts the file first. A sticker button sends a short published set, five still stickers and eleven animated ones.
+- Photos, videos, audio, and other files can be attached or dropped onto the thread. Up to ten photos go out together and show as one grid. The send follows the desktop object-storage flow: a content-typed message, then the bytes uploaded to LINE. A chat that requires letter sealing encrypts the file first. The sticker button lists sets this account owns, and a shop tab for other sets. A free set or a set priced in LINE Coins can be bought from that tab. The shop tab also links to LINE STORE and says stickers can be bought there or in the LINE app on a phone. Sets sold only in a phone app store, and Stickers Premium sets, are shown without a purchase button.
 - One-to-one text that LINE refuses with `E2EE_RETRY_ENCRYPT` is sent with letter sealing. Photos, videos, audio, and files get the same retry, including in a group or a room when this client has that chat's shared key. Text and files sealed to a key this client holds open in the thread. Anything sealed to another device's key stays labeled "Letter-sealed message."
 - Stickers, photos, videos, voice messages, and short animated images already in a chat are shown. Photos and videos open in a viewer. A received file can be saved. A link that is the whole message gets a preview card and opens in the browser.
 - Voice typing writes into the composer. Holding the voice button records a message, and sliding away cancels it. Playback draws a waveform. On Linux the recording is encoded with `ffmpeg`. On macOS it uses `afconvert`.
@@ -54,7 +54,7 @@ People and groups:
 
 Sending and history:
 
-- Locations and contact cards cannot be sent. A received location or contact card is a label in the thread. Photos, videos, voice messages, and files you send show in the thread. The sticker button is that short published set, not the sticker shop.
+- Locations and contact cards cannot be sent. A received location or contact card is a label in the thread. Photos, videos, voice messages, and files you send show in the thread. Sticker sets that need a phone app-store payment or Stickers Premium cannot be bought here.
 - There is no search box inside a chat. The chat list searches names. Questions about saved message text go to the language model.
 - The thread shows the latest 40 messages. The local database keeps the latest 80. Auto reply sees the last 20 messages of the chat it is answering.
 - Letter sealing on send is one-to-one text, plus photos, videos, audio, and files when LINE asks for it. A message this client cannot unseal stays a label.
@@ -71,7 +71,7 @@ People, groups, and the rest of LINE:
 - You cannot create a room, leave a group, change the group picture, or manage an invite link.
 - You cannot change your own name, status message, or profile picture.
 - Official accounts appear in the list. Rich menus, coupons, and shop actions do not.
-- There is no OpenChat, LINE VOOM, Keep, albums, notes, LINE Pay, sticker shop, or LINE theme. Font and text size are local.
+- There is no OpenChat, LINE VOOM, Keep, albums, notes, LINE Pay, or LINE theme. Font and text size are local. The sticker shop lists sets and can buy free ones and ones priced in LINE Coins. It links to LINE STORE for a web purchase and points to the phone app. It does not browse the whole store, and it does not take an app-store payment.
 - There is one account. Chats cannot be pinned, hidden, or archived. Notification settings on LINE's servers are not edited here. The sound mute, the tone, and the volume are local.
 - Help opens a note that help is not in this window yet. There is no desktop notification popup. A new message plays the chime, shows the red tray dot, and can raise the window.
 

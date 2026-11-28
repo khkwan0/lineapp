@@ -4,6 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title data-i18n="members">Members</title>
+    <script>
+      try {
+        var saved = JSON.parse(localStorage.getItem("lineapp.appearance") || "null");
+        var theme = saved && saved.theme;
+        var dark = theme === "dark" || (theme !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+        if (dark) document.documentElement.setAttribute("data-theme", "dark");
+      } catch (e) {}
+    </script>
     <link rel="stylesheet" href="/src/style.css" />
     <script>
       window.addEventListener("dragover", (event) => event.preventDefault(), true);

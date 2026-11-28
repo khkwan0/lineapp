@@ -26,6 +26,11 @@ const DEFAULT_ENDPOINT: &str = "legy-jp.line-apps.com";
 const LOGIN_PATH: &str = "/acct/lgn/sq/v1";
 const LOGIN_POLL_PATH: &str = "/acct/lp/lgn/sq/v1";
 const TALK_PATH: &str = "/S4";
+const ATTR_NAME: i32 = 2;
+const ATTR_PICTURE: i32 = 8;
+const ATTR_STATUS: i32 = 16;
+const SHOP_PATH: &str = "/TSHOP4";
+const SHOP_ID: &str = "stickershop";
 const RELATION_PATH: &str = "/RE4";
 const HISTORY_PAGE: i32 = 30;
 const HISTORY_TARGET: usize = 40;
@@ -244,6 +249,10 @@ pub fn clear_session() {
 pub fn signed_in() -> bool {
     !load_session().access_token.is_empty()
 }
+
+/// One Talk send at a time. Photo upload and the caption share the session,
+/// and overlapping sends used to be answered with an older message.
+pub(crate) static TALK_SEND: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn save_session(session: &Session) -> Result<PathBuf, LineError> {
     let mut session = session.clone();
@@ -1179,6 +1188,299 @@ impl Client {
             }
             Err(err) => send_failure(to, &err),
         }
+    }
+
+    /// Keyword stickers. The dictionary maps a word to tag ids such as `c27`.
+    /// `getSuggestResourcesV2` maps each tag to sticker ids inside packs this
+    /// account owns. A tag is not itself a sticker id.
+    pub fn suggest_stickers(&mut self, query: &str, language: &str) -> Result<Json, LineError> {
+        self.require_token()?;
+        let key = suggest_key(query);
+        if key.is_empty() || key.chars().count() > 80 {
+            return Ok(json!({ "stickers": [] }));
+        }
+        self.ensure_suggest(language)?;
+        let cache = suggest_cache().lock().unwrap_or_else(|err| err.into_inner());
+        let mut order: Vec<String> = Vec::new();
+        let wanted = suggest_language_code(language);
+        if cache.dicts.contains_key(&wanted) {
+            order.push(wanted);
+        }
+        for lang in &cache.settings {
+            if cache.dicts.contains_key(&lang.language) && !order.contains(&lang.language) {
+                order.push(lang.language.clone());
+            }
+        }
+        for lang in &order {
+            let Some(dict) = cache.dicts.get(lang) else { continue };
+            let tags = suggest_tags(dict, &key);
+            if tags.is_empty() {
+                continue;
+            }
+            let resolved = resolve_suggest_tags(&tags, &cache.packs);
+            if resolved.is_empty() {
+                continue;
+            }
+            let stickers: Vec<Json> = resolved.into_iter().take(24).map(|item| json!({
+                "packageId": item.package_id,
+                "stickerId": item.sticker_id.to_string(),
+                "animated": item.animated,
+            })).collect();
+            return Ok(json!({ "stickers": stickers }));
+        }
+        Ok(json!({ "stickers": [] }))
+    }
+
+    fn ensure_suggest(&mut self, language: &str) -> Result<(), LineError> {
+        let fresh = {
+            let cache = suggest_cache().lock().unwrap_or_else(|err| err.into_inner());
+            cache.settings_at.is_some_and(|at| at.elapsed() < Duration::from_secs(6 * 3600))
+        };
+        if !fresh {
+            let value = self.shop("getSuggestDictionarySetting", &[(2, Field::Struct(vec![]))])?
+                .ok_or_else(|| line("LINE did not return sticker keywords"))?;
+            let settings = parse_suggest_langs(&value);
+            let mut cache = suggest_cache().lock().unwrap_or_else(|err| err.into_inner());
+            cache.settings = settings;
+            cache.settings_at = Some(Instant::now());
+        }
+        let wanted = suggest_language_code(language);
+        let missing: Vec<SuggestLang> = {
+            let cache = suggest_cache().lock().unwrap_or_else(|err| err.into_inner());
+            cache.settings.iter().filter(|lang| {
+                (lang.preload || lang.language == wanted) && !cache.dicts.contains_key(&lang.language)
+            }).cloned().collect()
+        };
+        for lang in missing {
+            let text = match load_suggest_file(&lang) {
+                Ok(text) => text,
+                Err(_) => continue,
+            };
+            let parsed = parse_suggest_dict(&text);
+            let mut cache = suggest_cache().lock().unwrap_or_else(|err| err.into_inner());
+            cache.dicts.insert(lang.language, parsed);
+        }
+        let packs_fresh = {
+            let cache = suggest_cache().lock().unwrap_or_else(|err| err.into_inner());
+            cache.packs_at.is_some_and(|at| at.elapsed() < Duration::from_secs(600))
+        };
+        if !packs_fresh {
+            let owned = self.owned_sticker_packs().unwrap_or_else(|_| Vec::new());
+            let mut meta = Vec::new();
+            for pack in &owned {
+                let id = pack.get("id").and_then(|value| value.as_str()).unwrap_or("");
+                if !sticker_id_ok(id) {
+                    continue;
+                }
+                let animated = pack.get("animated").and_then(|value| value.as_bool()).unwrap_or(false);
+                meta.push((id.to_string(), animated));
+            }
+            let mut loaded = Vec::new();
+            for chunk in meta.chunks(40) {
+                let list = Field::List(thrift::BINARY, chunk.iter().map(|(id, _)| bin(id.as_str())).collect());
+                let Ok(Some(value)) = self.shop("getSuggestResourcesV2", &[(2, Field::Struct(vec![
+                    (1, Field::I32(1)),
+                    (2, list),
+                ]))]) else {
+                    continue;
+                };
+                let Ok(fields) = as_struct(&value) else { continue };
+                let Some(Value::Map(pairs)) = fields.get(&1) else { continue };
+                let mut by_id = HashMap::new();
+                for (key, item) in pairs {
+                    let id = match key {
+                        Value::Bytes(raw) => String::from_utf8_lossy(raw).into_owned(),
+                        Value::Int(n) if *n > 0 => n.to_string(),
+                        _ => continue,
+                    };
+                    let Value::Struct(resource) = item else { continue };
+                    let path = text_field(resource, 1);
+                    if !suggest_path_ok(&path) {
+                        continue;
+                    }
+                    by_id.insert(id, (path, int_field(resource, 2).unwrap_or(0)));
+                }
+                for (id, animated) in chunk {
+                    let Some((path, version)) = by_id.get(id) else { continue };
+                    let name = format!("pack-{id}-{version}.txt");
+                    let Ok(text) = load_obs_text(&name, path) else { continue };
+                    loaded.push(PackTags {
+                        package_id: id.clone(),
+                        animated: *animated,
+                        tags: parse_pack_tags(&text),
+                    });
+                }
+            }
+            let mut cache = suggest_cache().lock().unwrap_or_else(|err| err.into_inner());
+            cache.packs = loaded;
+            cache.packs_at = Some(Instant::now());
+        }
+        Ok(())
+    }
+
+    /// Owned packs from `ShopService.getOwnedProductSummaries`, plus a shop
+    /// page from `getShowcaseV3`. A shop failure still returns the owned list.
+    pub fn sticker_shelf(&mut self) -> Result<Json, LineError> {
+        self.require_token()?;
+        let owned = self.owned_sticker_packs()?;
+        let owned_ids: HashSet<String> = owned
+            .iter()
+            .filter_map(|pack| pack.get("id").and_then(|value| value.as_str()).map(str::to_string))
+            .collect();
+        let (shop, shop_error) = match self.shop_sticker_packs() {
+            Ok(mut packs) => {
+                for pack in &mut packs {
+                    let id = pack.get("id").and_then(|value| value.as_str()).unwrap_or("");
+                    if owned_ids.contains(id) {
+                        if let Some(object) = pack.as_object_mut() {
+                            object.insert("owned".to_string(), json!(true));
+                        }
+                    }
+                }
+                (packs, String::new())
+            }
+            Err(err) => (Vec::new(), err.to_string()),
+        };
+        Ok(json!({ "owned": owned, "shop": shop, "shopError": shop_error }))
+    }
+
+    /// `ShopService.getProduct` for one sticker set: ids, price, and whether
+    /// this account already owns it.
+    pub fn sticker_pack(&mut self, product_id: &str) -> Result<Json, LineError> {
+        self.require_token()?;
+        if !sticker_id_ok(product_id) {
+            return Err(line("that sticker set cannot be opened"));
+        }
+        let detail = self.product_detail(product_id)?;
+        Ok(detail_pack(as_struct(&detail)?))
+    }
+
+    /// Free sets use `placePurchaseOrderForFreeProduct`. Sets priced in LINE
+    /// Coins use `placePurchaseOrderWithLineCoin`. App-store and Premium sets
+    /// are refused here. The price comes from `getProduct`, not from the window.
+    pub fn buy_sticker(&mut self, product_id: &str) -> Result<Json, LineError> {
+        self.require_token()?;
+        if !sticker_id_ok(product_id) {
+            return Err(line("that sticker set cannot be bought"));
+        }
+        if !self.session.mid.starts_with('u') {
+            return Err(line("this account cannot buy stickers yet"));
+        }
+        let detail = self.product_detail(product_id)?;
+        let fields = as_struct(&detail)?;
+        let pack = detail_pack(fields);
+        if pack.get("owned") == Some(&Json::Bool(true)) {
+            return Ok(json!({ "ok": true, "owned": true, "confirmUrl": "", "pack": pack }));
+        }
+        let sale = pack.get("sale").and_then(|value| value.as_str()).unwrap_or("none");
+        let method = match sale {
+            "free" => "placePurchaseOrderForFreeProduct",
+            "coins" => "placePurchaseOrderWithLineCoin",
+            "store" => return Err(line("that set is sold in the phone app store")),
+            "premium" => return Err(line("that set is part of Stickers Premium")),
+            _ => return Err(line("that sticker set is not for sale")),
+        };
+        let (currency, amount, price_string) = order_price(fields, sale);
+        let order = Field::Struct(vec![
+            (1, bin(SHOP_ID)),
+            (2, bin(product_id)),
+            (5, bin(&self.session.mid)),
+            (11, Field::Struct(vec![
+                (1, bin(currency)),
+                (2, bin(amount)),
+                (3, bin(price_string)),
+            ])),
+            (12, Field::Bool(false)),
+            (21, shop_locale()),
+            (31, Field::MapBin(Vec::new())),
+        ]);
+        let placed = self.shop(method, &[(2, order)])?.ok_or_else(|| line("LINE did not finish that purchase"))?;
+        let placed = as_struct(&placed)?;
+        let confirm = text_field(placed, 12);
+        let order_id = text_field(placed, 1);
+        if !confirm.is_empty() {
+            return Ok(json!({ "ok": true, "owned": false, "confirmUrl": confirm, "orderId": order_id, "pack": pack }));
+        }
+        if order_id.is_empty() {
+            return Err(line("LINE did not finish that purchase"));
+        }
+        let again = self.product_detail(product_id).ok();
+        let mut pack = again.as_ref().map(|value| detail_pack(as_struct(value).unwrap_or(fields))).unwrap_or(pack);
+        if pack.get("owned") != Some(&Json::Bool(true)) {
+            if let Some(object) = pack.as_object_mut() {
+                object.insert("owned".to_string(), json!(true));
+            }
+        }
+        Ok(json!({ "ok": true, "owned": true, "confirmUrl": "", "orderId": order_id, "pack": pack }))
+    }
+
+    fn product_detail(&mut self, product_id: &str) -> Result<Value, LineError> {
+        self.shop("getProduct", &[
+            (2, bin(SHOP_ID)),
+            (3, bin(product_id)),
+            (4, shop_locale()),
+        ])?
+        .ok_or_else(|| line("LINE did not return that sticker set"))
+    }
+
+    fn owned_sticker_packs(&mut self) -> Result<Vec<Json>, LineError> {
+        let mut offset = 0i32;
+        let mut packs = Vec::new();
+        loop {
+            let page = self.shop("getOwnedProductSummaries", &[
+                (2, bin(SHOP_ID)),
+                (3, Field::I32(offset)),
+                (4, Field::I32(100)),
+                (5, shop_locale()),
+            ])?
+            .ok_or_else(|| line("LINE did not return your stickers"))?;
+            let fields = as_struct(&page)?;
+            let batch = summary_packs(fields.get(&1));
+            let count = batch.len() as i32;
+            packs.extend(batch);
+            let total = int_field(fields, 3).unwrap_or(0);
+            offset += count;
+            if count == 0 || packs.len() >= 300 || (total > 0 && i64::from(offset) >= total) {
+                break;
+            }
+        }
+        Ok(packs)
+    }
+
+    fn shop_sticker_packs(&mut self) -> Result<Vec<Json>, LineError> {
+        let mut packs = Vec::new();
+        let mut seen = HashSet::new();
+        let mut last = line("LINE did not return the sticker shop");
+        let mut any = false;
+        for kind in [14i32, 1, 0] {
+            match self.shop("getShowcaseV3", &[(1, Field::Struct(vec![
+                (1, Field::I32(1)),
+                (2, Field::I32(kind)),
+                (3, Field::I32(0)),
+                (5, Field::I32(40)),
+            ]))]) {
+                Ok(Some(value)) => {
+                    any = true;
+                    for pack in search_packs(as_struct(&value)?.get(&1)) {
+                        let id = pack.get("id").and_then(|item| item.as_str()).unwrap_or("").to_string();
+                        if id.is_empty() || !seen.insert(id) {
+                            continue;
+                        }
+                        packs.push(pack);
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => last = err,
+            }
+            if packs.len() >= 60 {
+                break;
+            }
+        }
+        if !any {
+            return Err(last);
+        }
+        packs.truncate(60);
+        Ok(packs)
     }
 
     /// `TalkService.unsendMessage`: seq plus the message id. LINE recalls that
@@ -2132,6 +2434,11 @@ impl Client {
             .map_err(fail_line)
     }
 
+    fn shop(&mut self, method: &str, fields: &[(i16, Field)]) -> Result<Option<Value>, LineError> {
+        self.call(method, fields, SHOP_PATH, Duration::from_secs(30), &[], None)
+            .map_err(fail_line)
+    }
+
     fn send_plain_media(&mut self, to: &str, kind: &OutgoingMedia, bytes: &[u8], album: Option<&Album>, silent: bool) -> Result<Json, LineError> {
         let mut meta = plain_media_meta(kind, bytes.len());
         push_album(&mut meta, album);
@@ -2653,11 +2960,137 @@ impl Client {
             return json!({"mid": self.session.mid, "name": "", "picture": ""});
         };
         let mid = text_field(fields, 1);
+        let mut path = text_field(fields, 22);
+        if path.trim().is_empty() {
+            path = text_field(fields, 33);
+        }
         json!({
             "mid": if mid.is_empty() { self.session.mid.clone() } else { mid },
-            "name": text_field(fields, 20),
-            "picture": picture_url(&text_field(fields, 22)),
+            "name": text_field(fields, 20).trim(),
+            "status": text_field(fields, 24).trim(),
+            "picture": picture_url(&path),
         })
+    }
+
+    pub fn update_account(&mut self, name: &str, status: &str) -> Result<Json, LineError> {
+        self.require_token()?;
+        let name = checked_profile_text(name, 1, 20, "that name cannot be used")?;
+        let status = checked_profile_text(status, 0, 500, "that status cannot be used")?;
+        self.update_profile_attributes(&[(ATTR_NAME, name.as_str()), (ATTR_STATUS, status.as_str())])?;
+        self.my_profile()
+    }
+
+    pub fn update_account_picture(&mut self, bytes: &[u8]) -> Result<Json, LineError> {
+        self.require_token()?;
+        let mid = self.session.mid.clone();
+        if !user_mid_ok(&mid) {
+            return Err(line("Sign in to LINE first."));
+        }
+        let jpeg = profile_jpeg(bytes, false)?;
+        let oid = self.obs_post(
+            &format!("/r/talk/p/{mid}"),
+            &jpeg,
+            &json!({"name": "profile.jpg", "ver": "2.0", "type": "image"}),
+        )?;
+        if oid.is_empty() {
+            return Err(line("LINE did not accept that photo"));
+        }
+        self.my_profile()
+    }
+
+    pub fn clear_account_picture(&mut self) -> Result<Json, LineError> {
+        self.require_token()?;
+        self.update_profile_attributes(&[(ATTR_PICTURE, "")])?;
+        self.my_profile()
+    }
+
+    pub fn update_account_cover(&mut self, bytes: &[u8]) -> Result<Json, LineError> {
+        self.require_token()?;
+        let mid = self.session.mid.clone();
+        if !user_mid_ok(&mid) {
+            return Err(line("Sign in to LINE first."));
+        }
+        let jpeg = profile_jpeg(bytes, true)?;
+        let oid = self.upload_home_image(&jpeg)?;
+        self.set_home_cover(&oid)?;
+        let mut card = self.my_profile()?;
+        if card.get("cover").and_then(|value| value.as_str()).unwrap_or("").is_empty() {
+            card["cover"] = json!(cover_object_url(&oid));
+        }
+        Ok(card)
+    }
+
+    fn update_profile_attributes(&mut self, attrs: &[(i32, &str)]) -> Result<(), LineError> {
+        if attrs.is_empty() {
+            return Ok(());
+        }
+        let seq = self.next_seq();
+        self.talk("updateProfileAttributes", &profile_attribute_fields(seq, attrs))?;
+        Ok(())
+    }
+
+    fn upload_home_image(&self, jpeg: &[u8]) -> Result<String, LineError> {
+        let params = json!({"name": "cover.jpg", "ver": "2.0", "type": "image"});
+        if let Ok(oid) = self.obs_post("/r/myhome/h", jpeg, &params) {
+            if !oid.is_empty() {
+                return Ok(oid);
+            }
+        }
+        let id = fresh_object_id();
+        let params = json!({"name": "cover.jpg", "ver": "2.0", "type": "image", "oid": id});
+        let oid = self.obs_post(&format!("/r/myhome/h/{id}"), jpeg, &params)?;
+        if oid.is_empty() { Ok(id) } else { Ok(oid) }
+    }
+
+    fn set_home_cover(&mut self, object_id: &str) -> Result<(), LineError> {
+        let object_id = object_id.trim();
+        if object_id.is_empty() || object_id.len() > 180 || object_id.chars().any(|ch| ch.is_control() || ch == '/' || ch == '\\') {
+            return Err(line("LINE did not accept that cover"));
+        }
+        let Some(token) = self.channel_token() else {
+            return Err(line("LINE did not accept that cover"));
+        };
+        let body = json!({
+            "homeId": self.session.mid,
+            "coverObjectId": object_id,
+            "objectId": object_id,
+            "storyShare": false,
+            "meta": {}
+        });
+        let urls = [
+            "https://gd2.line.naver.jp/mh/api/v1/home/cover.json",
+            "https://gd2.line.naver.jp/mh/api/v1/home/updateCover.json",
+        ];
+        let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).build();
+        let mut last = line("LINE did not accept that cover");
+        for url in urls {
+            let response = agent
+                .post(url)
+                .set("user-agent", &user_agent())
+                .set("x-line-application", &application_header())
+                .set("x-line-access", &self.session.access_token)
+                .set("x-line-channeltoken", &token)
+                .set("content-type", "application/json")
+                .set("accept", "application/json")
+                .send_string(&body.to_string());
+            match response {
+                Ok(response) if response.status() < 400 => return Ok(()),
+                Ok(response) => last = line(format!("LINE did not accept that cover ({})", response.status())),
+                Err(ureq::Error::Status(code, _)) if code < 400 => return Ok(()),
+                Err(ureq::Error::Status(code, _)) => last = line(format!("LINE did not accept that cover ({code})")),
+                Err(err) => last = line(format!("LINE did not accept that cover: {err}")),
+            }
+        }
+        Err(last)
+    }
+
+    pub fn my_profile(&mut self) -> Result<Json, LineError> {
+        self.require_token()?;
+        let mid = self.session.mid.clone();
+        if mid.is_empty() {
+            return Err(line("Sign in to LINE first."));
+        }
+        self.contact_profile(&mid)
     }
 
     pub fn contact_profile(&mut self, mid: &str) -> Result<Json, LineError> {
@@ -3911,6 +4344,444 @@ fn sticker_shop_url(sticker_id: &str, animated: bool) -> String {
     format!("https://stickershop.line-scdn.net/stickershop/v1/sticker/{sticker_id}/android/{asset}")
 }
 
+#[derive(Clone)]
+struct SuggestLang {
+    language: String,
+    preload: bool,
+    path: String,
+    version: i64,
+}
+
+struct PackTags {
+    package_id: String,
+    animated: bool,
+    tags: HashMap<String, Vec<(u32, i32)>>,
+}
+
+struct ResolvedSticker {
+    package_id: String,
+    sticker_id: u32,
+    animated: bool,
+    weight: i32,
+}
+
+struct SuggestCache {
+    settings: Vec<SuggestLang>,
+    settings_at: Option<Instant>,
+    dicts: HashMap<String, BTreeMap<String, Vec<String>>>,
+    packs: Vec<PackTags>,
+    packs_at: Option<Instant>,
+}
+
+fn suggest_cache() -> &'static Mutex<SuggestCache> {
+    static CACHE: OnceLock<Mutex<SuggestCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(SuggestCache {
+        settings: Vec::new(),
+        settings_at: None,
+        dicts: HashMap::new(),
+        packs: Vec::new(),
+        packs_at: None,
+    }))
+}
+
+fn suggest_language_code(language: &str) -> String {
+    match language.trim() {
+        "zh-Hans" | "zh-CN" | "zh_CN" => "zh-CN".to_string(),
+        "zh-Hant" | "zh-TW" | "zh_TW" => "zh-Hant".to_string(),
+        "pt-BR" => "pt".to_string(),
+        "es-419" => "es-419".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn suggest_key(raw: &str) -> String {
+    raw.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn suggest_tag(token: &str) -> Option<&str> {
+    let token = token.trim();
+    let body = token.strip_prefix('c').unwrap_or(token);
+    if body.is_empty() || body.len() > 16 || body.bytes().any(|byte| !byte.is_ascii_digit()) || body.bytes().all(|byte| byte == b'0') {
+        return None;
+    }
+    Some(token)
+}
+
+fn parse_suggest_dict(text: &str) -> BTreeMap<String, Vec<String>> {
+    let mut dict = BTreeMap::new();
+    for line in text.lines() {
+        let Some((word, ids)) = line.split_once('\t') else { continue };
+        let word = suggest_key(word);
+        if word.is_empty() || word.chars().count() > 80 {
+            continue;
+        }
+        let mut parsed = Vec::new();
+        for token in ids.split(',') {
+            let Some(tag) = suggest_tag(token) else { continue };
+            if !parsed.iter().any(|item: &String| item == tag) {
+                parsed.push(tag.to_string());
+            }
+            if parsed.len() >= 48 {
+                break;
+            }
+        }
+        if parsed.is_empty() {
+            continue;
+        }
+        dict.entry(word).or_insert(parsed);
+    }
+    dict
+}
+
+/// `tag<tab>stickerId-weight,stickerId-weight` for one owned pack.
+fn parse_pack_tags(text: &str) -> HashMap<String, Vec<(u32, i32)>> {
+    let mut tags = HashMap::new();
+    for line in text.lines() {
+        let Some((tag, rest)) = line.split_once('\t') else { continue };
+        let Some(tag) = suggest_tag(tag) else { continue };
+        let mut stickers = Vec::new();
+        for part in rest.split(',') {
+            let Some((id, weight)) = part.trim().split_once('-') else { continue };
+            let Ok(id) = id.parse::<u32>() else { continue };
+            if id == 0 {
+                continue;
+            }
+            let weight = (weight.trim().parse::<f32>().unwrap_or(0.0) * 10_000.0).round() as i32;
+            stickers.push((id, weight));
+            if stickers.len() >= 40 {
+                break;
+            }
+        }
+        if !stickers.is_empty() {
+            tags.insert(tag.to_string(), stickers);
+        }
+    }
+    tags
+}
+
+fn push_tag(hits: &mut Vec<String>, tag: &str) {
+    if !hits.iter().any(|item| item == tag) && hits.len() < 48 {
+        hits.push(tag.to_string());
+    }
+}
+
+/// Exact keyword first, then the last word, then a short prefix of the typed text.
+fn suggest_tags(dict: &BTreeMap<String, Vec<String>>, key: &str) -> Vec<String> {
+    let mut hits = Vec::new();
+    if let Some(tags) = dict.get(key) {
+        for tag in tags {
+            push_tag(&mut hits, tag);
+        }
+        return hits;
+    }
+    if let Some(word) = key.rsplit(' ').next() {
+        if word != key && word.chars().count() >= 2 {
+            if let Some(tags) = dict.get(word) {
+                for tag in tags {
+                    push_tag(&mut hits, tag);
+                }
+                return hits;
+            }
+        }
+    }
+    if key.chars().count() < 2 {
+        return hits;
+    }
+    let mut words = 0usize;
+    for (word, tags) in dict.range(key.to_string()..) {
+        if !word.starts_with(key) {
+            break;
+        }
+        words += 1;
+        if words > 4 {
+            break;
+        }
+        for tag in tags {
+            push_tag(&mut hits, tag);
+        }
+    }
+    hits
+}
+
+fn resolve_suggest_tags(tags: &[String], packs: &[PackTags]) -> Vec<ResolvedSticker> {
+    let mut best: HashMap<(usize, u32), i32> = HashMap::new();
+    for tag in tags {
+        for (index, pack) in packs.iter().enumerate() {
+            let Some(stickers) = pack.tags.get(tag) else { continue };
+            for (sticker, weight) in stickers {
+                let slot = best.entry((index, *sticker)).or_insert(*weight);
+                if *weight > *slot {
+                    *slot = *weight;
+                }
+            }
+        }
+    }
+    let mut resolved: Vec<ResolvedSticker> = best.into_iter().map(|((index, sticker_id), weight)| {
+        let pack = &packs[index];
+        ResolvedSticker {
+            package_id: pack.package_id.clone(),
+            sticker_id,
+            animated: pack.animated,
+            weight,
+        }
+    }).collect();
+    resolved.sort_by(|left, right| right.weight.cmp(&left.weight).then(left.sticker_id.cmp(&right.sticker_id)));
+    resolved.truncate(24);
+    resolved
+}
+
+fn parse_suggest_langs(value: &Value) -> Vec<SuggestLang> {
+    let Ok(fields) = as_struct(value) else { return Vec::new() };
+    let mut langs = Vec::new();
+    for item in struct_list(fields.get(&1)) {
+        let language = text_field(item, 1);
+        let Some(resource) = struct_at(item, 4) else { continue };
+        let path = text_field(resource, 1);
+        if !suggest_path_ok(&path) || !suggest_language_ok(&language) {
+            continue;
+        }
+        langs.push(SuggestLang {
+            language,
+            preload: bool_field(item, 3),
+            path,
+            version: int_field(resource, 2).unwrap_or(0),
+        });
+    }
+    langs
+}
+
+fn suggest_language_ok(language: &str) -> bool {
+    !language.is_empty()
+        && language.len() <= 16
+        && language.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn suggest_path_ok(path: &str) -> bool {
+    path.starts_with("/r/shop/suggest/")
+        && !path.contains("..")
+        && path.len() <= 180
+        && path.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'-' | b'.'))
+}
+
+fn load_suggest_file(lang: &SuggestLang) -> Result<String, LineError> {
+    load_obs_text(&format!("{}-{}.txt", lang.language, lang.version), &lang.path)
+}
+
+fn load_obs_text(name: &str, obs_path: &str) -> Result<String, LineError> {
+    if !suggest_path_ok(obs_path) || name.contains('/') || name.contains("..") {
+        return Err(line("LINE did not return that sticker keyword list"));
+    }
+    let path = config_dir().join("suggest").join(name);
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if !text.is_empty() {
+            return Ok(text);
+        }
+    }
+    let url = format!("https://obs.line-scdn.net{obs_path}");
+    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(30)).build();
+    let response = agent.get(&url).set("user-agent", &user_agent()).call().map_err(|err| line(err.to_string()))?;
+    let mut body = Vec::new();
+    response.into_reader().take(8_000_000).read_to_end(&mut body).map_err(|err| line(err.to_string()))?;
+    if body.is_empty() || body.len() >= 8_000_000 {
+        return Err(line("LINE did not return that sticker keyword list"));
+    }
+    let text = String::from_utf8_lossy(&body).into_owned();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, &text);
+    Ok(text)
+}
+
+fn shop_locale() -> Field {
+    let raw = std::env::var("LINE_LAL").unwrap_or_else(|_| "ja_JP".into());
+    let raw = raw.trim();
+    let (language, country) = match raw.split_once(['_', '-']) {
+        Some((language, country)) if !language.is_empty() && country.len() >= 2 => (raw.to_string(), country[..2].to_ascii_uppercase()),
+        _ => ("ja_JP".to_string(), "JP".to_string()),
+    };
+    Field::Struct(vec![(1, bin(language)), (2, bin(country))])
+}
+
+fn sticker_animated(resource: i64) -> bool {
+    matches!(resource, 2 | 4 | 5 | 6)
+}
+
+fn coin_count(raw: &str) -> Option<u64> {
+    let digits: String = raw.chars().filter(|ch| ch.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+fn amount_is_zero(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    trimmed.is_empty() || trimmed.chars().all(|ch| ch == '0' || ch == '.' || ch == ',')
+}
+
+/// `free` can be ordered with no charge. `coins` spends LINE Coins.
+/// `store` is an app-store price. `premium` is Stickers Premium.
+/// `none` is not for sale to this account.
+fn sale_kind(on_sale: bool, availability: i64, tier: i64, coins: &str, amount: &str) -> &'static str {
+    if availability == 2 {
+        return "premium";
+    }
+    if !on_sale {
+        return "none";
+    }
+    let coins = coin_count(coins);
+    if tier <= 0 || coins == Some(0) || (coins.is_none() && amount_is_zero(amount)) {
+        return "free";
+    }
+    if coins.unwrap_or(0) > 0 {
+        return "coins";
+    }
+    "store"
+}
+
+fn summary_packs(list: Option<&Value>) -> Vec<Json> {
+    struct_list(list).into_iter().filter_map(summary_pack).collect()
+}
+
+fn summary_pack(fields: &BTreeMap<i16, Value>) -> Option<Json> {
+    let id = text_field(fields, 1);
+    if !sticker_id_ok(&id) {
+        return None;
+    }
+    let sticker = struct_at(fields, 93).and_then(|summary| struct_at(summary, 1));
+    let resource = sticker.and_then(|summary| int_field(summary, 5)).unwrap_or(1);
+    let ids = sticker.map(|summary| ids_from_ranges(summary.get(&1))).unwrap_or_default();
+    let name = text_field(fields, 11);
+    Some(pack_json(&id, &name, sticker_animated(resource), &ids, true, "", "", "free"))
+}
+
+fn search_packs(list: Option<&Value>) -> Vec<Json> {
+    struct_list(list).into_iter().filter_map(search_pack).collect()
+}
+
+fn search_pack(fields: &BTreeMap<i16, Value>) -> Option<Json> {
+    if int_field(fields, 2).unwrap_or(1) != 1 {
+        return None;
+    }
+    let id = text_field(fields, 1);
+    if !sticker_id_ok(&id) {
+        return None;
+    }
+    let property = struct_at(fields, 10).and_then(|property| struct_at(property, 1));
+    let animated = property.map(|sticker| bool_field(sticker, 1)).unwrap_or(false)
+        || property.and_then(|sticker| int_field(sticker, 4)).is_some_and(sticker_animated);
+    let ids = property.map(|sticker| sticker_id_list(sticker.get(&9))).unwrap_or_default();
+    let coins = text_field(fields, 9);
+    let tier = int_field(fields, 8).unwrap_or(0);
+    let on_sale = bool_or(fields, 12, true);
+    let availability = int_field(fields, 19).unwrap_or(0);
+    let sale = sale_kind(on_sale, availability, tier, &coins, "");
+    let price = if sale == "coins" { coins.clone() } else { String::new() };
+    Some(pack_json(&id, &text_field(fields, 3), animated, &ids, false, &price, &coins, sale))
+}
+
+fn detail_pack(fields: &BTreeMap<i16, Value>) -> Json {
+    let id = text_field(fields, 1);
+    let property = struct_at(fields, 95).and_then(|property| struct_at(property, 1));
+    let animated = property.map(|sticker| bool_field(sticker, 1)).unwrap_or(false)
+        || property.and_then(|sticker| int_field(sticker, 4)).is_some_and(sticker_animated);
+    let ids = property.map(|sticker| sticker_id_list(sticker.get(&9))).unwrap_or_default();
+    let owned = bool_field(fields, 31) || bool_field(fields, 32);
+    let coins = text_field(fields, 63);
+    let price_fields = struct_at(fields, 62);
+    let amount = price_fields.map(|price| text_field(price, 2)).unwrap_or_default();
+    let price_string = price_fields.map(|price| text_field(price, 3)).unwrap_or_default();
+    let tier = int_field(fields, 61).unwrap_or(0);
+    let sale = if owned {
+        "free"
+    } else {
+        sale_kind(bool_or(fields, 51, true) && bool_or(fields, 54, true), 0, tier, &coins, &amount)
+    };
+    let price = if sale == "coins" && !price_string.is_empty() { price_string } else if sale == "coins" { coins.clone() } else { String::new() };
+    pack_json(&id, &text_field(fields, 11), animated, &ids, owned, &price, &coins, sale)
+}
+
+fn order_price(fields: &BTreeMap<i16, Value>, sale: &str) -> (String, String, String) {
+    let price = struct_at(fields, 62);
+    let currency = price.map(|item| text_field(item, 1)).unwrap_or_default();
+    let amount = price.map(|item| text_field(item, 2)).unwrap_or_default();
+    let price_string = price.map(|item| text_field(item, 3)).unwrap_or_default();
+    if sale == "coins" {
+        let coins = text_field(fields, 63);
+        let shown = if price_string.is_empty() { coins.clone() } else { price_string };
+        let currency = if currency.is_empty() { "LINE".to_string() } else { currency };
+        return (currency, coins, shown);
+    }
+    let currency = if currency.is_empty() { "JPY".to_string() } else { currency };
+    let amount = if amount.is_empty() { "0".to_string() } else { amount };
+    let price_string = if price_string.is_empty() { "0".to_string() } else { price_string };
+    (currency, amount, price_string)
+}
+
+fn pack_json(id: &str, name: &str, animated: bool, sticker_ids: &[String], owned: bool, price: &str, coins: &str, sale: &str) -> Json {
+    let name = if name.trim().is_empty() { id.to_string() } else { name.trim().to_string() };
+    json!({
+        "id": id,
+        "name": name,
+        "animated": animated,
+        "stickerIds": sticker_ids,
+        "owned": owned,
+        "price": price,
+        "coins": coins,
+        "sale": sale,
+    })
+}
+
+fn ids_from_ranges(list: Option<&Value>) -> Vec<String> {
+    let mut ids = Vec::new();
+    for range in struct_list(list) {
+        let Some(start) = int_field(range, 1).filter(|value| *value > 0) else { continue };
+        let size = int_field(range, 2).unwrap_or(0).clamp(0, 80);
+        for offset in 0..size {
+            ids.push((start + offset).to_string());
+            if ids.len() >= 80 {
+                return ids;
+            }
+        }
+    }
+    ids
+}
+
+fn struct_at(fields: &BTreeMap<i16, Value>, id: i16) -> Option<&BTreeMap<i16, Value>> {
+    match fields.get(&id) {
+        Some(Value::Struct(inner)) => Some(inner),
+        _ => None,
+    }
+}
+
+fn struct_list(value: Option<&Value>) -> Vec<&BTreeMap<i16, Value>> {
+    let Some(Value::List(items)) = value else { return Vec::new() };
+    items.iter().filter_map(|item| match item {
+        Value::Struct(fields) => Some(fields),
+        _ => None,
+    }).collect()
+}
+
+fn sticker_id_list(value: Option<&Value>) -> Vec<String> {
+    let Some(Value::List(items)) = value else { return Vec::new() };
+    items.iter().filter_map(|item| match item {
+        Value::Bytes(raw) if !raw.is_empty() => {
+            let text = String::from_utf8_lossy(raw).into_owned();
+            sticker_id_ok(&text).then_some(text)
+        }
+        Value::Int(value) if *value > 0 => Some(value.to_string()),
+        _ => None,
+    }).take(80).collect()
+}
+
+fn bool_or(fields: &BTreeMap<i16, Value>, id: i16, fallback: bool) -> bool {
+    match fields.get(&id) {
+        Some(Value::Bool(value)) => *value,
+        _ => fallback,
+    }
+}
+
 fn content_fields(to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], seq: i32, has_content: bool, silent: bool) -> Vec<(i16, Field)> {
     let mut message = vec![
         (2, bin(to)),
@@ -4451,6 +5322,88 @@ fn cover_from_home(value: &Json) -> String {
         }
     }
     String::new()
+}
+
+fn checked_profile_text(value: &str, min: usize, max: usize, message: &str) -> Result<String, LineError> {
+    let text = value.trim();
+    let count = text.chars().count();
+    if count < min || count > max || text.chars().any(|ch| ch.is_control()) {
+        return Err(line(message));
+    }
+    Ok(text.to_string())
+}
+
+fn fresh_object_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn profile_attribute_fields(seq: i32, attrs: &[(i32, &str)]) -> Vec<(i16, Field)> {
+    let pairs = attrs
+        .iter()
+        .map(|(id, value)| {
+            (
+                Field::I32(*id),
+                Field::Struct(vec![
+                    (1, bin(*value)),
+                    (2, Field::Map(thrift::BINARY, thrift::BINARY, Vec::new())),
+                ]),
+            )
+        })
+        .collect();
+    vec![
+        (1, Field::I32(seq)),
+        (2, Field::Struct(vec![(1, Field::Map(thrift::I32, thrift::STRUCT, pairs))])),
+    ]
+}
+
+fn fitted(width: u32, height: u32, edge: u32) -> (u32, u32) {
+    if width == 0 || height == 0 {
+        return (1, 1);
+    }
+    if width <= edge && height <= edge {
+        return (width, height);
+    }
+    let scale = edge as f32 / width.max(height) as f32;
+    let next_width = ((width as f32) * scale).round().max(1.0) as u32;
+    let next_height = ((height as f32) * scale).round().max(1.0) as u32;
+    (next_width, next_height)
+}
+
+fn profile_jpeg(bytes: &[u8], cover: bool) -> Result<Vec<u8>, LineError> {
+    if bytes.is_empty() || bytes.len() > 20_000_000 {
+        return Err(line("that photo is too large"));
+    }
+    let image = image::load_from_memory(bytes).map_err(|_| line("that photo could not be read"))?;
+    let image = if cover {
+        let (width, height) = fitted(image.width(), image.height(), 1920);
+        if width == image.width() && height == image.height() {
+            image
+        } else {
+            image.resize(width, height, image::imageops::FilterType::Triangle)
+        }
+    } else {
+        let side = image.width().min(image.height()).max(1);
+        let x = image.width().saturating_sub(side) / 2;
+        let y = image.height().saturating_sub(side) / 2;
+        let square = image.crop_imm(x, y, side, side);
+        if side > 640 {
+            square.resize(640, 640, image::imageops::FilterType::Triangle)
+        } else {
+            square
+        }
+    };
+    let rgba = image.to_rgba8();
+    let mut canvas = image::RgbaImage::from_pixel(rgba.width(), rgba.height(), image::Rgba([255, 255, 255, 255]));
+    image::imageops::overlay(&mut canvas, &rgba, 0, 0);
+    let rgb = image::DynamicImage::ImageRgba8(canvas).into_rgb8();
+    let mut jpeg = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 85);
+    encoder
+        .encode(rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8)
+        .map_err(|_| line("that photo could not be prepared"))?;
+    Ok(jpeg)
 }
 
 fn picture_url(path: &str) -> String {
@@ -5506,6 +6459,29 @@ mod tests {
     }
 
     #[test]
+    fn keyword_dictionary_picks_an_exact_sticker_then_a_prefix() {
+        let dict = parse_suggest_dict("thanks\t3325,c27,c27\nthank you\t1452\nok\t2289\n");
+        assert_eq!(suggest_key("  OK "), "ok");
+        assert_eq!(suggest_tags(&dict, "thanks"), vec!["3325".to_string(), "c27".to_string()]);
+        assert_eq!(suggest_tags(&dict, &suggest_key("  OK ")), vec!["2289".to_string()]);
+        assert_eq!(suggest_tags(&dict, "hey thanks"), vec!["3325".to_string(), "c27".to_string()]);
+        assert_eq!(suggest_tags(&dict, "thank"), vec!["1452".to_string(), "3325".to_string(), "c27".to_string()]);
+        assert!(suggest_tags(&dict, "z").is_empty());
+        let pack = PackTags {
+            package_id: "11537".to_string(),
+            animated: true,
+            tags: parse_pack_tags("c27\t52002739-0.2199\n3325\t52002739-0.1000\nc43\t52002734-0.0766\n"),
+        };
+        let found = resolve_suggest_tags(&["3325".into(), "c27".into(), "c43".into()], &[pack]);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].sticker_id, 52002739);
+        assert_eq!(found[0].package_id, "11537");
+        assert_eq!(found[0].weight, 2199);
+        assert!(found[0].animated);
+        assert_eq!(found[1].sticker_id, 52002734);
+    }
+
+    #[test]
     fn chat_checked_matches_the_desktop_call() {
         let frame = thrift::write_call("sendChatChecked", &chat_checked_fields(7, "uabc", "1400"));
         let parsed = thrift::read_message(&frame).unwrap();
@@ -5559,6 +6535,25 @@ mod tests {
     }
 
     #[test]
+    fn profile_photo_becomes_a_square_jpeg() {
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(4, 2, image::Rgb([10, 20, 30])))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let jpeg = profile_jpeg(&png, false).unwrap();
+        assert!(jpeg.starts_with(&[0xff, 0xd8]));
+        let decoded = image::load_from_memory(&jpeg).unwrap();
+        assert_eq!(decoded.width(), decoded.height());
+        assert!(checked_profile_text("  Ada  ", 1, 20, "name").is_ok());
+        assert!(checked_profile_text("", 1, 20, "name").is_err());
+        assert!(checked_profile_text(&"a".repeat(21), 1, 20, "name").is_err());
+        let fields = profile_attribute_fields(3, &[(ATTR_NAME, "Ada"), (ATTR_STATUS, "here")]);
+        let frame = thrift::write_call("updateProfileAttributes", &fields);
+        let message = thrift::read_message(&frame).unwrap();
+        assert_eq!(message.fields.get(&1), Some(&Value::Int(3)));
+    }
+
+    #[test]
     fn delivery_state_follows_the_other_reader() {
         let marks = vec![("ume".to_string(), 10), ("ufriend".to_string(), 20)];
         assert_eq!(delivery_state("15", "ume", &marks), ("read".into(), 1));
@@ -5578,6 +6573,60 @@ mod tests {
         assert!(needs_fresh_preview("Letter-sealed message", 10, 10));
         assert!(!needs_fresh_preview("hello", 10, 10));
         assert!(needs_fresh_preview("hello", 11, 10));
+    }
+
+    #[test]
+    fn owned_summary_lists_sticker_ids_and_the_shop_row_keeps_its_price() {
+        let summary = Value::Struct(BTreeMap::from([
+            (1, Value::Bytes(b"11537".to_vec())),
+            (11, Value::Bytes(b"Moon".to_vec())),
+            (93, Value::Struct(BTreeMap::from([
+                (1, Value::Struct(BTreeMap::from([
+                    (1, Value::List(vec![Value::Struct(BTreeMap::from([
+                        (1, Value::Int(52002734)),
+                        (2, Value::Int(2)),
+                    ]))])),
+                    (5, Value::Int(2)),
+                ]))),
+            ]))),
+        ]));
+        let pack = summary_pack(as_struct(&summary).unwrap()).unwrap();
+        assert_eq!(pack["owned"], true);
+        assert_eq!(pack["animated"], true);
+        assert_eq!(pack["stickerIds"], json!(["52002734", "52002735"]));
+
+        let search = Value::Struct(BTreeMap::from([
+            (1, Value::Bytes(b"200".to_vec())),
+            (2, Value::Int(1)),
+            (3, Value::Bytes(b"Shop".to_vec())),
+            (8, Value::Int(2)),
+            (9, Value::Bytes(b"50".to_vec())),
+            (10, Value::Struct(BTreeMap::from([
+                (1, Value::Struct(BTreeMap::from([
+                    (1, Value::Bool(false)),
+                    (9, Value::List(vec![Value::Bytes(b"9".to_vec())])),
+                ]))),
+            ]))),
+            (12, Value::Bool(true)),
+            (19, Value::Int(0)),
+        ]));
+        let shop = search_pack(as_struct(&search).unwrap()).unwrap();
+        assert_eq!(shop["sale"], "coins");
+        assert_eq!(shop["price"], "50");
+        assert_eq!(shop["owned"], false);
+
+        let premium = BTreeMap::from([
+            (1, Value::Bytes(b"9".to_vec())),
+            (11, Value::Bytes(b"Premium".to_vec())),
+            (51, Value::Bool(true)),
+            (54, Value::Bool(true)),
+            (61, Value::Int(0)),
+            (102, Value::Struct(BTreeMap::from([(2, Value::Int(2))]))),
+        ]);
+        assert_eq!(detail_pack(&premium)["sale"], "free");
+        assert_eq!(sale_kind(true, 2, 0, "0", "0"), "premium");
+        assert_eq!(sale_kind(true, 0, 3, "", "120"), "store");
+        assert_eq!(sale_kind(false, 0, 0, "0", "0"), "none");
     }
 
     #[test]
