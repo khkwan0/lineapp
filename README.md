@@ -10,69 +10,82 @@ Sign-in and the window:
 
 - QR login. The phone app scans the code, confirms a PIN, and a saved certificate skips that PIN the next time.
 - The session stays in the app config directory. Log out clears it. Quit exits.
-- A tray icon shows the unread count. Closing the window can leave the app in the tray.
-- About shows the build number and the time it was built.
+- A tray icon shows the unread count. Closing the window can leave the app in the tray. The window can stay above other windows. A new message can raise the window and ask the taskbar for attention. A muted chat does neither.
+- Settings covers language, font, and text size. The languages are English, Japanese, Korean, simplified and traditional Chinese, Thai, Vietnamese, Indonesian, Malay, Spanish, Portuguese, French, German, Italian, Russian, Arabic, Turkish, Greek, and Hindi, or the device language. Arabic is right to left. Fonts are Noto Sans, the system font, a serif, and a monospace face, at five sizes. Characters a chosen font does not include still use Noto Sans.
+- The notification sound has a volume and fourteen tones. Each chat can mute that sound on this machine. A chat LINE already muted stays quiet. The tray badge still updates.
+- The microphone chosen in Settings is used for voice typing, voice messages, and a test that plays the recording back and shows what the speech engine heard. Speakers and cameras are listed for reference.
+- About shows the build number and the time it was built. The chat list pane can be resized.
 
 Chats:
 
 - The chat list covers friends, groups, rooms, and official accounts. Tabs and a name search filter that list. New activity arrives while the window is open.
-- Opening a chat loads the latest 40 messages and marks the chat read. Your own messages show Read, or Read and a count when more than one person has read them.
-- The composer sends text, including a reply that quotes another message. A failed send can be retried.
-- Photos, videos, audio, and other files can be attached. The send follows the desktop object-storage flow: a content-typed message, then the bytes uploaded to LINE. A chat that requires letter sealing encrypts the file first. A sticker button sends stickers from LINE's published sticker list.
-- One-to-one text that LINE refuses with `E2EE_RETRY_ENCRYPT` is sent with letter sealing. Text sealed to a key this client holds opens in the thread. Text sealed to another device's key stays labeled "Letter-sealed message."
-- Stickers, photos, videos, and short animated images already in a chat are shown. Photos and videos open in a viewer.
+- Opening a chat loads the latest 40 messages, scrolls to the first unread one, and marks the chat read. Your own messages show Read, or Read and a count when more than one person has read them. A long message collapses until you expand it.
+- The composer sends text, including a reply that quotes another message. The quote scrolls to that message when it is in the loaded history. A failed send can be retried.
+- Photos, videos, audio, and other files can be attached or dropped onto the thread. Up to ten photos go out together and show as one grid. The send follows the desktop object-storage flow: a content-typed message, then the bytes uploaded to LINE. A chat that requires letter sealing encrypts the file first. A sticker button sends a short published set, five still stickers and eleven animated ones.
+- One-to-one text that LINE refuses with `E2EE_RETRY_ENCRYPT` is sent with letter sealing. Photos, videos, audio, and files get the same retry, including in a group or a room when this client has that chat's shared key. Text and files sealed to a key this client holds open in the thread. Anything sealed to another device's key stays labeled "Letter-sealed message."
+- Stickers, photos, videos, voice messages, and short animated images already in a chat are shown. Photos and videos open in a viewer. A received file can be saved. A link that is the whole message gets a preview card and opens in the browser.
+- Voice typing writes into the composer. Holding the voice button records a message, and sliding away cancels it. Playback draws a waveform. On Linux the recording is encoded with `ffmpeg`. On macOS it uses `afconvert`.
 - A call that already happened shows as a duration. The app does not place the call.
 - Reactions use a fixed set: like, cool, love, angry, please, cry, and wow.
 - The message menu copies text, shares that text into another chat, unsends your own message, and reports someone else's.
-- Each chat can mute the notification sound on this machine. A chat LINE already muted stays quiet. A new message plays a chime and updates the tray badge.
 - Group system lines cover joins, leaves, removals, invites, renames, and picture changes.
 
 People and groups:
 
-- The rail shows your profile photo.
-- A profile window shows a person's name, picture, and status. From there you can favorite them, rename how they appear to you, open the chat, add them, block or unblock them, or report them. Someone who is not a friend gets a fraud warning.
-- A group window lists members and can search them, invite friends, remove a member, rename the group, and turn automatic join on or off.
+- The rail shows your profile photo. Friends is a directory, with favorites first and a name search. Choosing someone opens their chat.
+- Add friends searches a LINE ID or a phone number and lists LINE's recommendations. From a result you can add the person.
+- Create a group takes a name and the friends you pick.
+- A profile window shows a person's name, picture, cover, and status. From there you can favorite them, rename how they appear to you, open the chat, add them, block or unblock them, or report them. Someone who is not a friend gets a fraud warning. Your own profile is view only.
+- A group window lists members and can search them, invite friends, remove a member, rename the group, and turn automatic join on or off. A member's row opens their profile.
+
+Agent:
+
+- The agent answers questions about chats already saved on this computer. It can search those chats by name or message text, list them, and read the recent messages in one of them. It cannot send, delete, or change anything.
+- Settings points it at an OpenAI-compatible endpoint, Anthropic, or Gemini, with a model, an API key, and optional temperature, top-p, max tokens, thinking level, and extra JSON. The text it reads from your chats is sent to that endpoint. The endpoint and key are stored in `lineapp.settings.json` next to the session file.
 
 ## What the official LINE app does that this does not
 
 Sending and history:
 
-- Locations and contact cards cannot be sent. Received voice messages, files, locations, and contact cards are a label in the thread, plus the file name when LINE includes one. Photos and videos you send show in the thread. The sticker button is a short published set, not the full sticker shop.
-- There is no search inside a chat or across message text. Search covers chat names.
-- History stops at the latest 40 messages.
-- Letter sealing on send is one-to-one text. A message this client cannot unseal stays a label.
-- There is no typing indicator, no way to announce a message, and no albums, notes, or Keep.
+- Locations and contact cards cannot be sent. A received location or contact card is a label in the thread. Photos, videos, voice messages, and files you send show in the thread. The sticker button is that short published set, not the sticker shop.
+- There is no search box inside a chat. The chat list searches names. The agent can search message text that is already in the local database.
+- The thread shows the latest 40 messages. The local database keeps the latest 80, which is what the agent can read.
+- Letter sealing on send is one-to-one text, plus photos, videos, audio, and files when LINE asks for it. A message this client cannot unseal stays a label.
+- Holding the send button offers a send without notification. LINE still notifies the recipient, so that choice does not send.
+- There is no typing indicator, no way to announce a message, and no LINE albums, notes, or Keep. Several photos can be sent together. That is not the albums feature.
 
 Calls:
 
-- There are no voice or video calls. Settings lists speakers, microphones, and cameras, and those lists do nothing. This app has no LINE VoIP.
+- There are no voice or video calls. Settings lists speakers and cameras, and those lists do nothing. The microphone is for voice typing, voice messages, and the mic test. This app has no LINE VoIP.
 
 People, groups, and the rest of LINE:
 
-- Friends is a filter of chats you already have. There is no friend directory, and no way to add someone by LINE ID, phone number, or QR.
-- You cannot create a group or a room, leave a group, change the group picture, or manage an invite link.
+- You can add someone by LINE ID or phone number. You cannot add them by scanning a QR code in this window.
+- You cannot create a room, leave a group, change the group picture, or manage an invite link.
 - You cannot change your own name, status message, or profile picture.
 - Official accounts appear in the list. Rich menus, coupons, and shop actions do not.
-- There is no OpenChat, LINE VOOM, Keep, albums, notes, LINE Pay, sticker shop, or theme.
-- There is one account. Chats cannot be pinned, hidden, or archived. Notification settings on LINE's servers are not edited here. The sound mute is local.
-- Help opens a note that help is not in this window yet. There is no desktop notification popup, only the chime and the tray badge.
+- There is no OpenChat, LINE VOOM, Keep, albums, notes, LINE Pay, sticker shop, or LINE theme. Font and text size are local.
+- There is one account. Chats cannot be pinned, hidden, or archived. Notification settings on LINE's servers are not edited here. The sound mute, the tone, and the volume are local.
+- Help opens a note that help is not in this window yet. There is no desktop notification popup. A new message plays the chime, updates the tray badge, and can raise the window.
 
 A small desktop client for the protocol the LINE desktop app speaks: Thrift
 TCompact POSTed to `legy-jp.line-apps.com`. This is not the public Bot /
 Messaging API.
 
 The window is a TypeScript Tauri app. Login, the chat list, history, send,
-letter sealing, photos, videos, audio, files, stickers, and the rail menu
-actions run in Rust. A v3 access
+letter sealing, photos, videos, audio, files, stickers, friends, groups, voice,
+link previews, and the agent run in Rust. A v3 access
 token is a JWT and talks to `/S4` in the clear. Older `mid:secret` tokens go
 through LINE's encrypted LEGY gateway (`gf.line.naver.jp/enc`).
 
 QR login follows the current desktop flow (`createSession`,
 `createQrCodeForSecure`, `checkQrCodeVerified`, PIN or certificate, then
-`qrCodeLoginV2ForSecure`). One-to-one sends that LINE rejects with
+`qrCodeLoginV2ForSecure`). Sends that LINE rejects with
 TalkException `E2EE_RETRY_ENCRYPT` (code 82) are sealed with letter sealing
-version 2. Text sealed to a key this client holds opens in the thread.
-Messages sealed to another device's key stay labeled "Letter-sealed message."
+version 2. One-to-one text uses the peer's public key. Photos, videos, audio,
+and files use that key, or the group shared key in a group or a room. Text and
+files sealed to a key this client holds open in the thread. Messages sealed to
+another device's key stay labeled "Letter-sealed message."
 
 The app version string defaults to the LINE desktop build installed on this
 machine, `26.6.0.4004`.
@@ -99,6 +112,7 @@ To run a development build or the `.deb`:
 
 - WebKitGTK 4.1 and GTK 3. On Debian or Ubuntu that runtime package is `libwebkit2gtk-4.1-0`. The `.deb` installs it through apt.
 - `libayatana-appindicator3-1` or `libappindicator3-1` for the tray icon.
+- `ffmpeg` on `PATH` to send a voice message. Voice typing uses `whisper-cli` from `src-tauri/speech` or from `PATH`. The first transcription downloads the tiny Whisper model when that file is not already there.
 
 The AppImage carries WebKitGTK 4.1, GTK 3, their modules and schemas, the WebKit helper processes, and the tray library. It still uses the host C library, libstdc++, the GPU libraries (`libGL`, `libEGL`, `libdrm`), X11 or Wayland, and fontconfig. AppImage leaves those out: a bundled GPU driver only works on the build machine, and the format cannot carry glibc. Mounting the image needs `libfuse2`. `APPIMAGE_EXTRACT_AND_RUN=1` skips FUSE and unpacks it instead. The image runs where glibc and libstdc++ are at least as new as on the machine that built it.
 

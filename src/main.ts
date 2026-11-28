@@ -4251,6 +4251,7 @@ const AGENT_CALL_KEYS: Record<string, MessageKey> = {
 let agentTurns: AgentTurn[] = [];
 let agentBusy = false;
 let agentConfig: AgentConfig = { ...EMPTY_AGENT };
+let agentSettingsFromAgent = false;
 
 function loadAgentLog(): void {
   agentTurns = [];
@@ -4351,6 +4352,18 @@ function paintAgent(): void {
   syncAgentSend();
 }
 
+function dismissAgentSettings(): void {
+  sheetAgent.hidden = true;
+  agentSettingsNote.hidden = true;
+  if (agentSettingsFromAgent) {
+    agentSettingsFromAgent = false;
+    sheet.hidden = true;
+    return;
+  }
+  sheetSettings.hidden = false;
+  sheetTitle.textContent = t("settings");
+}
+
 async function openAgent(): Promise<void> {
   try {
     agentConfig = await invoke<AgentConfig>("get_agent_settings");
@@ -4358,6 +4371,11 @@ async function openAgent(): Promise<void> {
     agentConfig = { ...EMPTY_AGENT };
   }
   setRail("agent");
+  if (!agentConfig.endpoint.trim()) {
+    agentSettingsFromAgent = true;
+    await showAgentSettings();
+    agentEndpoint.focus();
+  }
 }
 
 async function askAgent(): Promise<void> {
@@ -6561,14 +6579,12 @@ languageCancel.addEventListener("click", () => {
 });
 
 agentOpen.addEventListener("click", () => {
+  agentSettingsFromAgent = false;
   void showAgentSettings();
 });
 
 agentCancel.addEventListener("click", () => {
-  sheetAgent.hidden = true;
-  sheetSettings.hidden = false;
-  agentSettingsNote.hidden = true;
-  sheetTitle.textContent = t("settings");
+  dismissAgentSettings();
 });
 
 agentSave.addEventListener("click", () => {
@@ -6588,9 +6604,7 @@ agentSave.addEventListener("click", () => {
   void invoke("set_agent_settings", { settings })
     .then(() => {
       agentConfig = { ...settings, apiKey: settings.apiKey.trim() };
-      sheetAgent.hidden = true;
-      sheetSettings.hidden = false;
-      sheetTitle.textContent = t("settings");
+      dismissAgentSettings();
       paintAgentCurrent();
       if (railMode === "agent") {
         paintAgent();
@@ -6824,6 +6838,7 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key === "Escape" && !sheet.hidden && lightbox.hidden) {
+    agentSettingsFromAgent = false;
     sheet.hidden = true;
     return;
   }
