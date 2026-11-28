@@ -54,6 +54,7 @@ type HistoryMessage = {
   replyPicture?: string;
   replyThumb?: string;
   replyMediaId?: string;
+  duration?: number;
 };
 
 type MediaSlot = { id: string; seq: number; animated?: boolean };
@@ -80,6 +81,7 @@ type SendResult = {
   fileName?: string;
   gid?: string;
   seq?: number;
+  duration?: number;
 };
 
 type ReadMark = { end: string };
@@ -117,6 +119,14 @@ const railCount = document.querySelector<HTMLElement>("#rail-count")!;
 const composerInput = document.querySelector<HTMLTextAreaElement>("#composer-input")!;
 const attachFile = document.querySelector<HTMLButtonElement>("#attach-file")!;
 const stickerOpen = document.querySelector<HTMLButtonElement>("#sticker-open")!;
+const dictateButton = document.querySelector<HTMLButtonElement>("#dictate-message")!;
+const voiceButton = document.querySelector<HTMLButtonElement>("#voice-message")!;
+const voiceHold = document.querySelector<HTMLElement>("#voice-hold")!;
+const voiceHoldTime = document.querySelector<HTMLElement>("#voice-hold-time")!;
+const voiceHoldWaves = document.querySelector<HTMLElement>("#voice-hold-waves")!;
+const voiceHoldHint = document.querySelector<HTMLElement>("#voice-hold-hint")!;
+const dictateMeter = document.querySelector<HTMLElement>("#dictate-meter")!;
+const dictateFill = document.querySelector<HTMLElement>("#dictate-meter-fill")!;
 const stickerPanel = document.querySelector<HTMLElement>("#sticker-panel")!;
 const fileInput = document.querySelector<HTMLInputElement>("#file-input")!;
 const sendButton = document.querySelector<HTMLButtonElement>("#send-message")!;
@@ -128,6 +138,13 @@ const railMore = document.querySelector<HTMLButtonElement>("#rail-more")!;
 const railPeople = document.querySelector<HTMLButtonElement>("#rail-people")!;
 const railChats = document.querySelector<HTMLButtonElement>("#rail-chats")!;
 const railFriends = document.querySelector<HTMLButtonElement>("#rail-friends")!;
+const railAgent = document.querySelector<HTMLButtonElement>("#rail-agent")!;
+const agentPane = document.querySelector<HTMLElement>("#agent")!;
+const agentLog = document.querySelector<HTMLElement>("#agent-log")!;
+const agentForm = document.querySelector<HTMLFormElement>("#agent-form")!;
+const agentInput = document.querySelector<HTMLTextAreaElement>("#agent-input")!;
+const agentSend = document.querySelector<HTMLButtonElement>("#agent-send")!;
+const agentClear = document.querySelector<HTMLButtonElement>("#agent-clear")!;
 const stage = document.querySelector<HTMLElement>("#stage")!;
 const peoplePane = document.querySelector<HTMLElement>("#people-pane")!;
 const peopleQuery = document.querySelector<HTMLInputElement>("#people-query")!;
@@ -165,9 +182,17 @@ let focusOnMessage = false;
 const fontFamily = document.querySelector<HTMLSelectElement>("#font-family")!;
 const textSize = document.querySelector<HTMLInputElement>("#text-size")!;
 const textSizeLabel = document.querySelector<HTMLElement>("#text-size-label")!;
+const notificationTones = document.querySelector<HTMLElement>("#notification-tones")!;
+const notificationVolume = document.querySelector<HTMLInputElement>("#notification-volume")!;
+const notificationVolumeLabel = document.querySelector<HTMLElement>("#notification-volume-label")!;
 const TEXT_SIZE_KEYS = ["textSmall", "textDefault", "textLarge", "textLarger", "textLargest"] as const satisfies readonly MessageKey[];
 const devicesOutput = document.querySelector<HTMLElement>("#devices-output")!;
 const devicesInput = document.querySelector<HTMLElement>("#devices-input")!;
+const micTestButton = document.querySelector<HTMLButtonElement>("#mic-test")!;
+const micTestMeter = document.querySelector<HTMLElement>("#mic-test-meter")!;
+const micTestFill = document.querySelector<HTMLElement>("#mic-test-fill")!;
+const micTestResult = document.querySelector<HTMLParagraphElement>("#mic-test-result")!;
+const micTestPlayer = document.querySelector<HTMLAudioElement>("#mic-test-player")!;
 const devicesCamera = document.querySelector<HTMLElement>("#devices-camera")!;
 const devicesNote = document.querySelector<HTMLElement>("#devices-note")!;
 const lightbox = document.querySelector<HTMLElement>("#lightbox")!;
@@ -190,6 +215,21 @@ const languageList = document.querySelector<HTMLUListElement>("#language-list")!
 const languageOpen = document.querySelector<HTMLButtonElement>("#language-open")!;
 const languageSave = document.querySelector<HTMLButtonElement>("#language-save")!;
 const languageCancel = document.querySelector<HTMLButtonElement>("#language-cancel")!;
+const sheetAgent = document.querySelector<HTMLElement>("#sheet-agent")!;
+const agentOpen = document.querySelector<HTMLButtonElement>("#agent-open")!;
+const agentCurrent = document.querySelector<HTMLElement>("#agent-current")!;
+const agentEndpoint = document.querySelector<HTMLInputElement>("#agent-endpoint")!;
+const agentModel = document.querySelector<HTMLInputElement>("#agent-model")!;
+const agentApiKey = document.querySelector<HTMLInputElement>("#agent-api-key")!;
+const agentProtocol = document.querySelector<HTMLSelectElement>("#agent-protocol")!;
+const agentTemperature = document.querySelector<HTMLInputElement>("#agent-temperature")!;
+const agentTopP = document.querySelector<HTMLInputElement>("#agent-top-p")!;
+const agentMaxTokens = document.querySelector<HTMLInputElement>("#agent-max-tokens")!;
+const agentThinking = document.querySelector<HTMLSelectElement>("#agent-thinking")!;
+const agentExtra = document.querySelector<HTMLTextAreaElement>("#agent-extra")!;
+const agentSettingsNote = document.querySelector<HTMLElement>("#agent-settings-note")!;
+const agentSave = document.querySelector<HTMLButtonElement>("#agent-save")!;
+const agentCancel = document.querySelector<HTMLButtonElement>("#agent-cancel")!;
 
 let statusKey: MessageKey | "" = "";
 let shownUrl = "";
@@ -213,7 +253,7 @@ let userMoved = false;
 let placeToken = 0;
 let layoutWatch: { token: number; kind: "tail" | "anchor"; stop: () => void } | null = null;
 let signedIn = false;
-type RailMode = "chats" | "friends" | "add";
+type RailMode = "chats" | "friends" | "add" | "agent";
 type DirectoryPerson = { id: string; name: string; picture: string; favorite?: boolean; friend?: boolean; status?: string };
 type Recommendation = { id: string; name: string; picture: string; reason?: string };
 let railMode: RailMode = "chats";
@@ -253,6 +293,9 @@ type Outgoing = {
   file?: { name: string; mime: string; data: string; groupId?: string; groupSeq?: number; groupCount?: number };
   stickerSend?: { packageId: string; stickerId: string; animated: boolean };
   silent?: boolean;
+  duration?: number;
+  peaks?: number[];
+  voice?: boolean;
 };
 type AttachmentDraft = {
   chatId: string;
@@ -403,6 +446,13 @@ function visibleRows(): ChatRow[] {
 }
 
 const SOUND_MUTE_KEY = "lineapp.soundMuted";
+const SOUND_VOLUME_KEY = "lineapp.notificationVolume";
+const SOUND_TONE_KEY = "lineapp.notificationTone";
+const NOTIFICATION_PEAK = 1;
+const DEFAULT_NOTIFICATION_VOLUME = 75;
+const TONE_IDS = ["doorbell", "sparkle", "piano", "harp", "kalimba", "whistle", "ripple", "arcade", "gong", "bell", "marimba", "pop", "knock", "beep"] as const;
+type ToneId = (typeof TONE_IDS)[number];
+const DEFAULT_TONE: ToneId = "doorbell";
 
 function readSoundMutes(): Record<string, boolean> {
   try {
@@ -438,6 +488,55 @@ function setSoundMuted(id: string, muted: boolean): void {
   const saved = readSoundMutes();
   saved[id] = muted;
   localStorage.setItem(SOUND_MUTE_KEY, JSON.stringify(saved));
+}
+
+function readNotificationVolume(): number {
+  const raw = localStorage.getItem(SOUND_VOLUME_KEY);
+  if (raw === null) {
+    return DEFAULT_NOTIFICATION_VOLUME;
+  }
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    return DEFAULT_NOTIFICATION_VOLUME;
+  }
+  return Math.min(100, Math.max(0, Math.round(value)));
+}
+
+function setNotificationVolume(volume: number): void {
+  localStorage.setItem(SOUND_VOLUME_KEY, String(volume));
+}
+
+function notificationGain(volume: number): number {
+  if (volume <= 0) {
+    return 0;
+  }
+  return (volume / 100) ** 2 * NOTIFICATION_PEAK;
+}
+
+function paintNotificationVolume(): void {
+  const volume = readNotificationVolume();
+  const label = `${volume}%`;
+  notificationVolume.value = String(volume);
+  notificationVolumeLabel.textContent = label;
+  notificationVolume.setAttribute("aria-valuetext", label);
+}
+
+function readNotificationTone(): ToneId {
+  const raw = localStorage.getItem(SOUND_TONE_KEY);
+  return (TONE_IDS as readonly string[]).includes(raw ?? "") ? (raw as ToneId) : DEFAULT_TONE;
+}
+
+function setNotificationTone(tone: ToneId): void {
+  localStorage.setItem(SOUND_TONE_KEY, tone);
+}
+
+function paintNotificationTone(): void {
+  const tone = readNotificationTone();
+  notificationTones.querySelectorAll<HTMLButtonElement>("button[data-tone]").forEach((button) => {
+    const selected = button.dataset.tone === tone;
+    button.classList.toggle("is-selected", selected);
+    button.setAttribute("aria-selected", selected ? "true" : "false");
+  });
 }
 
 function notifySound(id: string, serverMuted: boolean): boolean {
@@ -563,37 +662,251 @@ function patchChat(detail: { id?: string; name?: string; members?: number | null
 }
 
 let audioCtx: AudioContext | undefined;
+let notificationBus: WaveShaperNode | undefined;
 
-function playChime(): void {
+function notificationBusOf(ctx: AudioContext): WaveShaperNode {
+  if (notificationBus && notificationBus.context === ctx) {
+    return notificationBus;
+  }
+  const shape = ctx.createWaveShaper();
+  const samples = 2048;
+  const curve = new Float32Array(samples);
+  const drive = 3.2;
+  const limit = Math.tanh(drive);
+  for (let i = 0; i < samples; i += 1) {
+    const x = (i / (samples - 1)) * 2 - 1;
+    curve[i] = Math.tanh(x * drive) / limit;
+  }
+  shape.curve = curve;
+  shape.oversample = "2x";
+  shape.connect(ctx.destination);
+  notificationBus = shape;
+  return shape;
+}
+
+async function playChime(): Promise<void> {
   const Ctx = window.AudioContext;
   if (!Ctx) {
+    return;
+  }
+  const peak = notificationGain(readNotificationVolume());
+  if (peak <= 0) {
     return;
   }
   if (!audioCtx) {
     audioCtx = new Ctx();
   }
   if (audioCtx.state === "suspended") {
-    void audioCtx.resume();
+    void audioCtx.resume().catch(() => undefined);
   }
-  const ctx = audioCtx;
-  const now = ctx.currentTime;
+  const now = audioCtx.currentTime + 0.02;
+  const tone = readNotificationTone();
+  if (tone === "sparkle") {
+    playSparkle(audioCtx, now, peak);
+  } else if (tone === "piano") {
+    playPiano(audioCtx, now, peak);
+  } else if (tone === "harp") {
+    playHarp(audioCtx, now, peak);
+  } else if (tone === "kalimba") {
+    playKalimba(audioCtx, now, peak);
+  } else if (tone === "whistle") {
+    playWhistle(audioCtx, now, peak);
+  } else if (tone === "ripple") {
+    playRipple(audioCtx, now, peak);
+  } else if (tone === "arcade") {
+    playArcade(audioCtx, now, peak);
+  } else if (tone === "gong") {
+    playGong(audioCtx, now, peak);
+  } else if (tone === "bell") {
+    playBell(audioCtx, now, peak);
+  } else if (tone === "beep") {
+    playBeep(audioCtx, now, peak);
+  } else if (tone === "pop") {
+    playPop(audioCtx, now, peak);
+  } else if (tone === "knock") {
+    playKnock(audioCtx, now, peak);
+  } else if (tone === "marimba") {
+    playMarimba(audioCtx, now, peak);
+  } else {
+    playDoorbell(audioCtx, now, peak);
+  }
+}
+
+function note(
+  ctx: AudioContext,
+  start: number,
+  dur: number,
+  peak: number,
+  freq: number,
+  type: OscillatorType,
+  endFreq?: number,
+  attack = 0.012,
+): void {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  const level = Math.max(peak, 0.0002);
+  const attackAt = start + attack;
+  const held = attackAt + Math.min(0.07, dur * 0.55);
+  const ended = Math.max(start + dur, held + 0.05);
+  osc.type = type;
+  osc.frequency.setValueAtTime(Math.max(freq, 1), start);
+  if (endFreq && endFreq > 0) {
+    osc.frequency.exponentialRampToValueAtTime(endFreq, start + dur);
+  }
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(level, attackAt);
+  gain.gain.setValueAtTime(level, held);
+  gain.gain.exponentialRampToValueAtTime(0.0001, ended);
+  osc.connect(gain);
+  gain.connect(notificationBusOf(ctx));
+  osc.start(start);
+  osc.stop(ended + 0.02);
+}
+
+function noiseTap(ctx: AudioContext, start: number, dur: number, peak: number, freq: number, q: number): void {
+  const length = Math.max(1, Math.floor(ctx.sampleRate * dur));
+  const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < length; i += 1) {
+    data[i] = Math.random() * 2 - 1;
+  }
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+  const filter = ctx.createBiquadFilter();
+  filter.type = "bandpass";
+  filter.frequency.value = freq;
+  filter.Q.value = q;
+  const gain = ctx.createGain();
+  const level = Math.max(peak, 0.0002);
+  const attackAt = start + 0.004;
+  const held = attackAt + Math.min(0.03, dur * 0.45);
+  const ended = Math.max(attackAt + dur, held + 0.03);
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(level, attackAt);
+  gain.gain.setValueAtTime(level, held);
+  gain.gain.exponentialRampToValueAtTime(0.0001, ended);
+  src.connect(filter);
+  filter.connect(gain);
+  gain.connect(notificationBusOf(ctx));
+  src.start(start);
+  src.stop(ended + 0.02);
+}
+
+function playBeep(ctx: AudioContext, now: number, peak: number): void {
   [784, 1046].forEach((freq, index) => {
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    const start = now + index * 0.09;
-    osc.type = "sine";
-    osc.frequency.value = freq;
-    gain.gain.setValueAtTime(0.0001, start);
-    gain.gain.exponentialRampToValueAtTime(0.045, start + 0.015);
-    gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.18);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start(start);
-    osc.stop(start + 0.2);
+    note(ctx, now + index * 0.09, 0.16, peak, freq, "sine", undefined, 0.015);
   });
 }
 
-window.addEventListener("focus", () => catchUpRead());
+function playBell(ctx: AudioContext, now: number, peak: number): void {
+  const partials: [number, number, number][] = [
+    [880, 0.55, 0.62],
+    [1174.7, 0.22, 0.48],
+    [1760, 0.12, 0.36],
+    [2349.3, 0.07, 0.24],
+  ];
+  for (const [freq, share, dur] of partials) {
+    note(ctx, now, dur, peak * share, freq, "sine", undefined, 0.006);
+  }
+}
+
+function playPop(ctx: AudioContext, now: number, peak: number): void {
+  note(ctx, now, 0.11, peak * 0.85, 720, "sine", 180, 0.004);
+  noiseTap(ctx, now, 0.028, peak * 0.28, 1600, 0.7);
+}
+
+function playKnock(ctx: AudioContext, now: number, peak: number): void {
+  for (const offset of [0, 0.11]) {
+    noiseTap(ctx, now + offset, 0.045, peak * 0.62, 240, 1.6);
+    note(ctx, now + offset, 0.06, peak * 0.28, 180, "sine", 90, 0.003);
+  }
+}
+
+function playMarimba(ctx: AudioContext, now: number, peak: number): void {
+  [523.25, 784].forEach((freq, index) => {
+    note(ctx, now + index * 0.09, 0.22, peak * 0.75, freq * 1.03, "triangle", freq, 0.005);
+  });
+}
+
+function playDoorbell(ctx: AudioContext, now: number, peak: number): void {
+  const ding: [number, number, number][] = [
+    [659.25, 0.62, 0.32],
+    [1318.5, 0.2, 0.22],
+    [1975.5, 0.08, 0.16],
+  ];
+  const dong: [number, number, number][] = [
+    [523.25, 0.66, 0.48],
+    [1046.5, 0.18, 0.32],
+    [1568, 0.07, 0.2],
+  ];
+  for (const [freq, share, dur] of ding) {
+    note(ctx, now, dur, peak * share, freq, "sine", undefined, 0.005);
+  }
+  for (const [freq, share, dur] of dong) {
+    note(ctx, now + 0.2, dur, peak * share, freq, "sine", undefined, 0.005);
+  }
+}
+
+function playSparkle(ctx: AudioContext, now: number, peak: number): void {
+  [1318.5, 1568, 1975.5, 2637].forEach((freq, index) => {
+    const start = now + index * 0.05;
+    note(ctx, start, 0.2, peak * 0.42, freq, "sine", undefined, 0.003);
+    note(ctx, start, 0.14, peak * 0.14, freq * 1.007, "sine", undefined, 0.003);
+  });
+}
+
+function playPiano(ctx: AudioContext, now: number, peak: number): void {
+  noiseTap(ctx, now, 0.02, peak * 0.16, 2200, 0.6);
+  for (const freq of [261.63, 329.63, 392, 523.25]) {
+    note(ctx, now, 0.48, peak * 0.24, freq, "triangle", freq * 0.992, 0.004);
+    note(ctx, now, 0.1, peak * 0.08, freq * 2, "sine", undefined, 0.002);
+  }
+}
+
+function playHarp(ctx: AudioContext, now: number, peak: number): void {
+  [261.63, 329.63, 392, 493.88, 523.25, 659.25].forEach((freq, index) => {
+    const start = now + index * 0.038;
+    note(ctx, start, 0.4, peak * 0.3, freq, "triangle", freq * 0.996, 0.004);
+    note(ctx, start, 0.07, peak * 0.06, freq * 2, "sine", undefined, 0.002);
+  });
+}
+
+function playKalimba(ctx: AudioContext, now: number, peak: number): void {
+  [392, 523.25, 659.25, 784].forEach((freq, index) => {
+    const start = now + index * 0.075;
+    note(ctx, start, 0.3, peak * 0.5, freq, "sine", undefined, 0.003);
+    note(ctx, start, 0.16, peak * 0.16, freq * 3.2, "sine", undefined, 0.002);
+  });
+}
+
+function playWhistle(ctx: AudioContext, now: number, peak: number): void {
+  note(ctx, now, 0.16, peak * 0.62, 740, "sine", 1174, 0.018);
+  note(ctx, now + 0.15, 0.24, peak * 0.58, 988, "sine", 1568, 0.02);
+}
+
+function playRipple(ctx: AudioContext, now: number, peak: number): void {
+  [280, 390, 520, 680].forEach((freq, index) => {
+    note(ctx, now + index * 0.065, 0.1, peak * 0.62, freq, "sine", freq * 0.5, 0.003);
+  });
+}
+
+function playArcade(ctx: AudioContext, now: number, peak: number): void {
+  note(ctx, now, 0.07, peak * 0.16, 523.25, "square");
+  note(ctx, now + 0.08, 0.07, peak * 0.16, 659.25, "square");
+  note(ctx, now + 0.16, 0.14, peak * 0.14, 1046.5, "square");
+}
+
+function playGong(ctx: AudioContext, now: number, peak: number): void {
+  note(ctx, now, 0.72, peak * 0.38, 185, "sine", undefined, 0.012);
+  note(ctx, now, 0.72, peak * 0.26, 189.2, "sine", undefined, 0.012);
+  note(ctx, now, 0.46, peak * 0.14, 370, "triangle", undefined, 0.01);
+  noiseTap(ctx, now, 0.08, peak * 0.14, 320, 0.5);
+}
+
+window.addEventListener("focus", () => {
+  catchUpRead();
+  releaseAttention();
+});
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     catchUpRead();
@@ -747,6 +1060,9 @@ function showThread(chat: ChatRow | undefined): void {
     closeGallery();
     closeReactionPicker();
     closeStickerPanel();
+    abandonDictation();
+    void abandonVoice();
+    stopVoicePlayback();
     composerInput.disabled = true;
     attachFile.disabled = true;
     stickerOpen.disabled = true;
@@ -763,7 +1079,11 @@ function showThread(chat: ChatRow | undefined): void {
   composerInput.disabled = false;
   attachFile.disabled = false;
   stickerOpen.disabled = false;
+  paintDictate();
   if (chat.id !== openId) {
+    abandonDictation();
+    void abandonVoice();
+    stopVoicePlayback();
     armedStickers.clear();
     stickerWatch?.disconnect();
     stickerWatch = null;
@@ -806,7 +1126,7 @@ function showThread(chat: ChatRow | undefined): void {
 
 function historyStamp(payload: HistoryPayload): string {
   return payload.messages
-    .map((message) => [message.id || "", message.sender || "", message.text, message.status || "", message.kind || "", message.mediaId || "", message.gid || "", String(message.seq || 0), message.sticker || "", message.replyId || "", String(message.readers || 0), String(message.time)].join("\u001f"))
+    .map((message) => [message.id || "", message.sender || "", message.text, message.status || "", message.kind || "", message.mediaId || "", message.gid || "", String(message.seq || 0), message.sticker || "", message.replyId || "", String(message.readers || 0), String(message.time), String(message.duration || 0)].join("\u001f"))
     .join("\u001e");
 }
 
@@ -1424,6 +1744,282 @@ function fileCard(label: string, onClick: (button: HTMLButtonElement) => void): 
   return button;
 }
 
+const VOICE_BARS = 28;
+let activeVoice: HTMLAudioElement | null = null;
+
+function voiceClock(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function voiceWidth(ms: number): number {
+  const seconds = Math.max(1, Math.min(60, (ms || 1000) / 1000));
+  return Math.round(128 + (seconds - 1) * 2.4);
+}
+
+function placeholderPeaks(seed: string): number[] {
+  let state = 2166136261;
+  const text = seed || "voice";
+  for (let index = 0; index < text.length; index += 1) {
+    state ^= text.charCodeAt(index);
+    state = Math.imul(state, 16777619);
+  }
+  const peaks: number[] = [];
+  for (let index = 0; index < VOICE_BARS; index += 1) {
+    state = Math.imul(state, 1664525) + 1013904223;
+    peaks.push(20 + (state >>> 0) % 75);
+  }
+  return peaks;
+}
+
+function voiceGlyph(playing: boolean): SVGSVGElement {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", playing ? "M7 5h3.2v14H7zm6.8 0H17v14h-3.2z" : "M8.2 5.2v13.6L19 12z");
+  svg.append(path);
+  return svg;
+}
+
+function paintVoiceBars(wave: HTMLElement, peaks: number[], progress: number): void {
+  const bars = wave.querySelectorAll<HTMLElement>("i");
+  bars.forEach((bar, index) => {
+    const peak = peaks[index] ?? 30;
+    bar.style.height = `${Math.round(5 + (peak / 100) * 16)}px`;
+    bar.classList.toggle("on", progress > 0 && index / Math.max(bars.length, 1) < progress);
+  });
+}
+
+function voiceMime(bytes: Uint8Array, header: string): string {
+  const mime = header.split(";")[0]?.trim().toLowerCase() || "";
+  if (mime.startsWith("audio/")) {
+    return mime;
+  }
+  if (bytes.length > 11 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) {
+    return "audio/wav";
+  }
+  if (bytes.length > 3 && bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) {
+    return "audio/mpeg";
+  }
+  if (bytes.length > 1 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) {
+    return "audio/mpeg";
+  }
+  return "audio/mp4";
+}
+
+async function decodePeaks(url: string): Promise<number[]> {
+  const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!Ctx) {
+    return [];
+  }
+  try {
+    const response = await fetch(url);
+    const encoded = await response.arrayBuffer();
+    const context = new Ctx();
+    const audio = await context.decodeAudioData(encoded.slice(0));
+    await context.close();
+    const channel = audio.getChannelData(0);
+    const size = Math.max(1, Math.floor(channel.length / VOICE_BARS));
+    const raw: number[] = [];
+    let loudest = 0.001;
+    for (let bar = 0; bar < VOICE_BARS; bar += 1) {
+      const start = bar * size;
+      const end = bar === VOICE_BARS - 1 ? channel.length : Math.min(channel.length, start + size);
+      let peak = 0;
+      for (let index = start; index < end; index += 16) {
+        peak = Math.max(peak, Math.abs(channel[index] || 0));
+      }
+      loudest = Math.max(loudest, peak);
+      raw.push(peak);
+    }
+    return raw.map((peak) => Math.round(Math.max(14, Math.min(100, (peak / loudest) * 100))));
+  } catch {
+    return [];
+  }
+}
+
+function stopVoicePlayback(): void {
+  activeVoice?.pause();
+}
+
+function voiceCard(id: string, duration: number, src = "", label = "", peaks: number[] = []): HTMLElement {
+  const card = document.createElement("div");
+  card.className = "voice-card";
+  card.style.width = `${voiceWidth(duration)}px`;
+  card.dataset.mediaId = id;
+  card.dataset.duration = String(Math.max(0, duration));
+  const caption = label.trim();
+  if (caption && !/^(audio|voice message|voice\.m4a|letter-sealed audio)$/i.test(caption)) {
+    card.dataset.label = caption;
+  }
+  const play = document.createElement("button");
+  play.type = "button";
+  play.className = "voice-play";
+  play.setAttribute("aria-label", t("playVoice"));
+  play.append(voiceGlyph(false));
+  const wave = document.createElement("button");
+  wave.type = "button";
+  wave.className = "voice-wave";
+  wave.tabIndex = -1;
+  wave.setAttribute("aria-hidden", "true");
+  for (let index = 0; index < VOICE_BARS; index += 1) {
+    wave.append(document.createElement("i"));
+  }
+  let bars = peaks.length === VOICE_BARS ? peaks.slice() : placeholderPeaks(id || caption || "voice");
+  paintVoiceBars(wave, bars, 0);
+  const length = document.createElement("button");
+  length.type = "button";
+  length.className = "voice-length";
+  length.textContent = voiceClock(duration);
+  const audio = document.createElement("audio");
+  audio.preload = "none";
+  if (src) {
+    audio.src = src;
+  }
+  card.append(play, wave, length, audio);
+  let rate = 1;
+  const known = (): number => {
+    if (Number.isFinite(audio.duration) && audio.duration > 0) {
+      return Math.round(audio.duration * 1000);
+    }
+    return Number(card.dataset.duration) || 0;
+  };
+  const paintTime = (): void => {
+    const total = known();
+    if (total > 0) {
+      card.dataset.duration = String(total);
+      card.style.width = `${voiceWidth(total)}px`;
+    }
+    const left = audio.paused || audio.ended ? total : Math.max(0, total - audio.currentTime * 1000);
+    length.textContent = rate === 1 ? voiceClock(left || total) : `${rate}×`;
+  };
+  const paintPlay = (): void => {
+    const playing = !audio.paused && !audio.ended;
+    play.setAttribute("aria-label", t(playing ? "pauseVoice" : "playVoice"));
+    play.replaceChildren(voiceGlyph(playing));
+    card.classList.toggle("playing", playing);
+  };
+  const tick = (): void => {
+    if (!card.isConnected) {
+      audio.pause();
+      return;
+    }
+    const seconds = known() / 1000;
+    paintVoiceBars(wave, bars, seconds > 0 ? audio.currentTime / seconds : 0);
+    paintTime();
+    if (!audio.paused && !audio.ended) {
+      requestAnimationFrame(tick);
+    }
+  };
+  const applyPeaks = (next: number[]): void => {
+    if (next.length !== VOICE_BARS || !card.isConnected) {
+      return;
+    }
+    bars = next;
+    const seconds = known() / 1000;
+    paintVoiceBars(wave, bars, seconds > 0 && !audio.paused ? audio.currentTime / seconds : 0);
+  };
+  audio.addEventListener("loadedmetadata", paintTime);
+  audio.addEventListener("pause", paintPlay);
+  audio.addEventListener("play", () => {
+    paintPlay();
+    requestAnimationFrame(tick);
+  });
+  audio.addEventListener("ended", () => {
+    audio.currentTime = 0;
+    paintPlay();
+    paintVoiceBars(wave, bars, 0);
+    paintTime();
+  });
+  play.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void toggleVoice(card, applyPeaks);
+  });
+  wave.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const seconds = known() / 1000;
+    if (!seconds || !audio.src) {
+      void toggleVoice(card, applyPeaks);
+      return;
+    }
+    const rect = wave.getBoundingClientRect();
+    const ratio = rect.width > 0 ? Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)) : 0;
+    const rtl = document.documentElement.dir === "rtl";
+    audio.currentTime = seconds * (rtl ? 1 - ratio : ratio);
+    if (audio.paused) {
+      void toggleVoice(card, applyPeaks);
+      return;
+    }
+    paintVoiceBars(wave, bars, audio.currentTime / seconds);
+    paintTime();
+  });
+  length.addEventListener("click", (event) => {
+    event.stopPropagation();
+    rate = rate === 1 ? 1.5 : rate === 1.5 ? 2 : 1;
+    audio.playbackRate = rate;
+    paintTime();
+  });
+  if (src && peaks.length !== VOICE_BARS) {
+    void decodePeaks(src).then(applyPeaks);
+  }
+  return card;
+}
+
+async function toggleVoice(card: HTMLElement, applyPeaks: (peaks: number[]) => void): Promise<void> {
+  const audio = card.querySelector("audio");
+  const play = card.querySelector<HTMLButtonElement>(".voice-play");
+  if (!audio) {
+    return;
+  }
+  if (!audio.paused && !audio.ended) {
+    audio.pause();
+    return;
+  }
+  if (!audio.src) {
+    const id = card.dataset.mediaId || "";
+    if (!openId || !messageIdNumber(id)) {
+      return;
+    }
+    if (play) {
+      play.disabled = true;
+    }
+    try {
+      const files = await invoke<MediaFile[]>("load_media", { id: openId, messageIds: [id], preview: false, animatedIds: [] });
+      const file = files.find((item) => item.id === id) || files[0];
+      if (!file?.data) {
+        throw new Error(file?.error || t("couldNotDownload"));
+      }
+      const bytes = new Uint8Array(decodeBase64(file.data));
+      const url = URL.createObjectURL(new Blob([bytes], { type: voiceMime(bytes, file.mime || "") }));
+      audio.src = url;
+      void decodePeaks(url).then(applyPeaks);
+    } catch (error) {
+      sendError.hidden = false;
+      sendError.textContent = error instanceof Error ? error.message : String(error);
+      if (play) {
+        play.disabled = false;
+      }
+      return;
+    }
+    if (play) {
+      play.disabled = false;
+    }
+  }
+  if (activeVoice && activeVoice !== audio) {
+    activeVoice.pause();
+  }
+  activeVoice = audio;
+  try {
+    await audio.play();
+  } catch (error) {
+    sendError.hidden = false;
+    sendError.textContent = error instanceof Error ? error.message : String(error);
+  }
+}
+
 function imageThumb(url: string, onClick: () => void): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
@@ -1968,6 +2564,9 @@ function quoteFromHistory(message: HistoryMessage): string {
   if (message.kind === "unsent" || message.kind === "chat update") {
     return t("message");
   }
+  if (message.kind === "audio") {
+    return voiceQuote(message.text);
+  }
   const text = message.text.trim();
   if (text && !mediaLabel(text)) {
     return text;
@@ -1982,6 +2581,14 @@ function quoteFromHistory(message: HistoryMessage): string {
     return t("photo");
   }
   return text || t("message");
+}
+
+function voiceQuote(text: string): string {
+  const name = text.trim();
+  if (name && !/^(audio|voice message|voice\.m4a)$/i.test(name)) {
+    return name;
+  }
+  return t("voiceMessage");
 }
 
 function hydrateReplies(messages: HistoryMessage[]): HistoryMessage[] {
@@ -2165,6 +2772,10 @@ function quoteText(row: HTMLElement): string {
   const file = row.querySelector(".file-name")?.textContent?.trim() || "";
   if (file) {
     return file;
+  }
+  const voice = row.querySelector<HTMLElement>(".voice-card");
+  if (voice) {
+    return voiceQuote(voice.dataset.label || "");
   }
   return text || t("message");
 }
@@ -2388,6 +2999,7 @@ function showReport(row: HTMLElement): void {
   sheetSettings.hidden = true;
   sheetAbout.hidden = true;
   sheetLanguage.hidden = true;
+  sheetAgent.hidden = true;
   sheetList.hidden = false;
   sheetList.replaceChildren();
   for (const reason of REPORT_REASONS) {
@@ -2418,6 +3030,7 @@ function showShare(text: string): void {
   sheetSettings.hidden = true;
   sheetAbout.hidden = true;
   sheetLanguage.hidden = true;
+  sheetAgent.hidden = true;
   sheetList.hidden = false;
   sheetList.replaceChildren();
   const choices = rows.filter((row) => row.id && row.name);
@@ -2512,6 +3125,8 @@ function messageBubble(message: BubbleMessage): HTMLElement {
     bubble.append(stickerImage(message.sticker, message.stickerFallback || "", "sticker", () => {
       appendMessageText(bubble, message.text || t("sticker"));
     }, message.id || ""));
+  } else if (message.kind === "audio" && (message.mediaId || message.id)) {
+    bubble.append(voiceCard(message.mediaId || message.id || "", message.duration || 0, "", message.text));
   } else if (message.kind === "file" && message.id) {
     const name = message.text;
     const id = message.id;
@@ -3092,9 +3707,32 @@ function paintUnread(): void {
     return;
   }
   trayBadge = total;
+  if (total === 0) {
+    releaseAttention();
+  }
   void invoke("set_tray_badge", { count: total }).catch(() => {
     trayBadge = -1;
   });
+}
+
+let attentionOn = false;
+
+function requestAttention(): void {
+  if (attentionOn || document.hasFocus() || focusOnMessage) {
+    return;
+  }
+  attentionOn = true;
+  void invoke("attention_for_message").catch(() => {
+    attentionOn = false;
+  });
+}
+
+function releaseAttention(): void {
+  if (!attentionOn) {
+    return;
+  }
+  attentionOn = false;
+  void invoke("clear_attention").catch(() => undefined);
 }
 
 function renderChats(payload: ChatPayload): void {
@@ -3581,12 +4219,211 @@ function paintSearchHit(person: DirectoryPerson): void {
   addSearchResult.append(row);
 }
 
+const AGENT_LOG_KEY = "lineapp.agentLog";
+type AgentTurn = { role: "user" | "assistant" | "error"; text: string; calls?: string[] };
+type AgentConfig = {
+  endpoint: string;
+  model: string;
+  apiKey: string;
+  protocol: string;
+  temperature: string;
+  topP: string;
+  maxTokens: string;
+  thinking: string;
+  extra: string;
+};
+const EMPTY_AGENT: AgentConfig = {
+  endpoint: "",
+  model: "",
+  apiKey: "",
+  protocol: "openai",
+  temperature: "",
+  topP: "",
+  maxTokens: "",
+  thinking: "default",
+  extra: "",
+};
+const AGENT_CALL_KEYS: Record<string, MessageKey> = {
+  search_conversations: "agentSearched",
+  get_messages: "agentRetrieved",
+  list_chats: "agentListed",
+};
+let agentTurns: AgentTurn[] = [];
+let agentBusy = false;
+let agentConfig: AgentConfig = { ...EMPTY_AGENT };
+
+function loadAgentLog(): void {
+  agentTurns = [];
+  try {
+    const parsed = JSON.parse(localStorage.getItem(AGENT_LOG_KEY) || "[]") as unknown;
+    if (!Array.isArray(parsed)) {
+      return;
+    }
+    for (const item of parsed) {
+      if (!item || typeof item !== "object") {
+        continue;
+      }
+      const turn = item as Partial<AgentTurn>;
+      if ((turn.role !== "user" && turn.role !== "assistant" && turn.role !== "error") || typeof turn.text !== "string") {
+        continue;
+      }
+      const calls = Array.isArray(turn.calls) ? turn.calls.filter((call): call is string => typeof call === "string") : undefined;
+      agentTurns.push({ role: turn.role, text: turn.text, calls });
+    }
+    agentTurns = agentTurns.slice(-40);
+  } catch {
+    agentTurns = [];
+  }
+}
+
+function saveAgentLog(): void {
+  localStorage.setItem(AGENT_LOG_KEY, JSON.stringify(agentTurns.slice(-40)));
+}
+
+function clearAgentLog(): void {
+  agentTurns = [];
+  agentBusy = false;
+  localStorage.removeItem(AGENT_LOG_KEY);
+  if (railMode === "agent") {
+    paintAgent();
+  }
+}
+
+loadAgentLog();
+
+function agentEndpointSummary(endpoint: string): string {
+  const trimmed = endpoint.trim();
+  if (!trimmed) {
+    return t("agentNotSet");
+  }
+  try {
+    return new URL(trimmed).host || trimmed;
+  } catch {
+    return trimmed.length > 36 ? `${trimmed.slice(0, 36)}…` : trimmed;
+  }
+}
+
+function paintAgentCurrent(): void {
+  agentCurrent.textContent = agentEndpointSummary(agentConfig.endpoint);
+}
+
+function syncAgentSend(): void {
+  agentSend.disabled = agentBusy || agentInput.value.trim().length === 0;
+}
+
+function paintAgent(): void {
+  agentLog.replaceChildren();
+  if (agentTurns.length === 0 && !agentBusy) {
+    const empty = document.createElement("p");
+    empty.className = "agent-empty";
+    empty.textContent = agentConfig.endpoint.trim() ? t("agentAsk") : t("agentNeedsEndpoint");
+    agentLog.append(empty);
+  }
+  for (const turn of agentTurns) {
+    if (turn.calls && turn.calls.length > 0) {
+      const calls = document.createElement("div");
+      calls.className = "agent-calls";
+      const seen = new Set<string>();
+      for (const name of turn.calls) {
+        if (seen.has(name)) {
+          continue;
+        }
+        seen.add(name);
+        const chip = document.createElement("span");
+        const key = AGENT_CALL_KEYS[name];
+        chip.textContent = key ? t(key) : name;
+        calls.append(chip);
+      }
+      agentLog.append(calls);
+    }
+    const bubble = document.createElement("div");
+    bubble.className = `agent-bubble ${turn.role}`;
+    bubble.textContent = turn.text;
+    agentLog.append(bubble);
+  }
+  if (agentBusy) {
+    const working = document.createElement("p");
+    working.className = "agent-working";
+    working.textContent = t("agentWorking");
+    agentLog.append(working);
+  }
+  agentLog.scrollTop = agentLog.scrollHeight;
+  syncAgentSend();
+}
+
+async function openAgent(): Promise<void> {
+  try {
+    agentConfig = await invoke<AgentConfig>("get_agent_settings");
+  } catch {
+    agentConfig = { ...EMPTY_AGENT };
+  }
+  setRail("agent");
+}
+
+async function askAgent(): Promise<void> {
+  const text = agentInput.value.trim();
+  if (!text || agentBusy) {
+    return;
+  }
+  agentBusy = true;
+  agentInput.value = "";
+  agentTurns.push({ role: "user", text });
+  paintAgent();
+  try {
+    const reply = await invoke<{ text: string; calls: string[] }>("agent_ask", {
+      messages: agentTurns
+        .filter((turn) => turn.role === "user" || turn.role === "assistant")
+        .map((turn) => ({ role: turn.role, content: turn.text })),
+    });
+    agentTurns.push({ role: "assistant", text: reply.text, calls: reply.calls });
+  } catch (error) {
+    agentTurns.push({ role: "error", text: error instanceof Error ? error.message : String(error) });
+  }
+  agentBusy = false;
+  agentTurns = agentTurns.slice(-40);
+  saveAgentLog();
+  paintAgent();
+}
+
+async function showAgentSettings(): Promise<void> {
+  sheetTitle.textContent = t("agent");
+  sheetBody.hidden = true;
+  sheetSettings.hidden = true;
+  sheetList.hidden = true;
+  sheetAbout.hidden = true;
+  sheetLanguage.hidden = true;
+  sheetAgent.hidden = false;
+  agentSettingsNote.hidden = true;
+  sheet.hidden = false;
+  try {
+    agentConfig = await invoke<AgentConfig>("get_agent_settings");
+  } catch (error) {
+    agentSettingsNote.hidden = false;
+    agentSettingsNote.textContent = error instanceof Error ? error.message : String(error);
+  }
+  agentEndpoint.value = agentConfig.endpoint;
+  agentModel.value = agentConfig.model;
+  agentApiKey.value = agentConfig.apiKey;
+  agentProtocol.value = agentConfig.protocol === "anthropic" || agentConfig.protocol === "gemini" ? agentConfig.protocol : "openai";
+  agentTemperature.value = agentConfig.temperature;
+  agentTopP.value = agentConfig.topP;
+  agentMaxTokens.value = agentConfig.maxTokens;
+  agentThinking.value = ["default", "off", "low", "medium", "high"].includes(agentConfig.thinking) ? agentConfig.thinking : "default";
+  agentExtra.value = agentConfig.extra;
+  paintAgentCurrent();
+}
+
 function setRail(mode: RailMode): void {
   railMode = mode;
   railPeople.classList.toggle("on", mode === "friends");
   railChats.classList.toggle("on", mode === "chats");
   railFriends.classList.toggle("on", mode === "add");
+  railAgent.classList.toggle("on", mode === "agent");
   const chatsOn = mode === "chats";
+  const agentOn = mode === "agent";
+  listPane.hidden = agentOn;
+  paneSplit.hidden = agentOn;
+  agentPane.hidden = !agentOn;
   document.querySelector<HTMLElement>("#tabs")!.hidden = !chatsOn;
   document.querySelector<HTMLElement>("#search-wrap")!.hidden = !chatsOn;
   chats.hidden = !chatsOn;
@@ -3597,7 +4434,21 @@ function setRail(mode: RailMode): void {
   }
   peoplePane.hidden = mode !== "friends";
   addPane.hidden = mode !== "add";
+  if (agentOn) {
+    thread.hidden = true;
+    stage.hidden = true;
+    paintAgent();
+    agentInput.focus();
+    return;
+  }
   if (mode === "chats") {
+    if (openId) {
+      thread.hidden = false;
+      stage.hidden = true;
+    } else {
+      thread.hidden = true;
+      stage.hidden = !signedIn;
+    }
     renderList();
     return;
   }
@@ -3680,6 +4531,23 @@ railChats.addEventListener("click", () => {
   setRail("chats");
 });
 railFriends.addEventListener("click", () => setRail("add"));
+railAgent.addEventListener("click", () => {
+  void openAgent();
+});
+agentClear.addEventListener("click", () => {
+  clearAgentLog();
+});
+agentForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void askAgent();
+});
+agentInput.addEventListener("input", syncAgentSend);
+agentInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    void askAgent();
+  }
+});
 peopleQuery.addEventListener("input", paintPeople);
 addRecsToggle.addEventListener("click", () => {
   recsOpen = !recsOpen;
@@ -3837,6 +4705,41 @@ textSize.addEventListener("input", () => {
   paintTextSize();
 });
 
+let volumePreviewAt = 0;
+let volumePreviewTimer = 0;
+notificationVolume.addEventListener("input", () => {
+  const volume = Math.min(100, Math.max(0, Math.round(Number(notificationVolume.value))));
+  setNotificationVolume(volume);
+  paintNotificationVolume();
+  window.clearTimeout(volumePreviewTimer);
+  if (notificationGain(volume) <= 0) {
+    return;
+  }
+  const play = () => {
+    volumePreviewAt = performance.now();
+    void playChime();
+  };
+  const wait = 180 - (performance.now() - volumePreviewAt);
+  if (wait <= 0) {
+    play();
+    return;
+  }
+  volumePreviewTimer = window.setTimeout(play, wait);
+});
+
+notificationTones.addEventListener("click", (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("button[data-tone]");
+  const tone = button?.dataset.tone ?? "";
+  if (!button || !(TONE_IDS as readonly string[]).includes(tone)) {
+    return;
+  }
+  setNotificationTone(tone as ToneId);
+  paintNotificationTone();
+  window.clearTimeout(volumePreviewTimer);
+  volumePreviewAt = performance.now();
+  void playChime();
+});
+
 await listen<LoginEvent>("login-event", (event) => {
   void onEvent(event.payload);
 });
@@ -3924,6 +4827,9 @@ function outgoingBubble(item: Outgoing): HTMLElement {
     const url = item.previewUrl;
     grid.append(imageThumb(url, () => openLocalGallery([url], 0)));
     bubble?.prepend(grid);
+  } else if (item.kind === "audio") {
+    bubble?.querySelector(".msg-text")?.remove();
+    bubble?.append(voiceCard(item.localId, item.duration || 0, item.previewUrl || "", item.voice ? "" : item.text, item.peaks));
   } else if (item.kind === "file" && item.file) {
     const file = item.file;
     bubble?.querySelector(".msg-text")?.remove();
@@ -4125,6 +5031,7 @@ function finishOutgoing(localId: string, payload: SendResult): void {
     stickerFallback,
     kind: payload.kind || item?.kind || "",
     mediaId: payload.mediaId || payload.messageId || "",
+    duration: payload.duration || item?.duration || 0,
     gid: payload.gid || "",
     seq: payload.seq || 0,
     replyId: item?.reply?.id || payload.replyId || "",
@@ -4159,6 +5066,7 @@ function rememberSent(payload: SendResult, item: Outgoing | undefined, sticker: 
     stickerFallback,
     kind: payload.kind || item?.kind || "",
     mediaId: payload.mediaId || "",
+    duration: payload.duration || item?.duration || 0,
     animated: Boolean(payload.animated),
     gid: payload.gid || "",
     seq: payload.seq || 0,
@@ -4179,6 +5087,7 @@ function rememberSent(payload: SendResult, item: Outgoing | undefined, sticker: 
       stickerFallback: message.stickerFallback || prior.stickerFallback,
       kind: message.kind || prior.kind,
       mediaId: message.mediaId || prior.mediaId,
+      duration: message.duration || prior.duration,
       gid: message.gid || prior.gid,
       seq: message.seq || prior.seq,
     };
@@ -4207,6 +5116,8 @@ function dispatchSend(item: Outgoing): Promise<void> {
       groupSeq: item.file.groupSeq,
       groupCount: item.file.groupCount,
       silent: item.silent === true,
+      durationMs: item.duration || 0,
+      voice: item.voice === true,
     }).then(() => undefined, fail);
   }
   if (item.stickerSend) {
@@ -4396,10 +5307,464 @@ function mediaKind(file: File): AttachmentDraft["kind"] {
   return "file";
 }
 
+type DictatePhase = "idle" | "prepare" | "listen" | "transcribe";
+
+const MICROPHONE_KEY = "lineapp.microphone";
+
+let dictatePhase: DictatePhase = "idle";
+let dictateGen = 0;
+let dictateTimer = 0;
+let dictateLevelTimer = 0;
+let dictateRun: Promise<boolean> | null = null;
+
+function savedMicrophone(): string {
+  return localStorage.getItem(MICROPHONE_KEY) || "";
+}
+
+function microphoneSource(): string {
+  if (listedDevices) {
+    const chosen = chosenMicrophone(listedDevices.inputs);
+    if (chosen) {
+      return chosen;
+    }
+  }
+  return savedMicrophone();
+}
+
+function chosenMicrophone(devices: ListedDevice[]): string {
+  const saved = savedMicrophone();
+  if (devices.some((device) => device.id === saved)) {
+    return saved;
+  }
+  return devices.find((device) => device.detail === "Default" || device.detail.startsWith("Default ·"))?.id || "";
+}
+
+function setDictateMeter(level: number): void {
+  const clamped = Math.max(0, Math.min(100, Math.round(level)));
+  dictateFill.style.width = `${clamped}%`;
+  dictateMeter.classList.toggle("hearing", clamped >= 22);
+}
+
+function stopDictateMeter(): void {
+  window.clearInterval(dictateLevelTimer);
+  dictateLevelTimer = 0;
+  dictateMeter.hidden = true;
+  setDictateMeter(0);
+}
+
+function startDictateMeter(): void {
+  stopDictateMeter();
+  dictateMeter.hidden = false;
+  dictateLevelTimer = window.setInterval(() => {
+    void invoke<number>("dictate_level").then((level) => {
+      if (dictatePhase === "listen") {
+        setDictateMeter(level);
+      }
+    }).catch(() => undefined);
+  }, 100);
+}
+
+function dictateMessage(error: unknown): string {
+  const code = error instanceof Error ? error.message : String(error);
+  if (code.includes("no-mic")) {
+    return t("dictateNoMic");
+  }
+  if (code.includes("no-model") || code.includes("no-engine")) {
+    return t("dictateUnavailable");
+  }
+  if (code.includes("empty")) {
+    return t("dictateEmpty");
+  }
+  return t("dictateFailed");
+}
+
+function paintDictate(): void {
+  const listening = dictatePhase === "listen";
+  dictateButton.disabled = composerInput.disabled || dictatePhase === "prepare" || dictatePhase === "transcribe";
+  dictateButton.setAttribute("aria-pressed", listening || dictatePhase === "transcribe" ? "true" : "false");
+  const key = dictatePhase === "prepare" ? "dictatePrepare" : dictatePhase === "transcribe" ? "dictateWorking" : listening ? "dictateStop" : "dictate";
+  dictateButton.setAttribute("aria-label", t(key));
+}
+
+function insertDictation(text: string): void {
+  const body = text.trim();
+  if (!body) {
+    sendError.hidden = false;
+    sendError.textContent = t("dictateEmpty");
+    return;
+  }
+  const start = composerInput.selectionStart ?? composerInput.value.length;
+  const end = composerInput.selectionEnd ?? start;
+  const before = composerInput.value.slice(0, start);
+  const after = composerInput.value.slice(end);
+  const gap = before.length > 0 && !/\s$/.test(before) ? " " : "";
+  composerInput.value = `${before}${gap}${body}${after}`;
+  const caret = before.length + gap.length + body.length;
+  composerInput.setSelectionRange(caret, caret);
+  sendError.hidden = true;
+  refreshSendButton();
+  composerInput.focus();
+}
+
+function abandonDictation(): void {
+  if (dictatePhase === "idle") {
+    return;
+  }
+  dictateGen += 1;
+  const recording = dictatePhase === "listen" || dictatePhase === "prepare";
+  dictatePhase = "idle";
+  window.clearTimeout(dictateTimer);
+  stopDictateMeter();
+  if (recording) {
+    void invoke("dictate_cancel").catch(() => undefined);
+  }
+  paintDictate();
+}
+
+async function stopDictation(): Promise<boolean> {
+  if (dictateRun) {
+    return dictateRun;
+  }
+  if (dictatePhase !== "listen") {
+    return dictatePhase === "idle";
+  }
+  const gen = dictateGen;
+  const chat = openId;
+  dictatePhase = "transcribe";
+  window.clearTimeout(dictateTimer);
+  stopDictateMeter();
+  paintDictate();
+  dictateRun = (async () => {
+    try {
+      const text = await invoke<string>("dictate_stop", { language: intlLocale() });
+      if (gen !== dictateGen || chat !== openId) {
+        return false;
+      }
+      insertDictation(text);
+      return true;
+    } catch (error) {
+      if (gen !== dictateGen || chat !== openId) {
+        return false;
+      }
+      sendError.hidden = false;
+      sendError.textContent = dictateMessage(error);
+      return false;
+    } finally {
+      if (gen === dictateGen) {
+        dictatePhase = "idle";
+        paintDictate();
+      }
+      dictateRun = null;
+    }
+  })();
+  return dictateRun;
+}
+
+async function finishDictation(): Promise<boolean> {
+  if (dictatePhase === "listen") {
+    return stopDictation();
+  }
+  if (dictateRun) {
+    return dictateRun;
+  }
+  return dictatePhase === "idle";
+}
+
+async function toggleDictation(): Promise<void> {
+  if (dictatePhase === "listen") {
+    await stopDictation();
+    return;
+  }
+  if (dictatePhase !== "idle" || composerInput.disabled) {
+    return;
+  }
+  const gen = dictateGen;
+  dictatePhase = "prepare";
+  paintDictate();
+  sendError.hidden = true;
+  try {
+    if (micTestOn) {
+      await cancelMicTest();
+    }
+    await invoke("dictate_start", { source: microphoneSource() });
+    if (gen !== dictateGen) {
+      await invoke("dictate_cancel").catch(() => undefined);
+      return;
+    }
+    dictatePhase = "listen";
+    paintDictate();
+    startDictateMeter();
+    dictateTimer = window.setTimeout(() => {
+      void stopDictation();
+    }, 90_000);
+  } catch (error) {
+    if (gen !== dictateGen) {
+      return;
+    }
+    dictatePhase = "idle";
+    paintDictate();
+    sendError.hidden = false;
+    sendError.textContent = dictateMessage(error);
+  }
+}
+
 function refreshSendButton(): void {
   const hasText = composerInput.value.trim().length > 0;
   const hasFile = attachmentDrafts.length > 0;
-  sendButton.disabled = sendBusy || composerInput.disabled || (!hasText && !hasFile);
+  sendButton.disabled = sendBusy || composerInput.disabled || voiceLive || (!hasText && !hasFile);
+  paintDictate();
+  paintVoiceButton();
+}
+
+type VoiceClip = { data: string; mime: string; duration: number; peaks: number[] };
+
+let voiceGen = 0;
+let voiceDown = false;
+let voiceLive = false;
+let voiceCanceling = false;
+let voiceFinishing = false;
+let voiceOriginX = 0;
+let voiceBegan = 0;
+let voiceClockTimer = 0;
+let voiceLevelTimer = 0;
+
+for (let index = 0; index < 16; index += 1) {
+  voiceHoldWaves.append(document.createElement("i"));
+}
+
+function paintVoiceButton(): void {
+  voiceButton.disabled = !openId || composerInput.disabled || dictatePhase === "prepare" || dictatePhase === "transcribe" || sendBusy;
+  voiceButton.setAttribute("aria-pressed", voiceLive ? "true" : "false");
+}
+
+function meterVoice(level: number): void {
+  const bars = voiceHoldWaves.querySelectorAll<HTMLElement>("i");
+  bars.forEach((bar, index) => {
+    const wave = 0.35 + 0.65 * Math.abs(Math.sin(index * 0.9 + level / 17));
+    bar.style.height = `${4 + Math.round((Math.max(0, Math.min(100, level)) / 100) * 16 * wave)}px`;
+  });
+}
+
+function showVoiceHold(canceling: boolean): void {
+  composerForm.classList.add("voicing");
+  voiceHold.hidden = false;
+  voiceHold.classList.toggle("canceling", canceling);
+  voiceHoldHint.textContent = t(canceling ? "voiceRelease" : "voiceSlide");
+}
+
+function hideVoiceHold(): void {
+  composerForm.classList.remove("voicing");
+  voiceHold.hidden = true;
+  voiceHold.classList.remove("canceling");
+  window.clearInterval(voiceClockTimer);
+  window.clearInterval(voiceLevelTimer);
+  voiceClockTimer = 0;
+  voiceLevelTimer = 0;
+  paintVoiceButton();
+}
+
+function voiceError(error: unknown): string {
+  const code = error instanceof Error ? error.message : String(error);
+  if (code === "no-mic") {
+    return t("voiceNoMic");
+  }
+  if (code === "no-ffmpeg") {
+    return t("voiceUnavailable");
+  }
+  if (code === "short") {
+    return t("voiceShort");
+  }
+  return t("voiceFailed");
+}
+
+async function abandonVoice(): Promise<void> {
+  voiceGen += 1;
+  voiceDown = false;
+  voiceLive = false;
+  voiceCanceling = false;
+  voiceFinishing = false;
+  hideVoiceHold();
+  await invoke("voice_cancel").catch(() => undefined);
+}
+
+async function beginVoice(gen: number): Promise<void> {
+  sendError.hidden = true;
+  if (dictatePhase !== "idle") {
+    abandonDictation();
+    await invoke("dictate_cancel").catch(() => undefined);
+  }
+  if (micTestOn) {
+    await cancelMicTest();
+  }
+  if (gen !== voiceGen || !voiceDown) {
+    return;
+  }
+  try {
+    await invoke("voice_start", { source: microphoneSource() });
+  } catch (error) {
+    if (gen !== voiceGen) {
+      return;
+    }
+    voiceDown = false;
+    voiceLive = false;
+    hideVoiceHold();
+    sendError.hidden = false;
+    sendError.textContent = voiceError(error);
+    return;
+  }
+  if (gen !== voiceGen || !voiceDown) {
+    voiceLive = false;
+    hideVoiceHold();
+    await invoke("voice_cancel").catch(() => undefined);
+    return;
+  }
+  voiceLive = true;
+  voiceBegan = performance.now();
+  showVoiceHold(voiceCanceling);
+  voiceHoldTime.textContent = "0:00";
+  paintVoiceButton();
+  voiceClockTimer = window.setInterval(() => {
+    const elapsed = performance.now() - voiceBegan;
+    voiceHoldTime.textContent = voiceClock(elapsed);
+    if (elapsed >= 300_000) {
+      void finishVoice(false);
+    }
+  }, 200);
+  voiceLevelTimer = window.setInterval(() => {
+    void invoke<number>("voice_level").then((level) => {
+      if (voiceLive) {
+        meterVoice(level);
+      }
+    }).catch(() => undefined);
+  }, 90);
+}
+
+function sendVoice(chatId: string, clip: VoiceClip, reply: ReplyDraft | null): void {
+  const url = URL.createObjectURL(new Blob([decodeBase64(clip.data)], { type: clip.mime || "audio/mp4" }));
+  void queueOutgoing({
+    localId: `local-${Date.now()}-${outgoingSeq += 1}`,
+    chatId,
+    text: t("voiceMessage"),
+    reply,
+    time: Date.now(),
+    state: "sending",
+    error: "",
+    knownIds: chatId === openId ? paintedIds : "",
+    kind: "audio",
+    previewUrl: url,
+    duration: clip.duration,
+    peaks: clip.peaks,
+    voice: true,
+    file: { name: "voice.m4a", mime: clip.mime || "audio/mp4", data: clip.data },
+  });
+}
+
+async function finishVoice(forceCancel: boolean): Promise<void> {
+  if (voiceFinishing || (!voiceLive && !voiceDown)) {
+    return;
+  }
+  voiceFinishing = true;
+  const gen = voiceGen;
+  const tooShort = !forceCancel && !voiceCanceling && performance.now() - voiceBegan < 500;
+  const cancel = forceCancel || voiceCanceling || !voiceLive || tooShort;
+  voiceDown = false;
+  voiceLive = false;
+  voiceCanceling = false;
+  hideVoiceHold();
+  try {
+    if (cancel) {
+      await invoke("voice_cancel").catch(() => undefined);
+      if (tooShort && gen === voiceGen) {
+        sendError.hidden = false;
+        sendError.textContent = t("voiceShort");
+      }
+      return;
+    }
+    const clip = await invoke<VoiceClip>("voice_stop");
+    if (gen !== voiceGen || !openId) {
+      return;
+    }
+    const reply = replyDraft;
+    replyDraft = null;
+    paintReplyBar();
+    sendVoice(openId, clip, reply);
+  } catch (error) {
+    if (gen === voiceGen) {
+      sendError.hidden = false;
+      sendError.textContent = voiceError(error);
+    }
+  } finally {
+    voiceFinishing = false;
+  }
+}
+
+voiceButton.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || voiceButton.disabled || voiceLive || voiceDown) {
+    return;
+  }
+  event.preventDefault();
+  voiceButton.setPointerCapture(event.pointerId);
+  voiceDown = true;
+  voiceCanceling = false;
+  voiceOriginX = event.clientX;
+  const gen = ++voiceGen;
+  void beginVoice(gen);
+});
+
+voiceButton.addEventListener("pointermove", (event) => {
+  if (!voiceDown) {
+    return;
+  }
+  const rtl = document.documentElement.dir === "rtl";
+  const delta = rtl ? event.clientX - voiceOriginX : voiceOriginX - event.clientX;
+  const canceling = delta > 72;
+  if (canceling === voiceCanceling) {
+    return;
+  }
+  voiceCanceling = canceling;
+  if (voiceLive) {
+    showVoiceHold(canceling);
+  }
+});
+
+voiceButton.addEventListener("pointerup", () => {
+  if (voiceFinishing) {
+    return;
+  }
+  if (!voiceLive) {
+    voiceDown = false;
+    voiceGen += 1;
+    return;
+  }
+  void finishVoice(false);
+});
+
+voiceButton.addEventListener("pointercancel", () => {
+  void finishVoice(true);
+});
+
+voiceButton.addEventListener("contextmenu", (event) => {
+  event.preventDefault();
+});
+
+function probeDuration(url: string): Promise<number> {
+  if (!url) {
+    return Promise.resolve(0);
+  }
+  const audio = document.createElement("audio");
+  audio.preload = "metadata";
+  return new Promise((resolve) => {
+    const finish = (value: number): void => {
+      audio.onloadedmetadata = null;
+      audio.onerror = null;
+      audio.removeAttribute("src");
+      audio.load();
+      resolve(value);
+    };
+    audio.onloadedmetadata = () => finish(Number.isFinite(audio.duration) ? Math.round(audio.duration * 1000) : 0);
+    audio.onerror = () => finish(0);
+    audio.src = url;
+  });
 }
 
 function paintAttachment(): void {
@@ -4512,7 +5877,7 @@ function stageFiles(chatId: string, files: File[]): void {
       name: file.name,
       mime: file.type || "application/octet-stream",
       kind,
-      previewUrl: kind === "image" || kind === "video" ? URL.createObjectURL(file) : "",
+      previewUrl: kind === "image" || kind === "video" || kind === "audio" ? URL.createObjectURL(file) : "",
     };
   });
   attachmentDrafts = imageBatch ? [...prior, ...added] : added;
@@ -4580,6 +5945,7 @@ async function submitComposer(silent = false): Promise<void> {
   for (let index = 0; index < drafts.length; index += 1) {
     const draft = drafts[index];
     const preview = draft.kind === "image" || draft.kind === "video";
+    const duration = draft.kind === "audio" ? await probeDuration(draft.previewUrl) : 0;
     await queueOutgoing({
       localId: `local-${Date.now()}-${outgoingSeq += 1}`,
       chatId,
@@ -4591,6 +5957,7 @@ async function submitComposer(silent = false): Promise<void> {
       knownIds: chatId === openId ? paintedIds : "",
       kind: draft.kind,
       previewUrl: draft.previewUrl,
+      duration,
       albumUrls: index === 0 ? albumUrls : undefined,
       file: {
         name: draft.name,
@@ -4693,7 +6060,7 @@ sendMenu.addEventListener("click", (event) => {
     return;
   }
   if (choice === "normal") {
-    void submitComposer(false);
+    void sendComposer(false);
   }
 });
 
@@ -4704,7 +6071,18 @@ document.querySelector<HTMLFormElement>("#composer")!.addEventListener("submit",
     return;
   }
   closeSendMenu();
-  void submitComposer(false);
+  void sendComposer(false);
+});
+
+async function sendComposer(silent = false): Promise<void> {
+  if (!(await finishDictation())) {
+    return;
+  }
+  await submitComposer(silent);
+}
+
+dictateButton.addEventListener("click", () => {
+  void toggleDictation();
 });
 
 attachFile.addEventListener("click", () => {
@@ -4886,6 +6264,7 @@ function showSheet(title: string, body: string): void {
   sheetList.hidden = true;
   sheetAbout.hidden = true;
   sheetLanguage.hidden = true;
+  sheetAgent.hidden = true;
   sheet.hidden = false;
 }
 
@@ -4917,10 +6296,11 @@ function showAbout(): void {
   sheetList.hidden = true;
   sheetAbout.hidden = false;
   sheetLanguage.hidden = true;
+  sheetAgent.hidden = true;
   sheet.hidden = false;
 }
 
-type ListedDevice = { name: string; detail: string };
+type ListedDevice = { id: string; name: string; detail: string };
 type DeviceLists = { outputs: ListedDevice[]; inputs: ListedDevice[]; cameras: ListedDevice[]; audioError: string };
 
 let listedDevices: DeviceLists | null = null;
@@ -4965,11 +6345,17 @@ function showLanguage(): void {
   sheetList.hidden = true;
   sheetAbout.hidden = true;
   sheetLanguage.hidden = false;
+  sheetAgent.hidden = true;
   sheet.hidden = false;
 }
 
 function refreshLocale(): void {
   applyI18n();
+  paintDictate();
+  if (voiceLive) {
+    voiceHoldHint.textContent = t(voiceCanceling ? "voiceRelease" : "voiceSlide");
+  }
+  paintMicTest();
   paintLanguageCurrent();
   if (statusKey) {
     setStatus(statusKey);
@@ -4983,9 +6369,13 @@ function refreshLocale(): void {
         input.checked = input.value === chosen;
       });
       sheetTitle.textContent = t("language");
+    } else if (!sheetAgent.hidden) {
+      sheetTitle.textContent = t("agent");
     } else if (!sheetSettings.hidden) {
       sheetTitle.textContent = t("settings");
       paintTextSize();
+      paintNotificationVolume();
+      paintNotificationTone();
       if (listedDevices) {
         fillDevices(devicesOutput, listedDevices.outputs, t("noSpeakers"));
         fillDevices(devicesInput, listedDevices.inputs, t("noMics"));
@@ -5002,6 +6392,9 @@ function refreshLocale(): void {
   paintPeople();
   paintRecommendations();
   paintGroupPicks();
+  if (railMode === "agent") {
+    paintAgent();
+  }
   if (!signedIn) {
     return;
   }
@@ -5028,17 +6421,39 @@ function fillDevices(list: HTMLElement, devices: ListedDevice[], empty: string):
     list.append(item);
     return;
   }
+  const selectable = list === devicesInput;
+  const chosen = selectable ? chosenMicrophone(devices) : "";
   for (const device of devices) {
     const item = document.createElement("li");
     const name = document.createElement("span");
     name.textContent = device.name;
-    item.append(name);
-    if (device.detail) {
-      const detail = document.createElement("span");
-      detail.className = "device-detail";
-      detail.textContent = device.detail;
-      item.append(detail);
+    const detail = document.createElement("span");
+    detail.className = "device-detail";
+    detail.textContent = device.detail;
+    if (!selectable) {
+      item.append(name);
+      if (device.detail) {
+        item.append(detail);
+      }
+      list.append(item);
+      continue;
     }
+    item.className = "device-selectable";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "device-choice";
+    button.setAttribute("aria-pressed", device.id === chosen ? "true" : "false");
+    button.append(name);
+    if (device.detail) {
+      button.append(detail);
+    }
+    button.addEventListener("click", () => {
+      localStorage.setItem(MICROPHONE_KEY, device.id);
+      if (listedDevices) {
+        fillDevices(devicesInput, listedDevices.inputs, t("noMics"));
+      }
+    });
+    item.append(button);
     list.append(item);
   }
 }
@@ -5072,11 +6487,24 @@ async function showSettings(): Promise<void> {
   sheetBody.hidden = true;
   sheetSettings.hidden = false;
   syncAppearanceControls();
+  paintNotificationVolume();
+  paintNotificationTone();
   sheetList.hidden = true;
   sheetAbout.hidden = true;
   sheetLanguage.hidden = true;
+  sheetAgent.hidden = true;
   sheet.hidden = false;
   paintLanguageCurrent();
+  paintAgentCurrent();
+  void invoke<AgentConfig>("get_agent_settings")
+    .then((settings) => {
+      agentConfig = settings;
+      paintAgentCurrent();
+      if (railMode === "agent") {
+        paintAgent();
+      }
+    })
+    .catch(() => undefined);
   devicesNote.hidden = true;
   fillDevices(devicesOutput, [], t("looking"));
   fillDevices(devicesInput, [], t("looking"));
@@ -5121,6 +6549,7 @@ languageOpen.addEventListener("click", () => {
 
 languageSave.addEventListener("click", () => {
   sheetLanguage.hidden = true;
+  sheetAgent.hidden = true;
   sheetSettings.hidden = false;
   setLanguage(pendingLanguage);
   sheetTitle.textContent = t("settings");
@@ -5128,10 +6557,58 @@ languageSave.addEventListener("click", () => {
 
 languageCancel.addEventListener("click", () => {
   sheet.hidden = true;
+  void cancelMicTest();
+});
+
+agentOpen.addEventListener("click", () => {
+  void showAgentSettings();
+});
+
+agentCancel.addEventListener("click", () => {
+  sheetAgent.hidden = true;
+  sheetSettings.hidden = false;
+  agentSettingsNote.hidden = true;
+  sheetTitle.textContent = t("settings");
+});
+
+agentSave.addEventListener("click", () => {
+  agentSettingsNote.hidden = true;
+  agentSave.disabled = true;
+  const settings: AgentConfig = {
+    endpoint: agentEndpoint.value.trim(),
+    model: agentModel.value.trim(),
+    apiKey: agentApiKey.value,
+    protocol: agentProtocol.value,
+    temperature: agentTemperature.value.trim(),
+    topP: agentTopP.value.trim(),
+    maxTokens: agentMaxTokens.value.trim(),
+    thinking: agentThinking.value,
+    extra: agentExtra.value.trim(),
+  };
+  void invoke("set_agent_settings", { settings })
+    .then(() => {
+      agentConfig = { ...settings, apiKey: settings.apiKey.trim() };
+      sheetAgent.hidden = true;
+      sheetSettings.hidden = false;
+      sheetTitle.textContent = t("settings");
+      paintAgentCurrent();
+      if (railMode === "agent") {
+        paintAgent();
+      }
+    })
+    .catch((error: unknown) => {
+      agentSettingsNote.hidden = false;
+      agentSettingsNote.textContent = error instanceof Error ? error.message : String(error);
+    })
+    .finally(() => {
+      agentSave.disabled = false;
+    });
 });
 
 applyI18n();
 paintLanguageCurrent();
+paintAgentCurrent();
+syncAgentSend();
 onLocaleChange(refreshLocale);
 
 railMore.addEventListener("click", (event) => {
@@ -5179,6 +6656,124 @@ document.addEventListener("click", (event) => {
 
 document.querySelector<HTMLButtonElement>("#sheet-close")!.addEventListener("click", () => {
   sheet.hidden = true;
+  void cancelMicTest();
+});
+
+let micTestOn = false;
+let micTestBusy = false;
+let micTestTimer = 0;
+let micTestLevelTimer = 0;
+let micTestUrl = "";
+
+function paintMicTest(): void {
+  micTestButton.disabled = micTestBusy;
+  micTestButton.textContent = micTestBusy ? t("dictateWorking") : micTestOn ? t("stopMicTest") : t("testMicrophone");
+  if (!micTestOn) {
+    micTestMeter.hidden = true;
+  }
+}
+
+function stopMicTestMeter(): void {
+  window.clearInterval(micTestLevelTimer);
+  micTestLevelTimer = 0;
+  micTestMeter.hidden = true;
+  micTestMeter.classList.remove("hearing");
+  micTestFill.style.width = "0%";
+}
+
+function playMicTest(audio: string): void {
+  if (micTestUrl) {
+    URL.revokeObjectURL(micTestUrl);
+  }
+  const binary = atob(audio);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  micTestUrl = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
+  micTestPlayer.hidden = false;
+  micTestPlayer.src = micTestUrl;
+  void micTestPlayer.play().catch(() => undefined);
+}
+
+async function cancelMicTest(): Promise<void> {
+  if (!micTestOn && !micTestBusy) {
+    return;
+  }
+  micTestOn = false;
+  window.clearTimeout(micTestTimer);
+  stopMicTestMeter();
+  paintMicTest();
+  await invoke("dictate_cancel").catch(() => undefined);
+}
+
+async function finishMicTest(): Promise<void> {
+  if (!micTestOn || micTestBusy) {
+    return;
+  }
+  micTestOn = false;
+  micTestBusy = true;
+  window.clearTimeout(micTestTimer);
+  stopMicTestMeter();
+  paintMicTest();
+  try {
+    const sample = await invoke<{ text: string; audio: string }>("mic_test_stop", { language: intlLocale() });
+    micTestResult.hidden = false;
+    micTestResult.textContent = sample.text ? t("micTestHeard", { text: sample.text }) : t("dictateEmpty");
+    if (sample.audio) {
+      playMicTest(sample.audio);
+    }
+  } catch (error) {
+    micTestResult.hidden = false;
+    micTestResult.textContent = dictateMessage(error);
+  } finally {
+    micTestBusy = false;
+    paintMicTest();
+  }
+}
+
+async function startMicTest(): Promise<void> {
+  if (micTestOn || micTestBusy) {
+    return;
+  }
+  if (dictatePhase !== "idle") {
+    abandonDictation();
+  }
+  micTestResult.hidden = true;
+  micTestPlayer.pause();
+  micTestPlayer.hidden = true;
+  try {
+    await invoke("dictate_start", { source: microphoneSource() });
+    micTestOn = true;
+    paintMicTest();
+    micTestMeter.hidden = false;
+    micTestLevelTimer = window.setInterval(() => {
+      void invoke<number>("dictate_level").then((level) => {
+        if (!micTestOn) {
+          return;
+        }
+        const clamped = Math.max(0, Math.min(100, Math.round(level)));
+        micTestFill.style.width = `${clamped}%`;
+        micTestMeter.classList.toggle("hearing", clamped >= 22);
+      }).catch(() => undefined);
+    }, 100);
+    micTestTimer = window.setTimeout(() => {
+      void finishMicTest();
+    }, 12_000);
+  } catch (error) {
+    micTestOn = false;
+    paintMicTest();
+    micTestResult.hidden = false;
+    micTestResult.textContent = dictateMessage(error);
+  }
+}
+
+micTestButton.addEventListener("click", () => {
+  if (micTestOn) {
+    void finishMicTest();
+    return;
+  }
+  void startMicTest();
 });
 
 minimizeToTray.addEventListener("change", () => {
@@ -5216,6 +6811,10 @@ lightbox.addEventListener("click", (event) => {
   }
 });
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && (voiceLive || voiceDown)) {
+    void finishVoice(true);
+    return;
+  }
   if (event.key === "Escape" && !msgMenu.hidden) {
     closeMsgMenu();
     return;
@@ -5252,6 +6851,7 @@ function rememberLive(message: HistoryMessage): void {
       ...message,
       kind: message.kind || prior.kind,
       mediaId: message.mediaId || prior.mediaId,
+      duration: message.duration || prior.duration,
       gid: message.gid || prior.gid,
       seq: message.seq || prior.seq,
     };
@@ -5649,6 +7249,7 @@ function applyPoll(payload: PollPayload): void {
   renderList();
   if (shouldChime) {
     playChime();
+    requestAttention();
     if (focusOnMessage) {
       void invoke("focus_for_message").catch(() => {});
     }
@@ -5681,6 +7282,7 @@ async function logout(): Promise<void> {
     return;
   }
   rows = [];
+  clearAgentLog();
   openId = "";
   discardAttachment();
   shownUrl = "";

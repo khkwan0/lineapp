@@ -1,8 +1,10 @@
+mod agent;
 mod e2ee;
 mod h2gate;
 mod legy;
 mod line;
 mod preview;
+mod speech;
 mod store;
 mod thrift;
 
@@ -631,7 +633,7 @@ async fn read_dropped_file(path: String) -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-async fn send_media(app: AppHandle, id: String, name: String, mime: String, data: String, local_id: Option<String>, group_id: Option<String>, group_seq: Option<i32>, group_count: Option<i32>, silent: Option<bool>) -> Result<(), String> {
+async fn send_media(app: AppHandle, id: String, name: String, mime: String, data: String, local_id: Option<String>, group_id: Option<String>, group_seq: Option<i32>, group_count: Option<i32>, silent: Option<bool>, duration_ms: Option<i64>, voice: Option<bool>) -> Result<(), String> {
     chat_id(&id)?;
     let name = name.trim().to_string();
     let mime = mime.trim().to_string();
@@ -648,6 +650,8 @@ async fn send_media(app: AppHandle, id: String, name: String, mime: String, data
     let local_id = local_send_id(local_id.unwrap_or_default().trim());
     let chat = id.clone();
     let silent = silent.unwrap_or(false);
+    let duration_ms = duration_ms.unwrap_or(0).clamp(0, 3_600_000);
+    let voice = voice.unwrap_or(false);
     let album = group_id.and_then(|group| {
         let seq = group_seq.unwrap_or(0);
         let count = group_count.unwrap_or(0);
@@ -659,7 +663,7 @@ async fn send_media(app: AppHandle, id: String, name: String, mime: String, data
     });
     let mut value = tauri::async_runtime::spawn_blocking(move || {
         let _send = TALK_SEND.lock().unwrap_or_else(|err| err.into_inner());
-        line::Client::new().send_media_for_window(&id, &name, &mime, &bytes, album, silent)
+        line::Client::new().send_media_for_window(&id, &name, &mime, &bytes, album, silent, duration_ms, voice)
     })
         .await
         .map_err(|err| format!("could not send: {err}"))?;
@@ -815,6 +819,7 @@ struct Settings {
 
 #[derive(Debug, serde::Serialize)]
 struct ListedDevice {
+    id: String,
     name: String,
     detail: String,
 }
@@ -863,6 +868,7 @@ fn parse_pulse(text: &str, header: &str) -> Vec<PulseNode> {
     nodes
 }
 
+#[cfg(target_os = "linux")]
 fn pulse_text(kind: &str) -> Result<String, String> {
     let output = std::process::Command::new("pactl")
         .args(["list", kind])
@@ -876,6 +882,7 @@ fn pulse_text(kind: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+#[cfg(target_os = "linux")]
 fn pactl_line(args: &[&str]) -> String {
     let Ok(output) = std::process::Command::new("pactl").args(args).output() else {
         return String::new();
@@ -904,7 +911,7 @@ fn listed_from_pulse(nodes: Vec<PulseNode>, default_name: &str, skip_monitors: b
         .map(|node| {
             let default = !default_name.is_empty() && node.name == default_name;
             let running = node.state == "RUNNING";
-            let device = ListedDevice { name: node.description, detail: device_detail(&node.state, default) };
+            let device = ListedDevice { id: node.name, name: node.description, detail: device_detail(&node.state, default) };
             (default, running, device)
         })
         .collect();
@@ -912,6 +919,7 @@ fn listed_from_pulse(nodes: Vec<PulseNode>, default_name: &str, skip_monitors: b
     devices.into_iter().map(|(_, _, device)| device).collect()
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn capture_flags(capabilities: u32, device_caps: u32) -> bool {
     const CAP_VIDEO_CAPTURE: u32 = 0x0000_0001;
     const CAP_VIDEO_CAPTURE_MPLANE: u32 = 0x0000_1000;
@@ -920,6 +928,7 @@ fn capture_flags(capabilities: u32, device_caps: u32) -> bool {
     flags & (CAP_VIDEO_CAPTURE | CAP_VIDEO_CAPTURE_MPLANE) != 0
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn list_cameras() -> Vec<ListedDevice> {
     let Ok(entries) = std::fs::read_dir("/sys/class/video4linux") else {
         return Vec::new();
@@ -939,6 +948,7 @@ fn list_cameras() -> Vec<ListedDevice> {
         let name = std::fs::read_to_string(entry.path().join("name")).unwrap_or_default();
         let name = name.trim();
         cameras.push(ListedDevice {
+            id: path.clone(),
             name: if name.is_empty() { path.clone() } else { name.to_string() },
             detail: path,
         });
@@ -947,6 +957,7 @@ fn list_cameras() -> Vec<ListedDevice> {
     cameras
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn probe_camera(path: &str) -> Option<bool> {
     #[cfg(target_os = "linux")]
     {
@@ -992,6 +1003,20 @@ extern "C" {
 
 #[tauri::command]
 fn list_media_devices() -> MediaDevices {
+    #[cfg(target_os = "linux")]
+    {
+        return linux_media_devices();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return macos_media_devices();
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    MediaDevices { outputs: Vec::new(), inputs: Vec::new(), cameras: Vec::new(), audio_error: "could not list audio devices".into() }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_media_devices() -> MediaDevices {
     let audio = (|| -> Result<(Vec<ListedDevice>, Vec<ListedDevice>), String> {
         let sinks = parse_pulse(&pulse_text("sinks")?, "Sink #");
         let sources = parse_pulse(&pulse_text("sources")?, "Source #");
@@ -1002,6 +1027,93 @@ fn list_media_devices() -> MediaDevices {
     match audio {
         Ok((outputs, inputs)) => MediaDevices { outputs, inputs, cameras: list_cameras(), audio_error: String::new() },
         Err(audio_error) => MediaDevices { outputs: Vec::new(), inputs: Vec::new(), cameras: list_cameras(), audio_error },
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_media_devices() -> MediaDevices {
+    let cameras = macos_cameras();
+    match macos_audio() {
+        Ok((outputs, inputs)) => MediaDevices { outputs, inputs, cameras, audio_error: String::new() },
+        Err(audio_error) => MediaDevices { outputs: Vec::new(), inputs: Vec::new(), cameras, audio_error },
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_audio() -> Result<(Vec<ListedDevice>, Vec<ListedDevice>), String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    let default_out = host.default_output_device().and_then(|device| device.name().ok()).unwrap_or_default();
+    let default_in = host.default_input_device().and_then(|device| device.name().ok()).unwrap_or_default();
+    let outputs = host.output_devices().map_err(|err| format!("could not list audio devices: {err}"))?;
+    let inputs = host.input_devices().map_err(|err| format!("could not list audio devices: {err}"))?;
+    Ok((listed_from_coreaudio(outputs, &default_out), listed_from_coreaudio(inputs, &default_in)))
+}
+
+#[cfg(target_os = "macos")]
+fn listed_from_coreaudio(devices: impl Iterator<Item = cpal::Device>, default_name: &str) -> Vec<ListedDevice> {
+    use cpal::traits::DeviceTrait;
+    let mut listed = Vec::new();
+    for device in devices {
+        let Ok(name) = device.name() else {
+            continue;
+        };
+        if name.is_empty() || listed.iter().any(|item: &ListedDevice| item.id == name) {
+            continue;
+        }
+        let default = !default_name.is_empty() && name == default_name;
+        listed.push(ListedDevice { id: name.clone(), name, detail: if default { "Default".into() } else { String::new() } });
+    }
+    listed.sort_by(|left, right| right.detail.starts_with("Default").cmp(&left.detail.starts_with("Default")).then(left.name.cmp(&right.name)));
+    listed
+}
+
+#[cfg(target_os = "macos")]
+fn macos_cameras() -> Vec<ListedDevice> {
+    let Ok(output) = std::process::Command::new("system_profiler").args(["SPCameraDataType", "-json"]).output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    cameras_from_profiler(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn cameras_from_profiler(text: &str) -> Vec<ListedDevice> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Vec::new();
+    };
+    let mut cameras = Vec::new();
+    collect_cameras(&value, &mut cameras);
+    cameras.sort_by(|left, right| left.name.cmp(&right.name).then(left.detail.cmp(&right.detail)));
+    cameras
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn collect_cameras(value: &serde_json::Value, cameras: &mut Vec<ListedDevice>) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_cameras(item, cameras);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            let name = map.get("_name").and_then(|item| item.as_str()).unwrap_or("").trim();
+            let unique = map.get("spcamera_unique-id").and_then(|item| item.as_str()).map(str::trim);
+            let model = map.get("spcamera_model-id").and_then(|item| item.as_str()).map(str::trim);
+            if !name.is_empty() && (unique.is_some() || model.is_some()) {
+                let id = unique.filter(|item| !item.is_empty()).unwrap_or(name).to_string();
+                if !cameras.iter().any(|camera| camera.id == id) {
+                    let detail = model.filter(|item| !item.is_empty()).unwrap_or(id.as_str()).to_string();
+                    cameras.push(ListedDevice { id, name: name.to_string(), detail });
+                }
+            }
+            for child in map.values() {
+                collect_cameras(child, cameras);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1067,6 +1179,7 @@ fn set_always_on_top(app: AppHandle, state: State<'_, AppPrefs>, enabled: bool) 
 fn set_focus_on_message(state: State<'_, AppPrefs>, enabled: bool) -> Result<(), String> {
     save_setting("focusOnMessage", enabled)?;
     state.focus_on_message.store(enabled, Ordering::Relaxed);
+    #[cfg(target_os = "linux")]
     if !enabled {
         let _ = kwin_script(&["org.kde.kwin.Scripting.unloadScript", "lineapp-focus"]);
     }
@@ -1077,14 +1190,43 @@ fn set_focus_on_message(state: State<'_, AppPrefs>, enabled: bool) -> Result<(),
 fn focus_for_message(app: AppHandle, state: State<'_, AppPrefs>) {
     if state.focus_on_message.load(Ordering::Relaxed) {
         reveal(&app);
+        #[cfg(target_os = "linux")]
         if wayland_session() {
             let _ = kwin_activate_main();
         }
     }
 }
 
+#[tauri::command]
+fn attention_for_message(app: AppHandle) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = kwin_attention(true);
+        let _ = app;
+    }
+    #[cfg(not(target_os = "linux"))]
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.request_user_attention(Some(tauri::UserAttentionType::Informational));
+    }
+}
+
+#[tauri::command]
+fn clear_attention(app: AppHandle) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = kwin_attention(false);
+        let _ = app;
+    }
+    #[cfg(not(target_os = "linux"))]
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.request_user_attention(None);
+    }
+}
+
+#[cfg(target_os = "linux")]
 static FOCUS_GEN: AtomicU32 = AtomicU32::new(0);
 
+#[cfg(target_os = "linux")]
 fn kwin_activate_main() -> Result<(), String> {
     let path = settings_path().with_file_name("lineapp-focus.js");
     let body = "function lineappActivate(client) {\n    if (!client) return;\n    if (client.resourceName !== \"lineapp\" && client.resourceClass !== \"lineapp\") return;\n    if (client.caption !== \"LINE\") return;\n    client.minimized = false;\n    try { workspace.raiseWindow(client); } catch (error) {}\n    workspace.activeWindow = client;\n}\nworkspace.windowList().forEach(lineappActivate);\nworkspace.windowAdded.connect(lineappActivate);\n";
@@ -1112,12 +1254,57 @@ fn apply_always_on_top(app: &AppHandle, enabled: bool) -> Result<(), String> {
         window.set_always_on_top(enabled).map_err(|err| err.to_string())?;
     }
     // GTK's keep-above flag does nothing on Wayland. KDE still honors keepAbove.
+    #[cfg(target_os = "linux")]
     if wayland_session() {
         kwin_keep_above(enabled)?;
     }
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+static ATTENTION_GEN: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(target_os = "linux")]
+fn kde_session() -> bool {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .map(|value| value.to_ascii_lowercase().contains("kde"))
+        .unwrap_or(false)
+        || std::env::var_os("KDE_FULL_SESSION").is_some()
+}
+
+#[cfg(target_os = "linux")]
+fn kwin_attention(enabled: bool) -> Result<(), String> {
+    if !kde_session() {
+        return Ok(());
+    }
+    let plugin = if enabled { "lineapp-attention" } else { "lineapp-clear-attention" };
+    let path = settings_path().with_file_name(format!("{plugin}.js"));
+    let body = if enabled {
+        "function lineappAttention(client) {\n    if (!client) return;\n    if (client.resourceName !== \"lineapp\" && client.resourceClass !== \"lineapp\") return;\n    if (client.caption !== \"LINE\") return;\n    client.demandsAttention = true;\n}\nworkspace.windowList().forEach(lineappAttention);\n"
+    } else {
+        "function lineappClearAttention(client) {\n    if (!client) return;\n    if (client.resourceName !== \"lineapp\" && client.resourceClass !== \"lineapp\") return;\n    if (client.caption !== \"LINE\") return;\n    client.demandsAttention = false;\n}\nworkspace.windowList().forEach(lineappClearAttention);\n"
+    };
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+    }
+    std::fs::write(&path, body).map_err(|err| err.to_string())?;
+    let _ = kwin_script(&["org.kde.kwin.Scripting.unloadScript", "lineapp-attention"]);
+    let _ = kwin_script(&["org.kde.kwin.Scripting.unloadScript", "lineapp-clear-attention"]);
+    kwin_script(&["org.kde.kwin.Scripting.loadScript", &path.display().to_string(), plugin])?;
+    kwin_script(&["org.kde.kwin.Scripting.start"])?;
+    let gen = ATTENTION_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if ATTENTION_GEN.load(Ordering::Relaxed) == gen {
+            let _ = kwin_script(&["org.kde.kwin.Scripting.unloadScript", plugin]);
+        }
+    });
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn wayland_session() -> bool {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         return true;
@@ -1125,6 +1312,7 @@ fn wayland_session() -> bool {
     std::env::var_os("XDG_SESSION_TYPE").is_some_and(|kind| kind == "wayland")
 }
 
+#[cfg(target_os = "linux")]
 fn kwin_keep_above(enabled: bool) -> Result<(), String> {
     let plugin = if enabled { "lineapp-keep-above" } else { "lineapp-clear-above" };
     let path = settings_path().with_file_name(format!("{plugin}.js"));
@@ -1146,6 +1334,7 @@ fn kwin_keep_above(enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn kwin_script(args: &[&str]) -> Result<(), String> {
     let mut last_error = String::from("this desktop cannot keep a window above others");
     for bin in ["qdbus6", "qdbus"] {
@@ -1364,6 +1553,7 @@ fn start_login(app: AppHandle, state: State<LoginState>) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn install_taskbar_icon() {
     let data = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
@@ -1412,8 +1602,18 @@ fn install_taskbar_icon() {
     });
 }
 
+#[cfg(target_os = "macos")]
+const MAC_INFO_PLIST_LEN: usize = include_bytes!("../Info.plist").len();
+
+/// Mach-O tools read this section, so a `tauri dev` binary can ask for the microphone.
+#[cfg(target_os = "macos")]
+#[used]
+#[link_section = "__TEXT,__info_plist"]
+static MAC_INFO_PLIST: [u8; MAC_INFO_PLIST_LEN] = *include_bytes!("../Info.plist");
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
     install_taskbar_icon();
     let context = tauri::generate_context!();
     line::install_config_dir(&context.config().identifier);
@@ -1438,7 +1638,7 @@ pub fn run() {
             tauri::webview::PermissionKind::Microphone | tauri::webview::PermissionKind::Camera => tauri::webview::PermissionResponse::Allow,
             _ => tauri::webview::PermissionResponse::Default,
         })
-        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, save_download, read_dropped_file, send_message, send_media, send_sticker, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_always_on_top, set_focus_on_message, focus_for_message, set_tray_badge, list_media_devices, open_profile, block_profile, add_profile, open_fraud_help, open_link, link_preview, rename_profile, favorite_profile, open_friend_chat, open_members, group_roster, rename_group, set_group_auto_join, invite_into_group, remove_group_member, group_invite_candidates, list_friends, friend_recommendations, find_person, create_group])
+        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, save_download, read_dropped_file, send_message, send_media, send_sticker, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_always_on_top, set_focus_on_message, focus_for_message, attention_for_message, clear_attention, set_tray_badge, list_media_devices, speech::dictate_start, speech::dictate_stop, speech::dictate_cancel, speech::dictate_level, speech::mic_test_stop, speech::voice_start, speech::voice_stop, speech::voice_cancel, speech::voice_level, agent::get_agent_settings, agent::set_agent_settings, agent::agent_ask, open_profile, block_profile, add_profile, open_fraud_help, open_link, link_preview, rename_profile, favorite_profile, open_friend_chat, open_members, group_roster, rename_group, set_group_auto_join, invite_into_group, remove_group_member, group_invite_candidates, list_friends, friend_recommendations, find_person, create_group])
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;
@@ -1540,6 +1740,7 @@ Source #61
         assert_eq!(outputs[0].detail, "Default · In use");
         assert_eq!(outputs[1].name, "USB Audio Speakers");
         assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].id, "alsa_input.mic");
         assert_eq!(inputs[0].name, "USB Audio Microphone");
         assert_eq!(inputs[0].detail, "Default");
     }
@@ -1559,6 +1760,23 @@ Source #61
         let cameras = super::list_cameras();
         assert!(cameras.iter().any(|camera| camera.detail == "/dev/video0"), "{cameras:?}");
         assert!(cameras.iter().all(|camera| camera.detail != "/dev/video1"), "{cameras:?}");
+    }
+
+    #[test]
+    fn mac_camera_report_lists_each_camera_once() {
+        let text = r#"{
+            "SPCameraDataType": [
+                {"_name": "FaceTime HD Camera", "spcamera_model-id": "FaceTime HD Camera", "spcamera_unique-id": "0xabc"},
+                {"_name": "FaceTime HD Camera", "spcamera_model-id": "FaceTime HD Camera", "spcamera_unique-id": "0xabc"},
+                {"_name": "USB Capture", "spcamera_model-id": "USB Capture"}
+            ]
+        }"#;
+        let cameras = super::cameras_from_profiler(text);
+        assert_eq!(cameras.len(), 2, "{cameras:?}");
+        assert_eq!(cameras[0].id, "0xabc");
+        assert_eq!(cameras[0].detail, "FaceTime HD Camera");
+        assert_eq!(cameras[1].name, "USB Capture");
+        assert!(super::cameras_from_profiler(r#"{"SPCameraDataType":[{"_name":"Display"}]}"#).is_empty());
     }
 
     #[test]

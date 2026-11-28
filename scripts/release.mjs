@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, platform } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -110,7 +110,24 @@ if (remoteTag) {
   fail(`Tag ${tag} already exists on origin.`);
 }
 
-run("npm", ["run", "tauri", "--", "build", "--bundles", "deb,appimage"]);
+const host = platform();
+const bundleDir = join(root, "src-tauri", "target", "release", "bundle");
+let bundleArgs;
+let packages;
+if (host === "darwin") {
+  bundleArgs = "app,dmg";
+  packages = () => [bundleFile(join(bundleDir, "dmg"), version, ".dmg")];
+} else if (host === "linux") {
+  bundleArgs = "deb,appimage";
+  packages = () => [
+    bundleFile(join(bundleDir, "deb"), version, ".deb"),
+    bundleFile(join(bundleDir, "appimage"), version, ".AppImage"),
+  ];
+} else {
+  fail("Release packages are built on Linux or macOS.");
+}
+
+run("npm", ["run", "tauri", "--", "build", "--bundles", bundleArgs]);
 
 requireReleaseTree();
 const info = JSON.parse(readFileSync(join(root, "build-info.json"), "utf8"));
@@ -118,8 +135,7 @@ if (info.number !== nextNumber) {
   fail(`Expected build ${nextNumber} after the production build, found ${info.number}.`);
 }
 
-const deb = bundleFile(join(root, "src-tauri", "target", "release", "bundle", "deb"), version, ".deb");
-const appImage = bundleFile(join(root, "src-tauri", "target", "release", "bundle", "appimage"), version, ".AppImage");
+const built = packages();
 
 run("git", ["add", "--", "build-info.json"]);
 run("git", ["commit", "-m", `Record production build ${info.number}.`]);
@@ -130,8 +146,7 @@ run("gh", [
   "release",
   "create",
   tag,
-  deb,
-  appImage,
+  ...built,
   "--title",
   `LINE ${version} (build ${info.number})`,
   "--notes",

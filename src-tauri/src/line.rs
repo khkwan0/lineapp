@@ -793,7 +793,8 @@ impl Client {
             let unsent = message_unsent(message);
             let (sticker, fallback) = if unsent { (String::new(), String::new()) } else { sticker_pair(Some(message)) };
             let kind = content_kind(int_field(message, 15));
-            let media_id = if !unsent && (kind == "image" || kind == "video") { ident.clone() } else { String::new() };
+            let heard = message_duration(message);
+            let media_id = if !unsent && (kind == "image" || kind == "video" || kind == "audio") { ident.clone() } else { String::new() };
             let (text, kind, media_id) = finish_body(message, mine, name, text, kind, media_id);
             let mut item = json!({
                 "id": ident,
@@ -809,10 +810,11 @@ impl Client {
                 "sticker": sticker,
                 "stickerFallback": fallback,
                 "kind": kind,
-                "gid": if media_id.is_empty() { String::new() } else { meta_value(message, "GID") },
-                "seq": if media_id.is_empty() { 0 } else { meta_value(message, "GSEQ").parse::<i64>().unwrap_or(0) },
+                "gid": if media_id.is_empty() || kind != "image" && kind != "video" { String::new() } else { meta_value(message, "GID") },
+                "seq": if media_id.is_empty() || kind != "image" && kind != "video" { 0 } else { meta_value(message, "GSEQ").parse::<i64>().unwrap_or(0) },
                 "mediaId": media_id,
                 "animated": !media_id.is_empty() && message_animated(message),
+                "duration": if kind == "audio" { heard } else { 0 },
                 "replyId": reply_target(message),
             });
             attach_reaction(&mut item, message, &me);
@@ -1142,11 +1144,11 @@ impl Client {
     /// to `obs.line-apps.com/r/talk/m/{message id}`. A chat that rejects that with
     /// letter sealing (TalkException 82) encrypts the file and uploads it under
     /// the `emi` / `emv` / `ema` / `emf` object path before the sealed message.
-    pub fn send_media_for_window(&mut self, to: &str, name: &str, mime: &str, bytes: &[u8], album: Option<Album>, silent: bool) -> Json {
+    pub fn send_media_for_window(&mut self, to: &str, name: &str, mime: &str, bytes: &[u8], album: Option<Album>, silent: bool, duration_ms: i64, voice: bool) -> Json {
         if bytes.is_empty() || bytes.len() > MEDIA_LIMIT {
             return send_failure(to, &line("that file is too large to send"));
         }
-        let kind = classify_media(name, mime);
+        let kind = prepare_outgoing(classify_media(name, mime), bytes, duration_ms, voice);
         let album = album.filter(|album| kind.kind == "image" && album_ok(album));
         match self.send_plain_media(to, &kind, bytes, album.as_ref(), silent) {
             Ok(sent) => sent,
@@ -1758,7 +1760,8 @@ impl Client {
                 let mine = !self.session.mid.is_empty() && sender_id == self.session.mid;
                 let name = if mine { "" } else { cards.get(&sender_id).map(|card| card.0.as_str()).unwrap_or("") };
                 let kind = content_kind(int_field(message, 15));
-                let media_id = if !unsent && (kind == "image" || kind == "video") { ident.clone() } else { String::new() };
+                let heard = message_duration(message);
+                let media_id = if !unsent && (kind == "image" || kind == "video" || kind == "audio") { ident.clone() } else { String::new() };
                 let (text, kind, media_id) = finish_body(message, mine, name, text, kind, media_id);
                 let mut thread = json!({
                     "id": ident,
@@ -1772,10 +1775,11 @@ impl Client {
                     "sticker": sticker,
                     "stickerFallback": fallback,
                     "kind": kind,
-                    "gid": if media_id.is_empty() { String::new() } else { meta_value(message, "GID") },
-                    "seq": if media_id.is_empty() { 0 } else { meta_value(message, "GSEQ").parse::<i64>().unwrap_or(0) },
+                    "gid": if media_id.is_empty() || kind != "image" && kind != "video" { String::new() } else { meta_value(message, "GID") },
+                    "seq": if media_id.is_empty() || kind != "image" && kind != "video" { 0 } else { meta_value(message, "GSEQ").parse::<i64>().unwrap_or(0) },
                     "mediaId": media_id,
                     "animated": !media_id.is_empty() && message_animated(message),
+                    "duration": if kind == "audio" { heard } else { 0 },
                     "replyId": reply_target(message),
                 });
                 attach_reaction(&mut thread, message, &self.session.mid);
@@ -2181,8 +2185,12 @@ impl Client {
         meta.push((b"SID".to_vec(), kind.sid.as_bytes().to_vec()));
         meta.push((b"OID".to_vec(), oid.into_bytes()));
         meta.push((b"FILE_SIZE".to_vec(), encrypted.len().to_string().into_bytes()));
-        if kind.code == 14 || kind.code == 3 {
+        if kind.code == 14 || (kind.code == 3 && !kind.voice) {
             meta.push((b"FILE_NAME".to_vec(), kind.name.as_bytes().to_vec()));
+        }
+        if kind.code == 3 && kind.duration_ms > 0 {
+            let heard = kind.duration_ms.to_string().into_bytes();
+            meta.push((b"AUDLEN".to_vec(), heard));
         }
         if kind.code == 1 || kind.code == 2 {
             let info = serde_json::json!({
@@ -3541,6 +3549,8 @@ struct OutgoingMedia {
     extension: String,
     mime: String,
     animated: bool,
+    duration_ms: i64,
+    voice: bool,
 }
 
 fn classify_media(name: &str, mime: &str) -> OutgoingMedia {
@@ -3574,7 +3584,167 @@ fn classify_media(name: &str, mime: &str) -> OutgoingMedia {
         _ => file_name.clone(),
     };
     let mime = if mime_l.is_empty() { fallback_mime.to_string() } else { mime_l };
-    OutgoingMedia { code, obs, sid, kind, label, name: file_name, extension, mime, animated }
+    OutgoingMedia { code, obs, sid, kind, label, name: file_name, extension, mime, animated, duration_ms: 0, voice: false }
+}
+
+/// A held voice note is content type 3 with `AUDLEN` in milliseconds and no file
+/// name, which is how the phone draws a player instead of an attachment.
+fn prepare_outgoing(mut kind: OutgoingMedia, bytes: &[u8], duration_ms: i64, voice: bool) -> OutgoingMedia {
+    if kind.code != 3 {
+        return kind;
+    }
+    if voice {
+        kind.voice = true;
+        kind.label = "Voice message".into();
+        kind.name = "voice.m4a".into();
+        kind.extension = "m4a".into();
+        kind.mime = "audio/mp4".into();
+    }
+    let measured = if duration_ms > 0 { duration_ms } else { audio_duration_ms(bytes) };
+    kind.duration_ms = measured.clamp(0, 3_600_000);
+    kind
+}
+
+fn audio_duration_ms(bytes: &[u8]) -> i64 {
+    wav_duration_ms(bytes).or_else(|| mp4_duration_ms(bytes)).or_else(|| mp3_duration_ms(bytes)).unwrap_or(0)
+}
+
+fn mp3_duration_ms(bytes: &[u8]) -> Option<i64> {
+    let mut index = 0usize;
+    if bytes.len() > 10 && &bytes[..3] == b"ID3" {
+        let size = ((bytes[6] as usize & 0x7f) << 21)
+            | ((bytes[7] as usize & 0x7f) << 14)
+            | ((bytes[8] as usize & 0x7f) << 7)
+            | (bytes[9] as usize & 0x7f);
+        index = 10 + size;
+    }
+    if index + 4 > bytes.len() {
+        return None;
+    }
+    let header = u32::from_be_bytes(bytes[index..index + 4].try_into().ok()?);
+    if header >> 21 != 0x7ff {
+        return None;
+    }
+    let version = (header >> 19) & 0b11;
+    let layer = (header >> 17) & 0b11;
+    let bitrate_index = ((header >> 12) & 0b1111) as usize;
+    let sample_index = (header >> 10) & 0b11;
+    if version == 1 || layer == 0 || bitrate_index == 0 || bitrate_index == 15 || sample_index == 3 {
+        return None;
+    }
+    const MPEG1_L3: [u64; 16] = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
+    const MPEG2_L3: [u64; 16] = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0];
+    let kbps = if version == 3 && layer == 1 { MPEG1_L3[bitrate_index] } else { MPEG2_L3[bitrate_index] };
+    if kbps == 0 {
+        return None;
+    }
+    let payload = bytes.len().saturating_sub(index) as u64;
+    i64::try_from(payload.saturating_mul(8) / kbps).ok().filter(|ms| *ms > 0)
+}
+
+fn wav_duration_ms(bytes: &[u8]) -> Option<i64> {
+    if bytes.len() < 44 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+    let mut index = 12usize;
+    let mut rate = 0u32;
+    let mut channels = 0u16;
+    let mut bits = 0u16;
+    let mut data_len = 0usize;
+    while index + 8 <= bytes.len() {
+        let id = &bytes[index..index + 4];
+        let declared = u32::from_le_bytes([bytes[index + 4], bytes[index + 5], bytes[index + 6], bytes[index + 7]]) as usize;
+        let start = index + 8;
+        if id == b"fmt " && declared >= 16 && start + 16 <= bytes.len() {
+            channels = u16::from_le_bytes([bytes[start + 2], bytes[start + 3]]);
+            rate = u32::from_le_bytes([bytes[start + 4], bytes[start + 5], bytes[start + 6], bytes[start + 7]]);
+            bits = u16::from_le_bytes([bytes[start + 14], bytes[start + 15]]);
+        }
+        if id == b"data" {
+            let available = bytes.len().saturating_sub(start);
+            data_len = if declared == 0 || declared > available { available } else { declared };
+            break;
+        }
+        let step = 8 + declared + (declared % 2);
+        if step == 0 {
+            break;
+        }
+        index = index.saturating_add(step);
+    }
+    let frame = usize::from(channels) * usize::from(bits / 8);
+    if rate == 0 || frame == 0 || data_len < frame {
+        return None;
+    }
+    Some((data_len / frame) as i64 * 1000 / i64::from(rate))
+}
+
+fn mp4_duration_ms(bytes: &[u8]) -> Option<i64> {
+    if bytes.len() < 16 || &bytes[4..8] != b"ftyp" {
+        return None;
+    }
+    mp4_box_duration(bytes, 0)
+}
+
+fn mp4_box_duration(bytes: &[u8], depth: u8) -> Option<i64> {
+    if depth > 6 {
+        return None;
+    }
+    let mut index = 0usize;
+    while index + 8 <= bytes.len() {
+        let mut size = u32::from_be_bytes(bytes[index..index + 4].try_into().ok()?) as u64;
+        let kind = &bytes[index + 4..index + 8];
+        let mut header = 8usize;
+        if size == 1 {
+            if index + 16 > bytes.len() {
+                return None;
+            }
+            size = u64::from_be_bytes(bytes[index + 8..index + 16].try_into().ok()?);
+            header = 16;
+        } else if size == 0 {
+            size = (bytes.len() - index) as u64;
+        }
+        if size < header as u64 || index as u64 + size > bytes.len() as u64 {
+            return None;
+        }
+        let start = index + header;
+        let end = index + size as usize;
+        let body = &bytes[start..end];
+        if kind == b"mvhd" {
+            return mvhd_duration_ms(body);
+        }
+        if matches!(kind, b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl") {
+            if let Some(ms) = mp4_box_duration(body, depth + 1) {
+                return Some(ms);
+            }
+        }
+        index = end;
+    }
+    None
+}
+
+fn mvhd_duration_ms(body: &[u8]) -> Option<i64> {
+    let version = *body.first()?;
+    let (timescale, duration) = if version == 0 {
+        if body.len() < 20 {
+            return None;
+        }
+        let timescale = u32::from_be_bytes(body[12..16].try_into().ok()?);
+        let duration = u32::from_be_bytes(body[16..20].try_into().ok()?);
+        (u64::from(timescale), u64::from(duration))
+    } else if version == 1 {
+        if body.len() < 32 {
+            return None;
+        }
+        let timescale = u32::from_be_bytes(body[20..24].try_into().ok()?);
+        let duration = u64::from_be_bytes(body[24..32].try_into().ok()?);
+        (u64::from(timescale), duration)
+    } else {
+        return None;
+    };
+    if timescale == 0 {
+        return None;
+    }
+    i64::try_from(duration.saturating_mul(1000) / timescale).ok()
 }
 
 fn media_name(raw: &str, ext: &str) -> String {
@@ -3589,15 +3759,15 @@ fn media_name(raw: &str, ext: &str) -> String {
 
 fn plain_media_meta(kind: &OutgoingMedia, size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut meta = vec![(b"FILE_SIZE".to_vec(), size.to_string().into_bytes())];
-    if kind.code == 14 || kind.code == 3 {
+    if kind.code == 14 || (kind.code == 3 && !kind.voice) {
         meta.push((b"FILE_NAME".to_vec(), kind.name.as_bytes().to_vec()));
     }
     if kind.code == 2 {
         meta.push((b"VIDLEN".to_vec(), b"1000".to_vec()));
         meta.push((b"DURATION".to_vec(), b"1000".to_vec()));
     }
-    if kind.code == 3 {
-        meta.push((b"AUDLEN".to_vec(), b"1000".to_vec()));
+    if kind.code == 3 && kind.duration_ms > 0 {
+        meta.push((b"AUDLEN".to_vec(), kind.duration_ms.to_string().into_bytes()));
     }
     if kind.code == 1 || kind.code == 2 {
         let info = serde_json::json!({
@@ -3621,8 +3791,11 @@ fn plain_obs_params(kind: &OutgoingMedia, oid: &str) -> Json {
     if kind.code == 1 || kind.animated {
         params["cat"] = json!("original");
     }
-    if kind.code == 2 || kind.code == 3 {
+    if kind.code == 2 {
         params["duration"] = json!("1000");
+    }
+    if kind.code == 3 && kind.duration_ms > 0 {
+        params["duration"] = json!(kind.duration_ms.to_string());
     }
     params
 }
@@ -3663,6 +3836,7 @@ fn media_sent(mut sent: Json, kind: &OutgoingMedia, album: Option<&Album>) -> Js
         object.insert("mediaId".to_string(), id);
         object.insert("animated".to_string(), json!(kind.animated));
         object.insert("fileName".to_string(), json!(kind.name));
+        object.insert("duration".to_string(), json!(kind.duration_ms));
         if let Some(album) = album.filter(|album| album_ok(album)) {
             object.insert("gid".to_string(), json!(album.id));
             object.insert("seq".to_string(), json!(album.seq));
@@ -3995,11 +4169,23 @@ fn sqr_secret() -> (Vec<u8>, String) {
 }
 
 fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
+    #[cfg(target_os = "linux")]
+    if let Some(name) = std::fs::read_to_string("/proc/sys/kernel/hostname")
         .ok()
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
-        .unwrap_or_else(|| "lineapp".into())
+    {
+        return name;
+    }
+    if let Ok(output) = std::process::Command::new("hostname").output() {
+        if output.status.success() {
+            let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+    "lineapp".into()
 }
 
 fn https(
@@ -4061,11 +4247,7 @@ fn path_segment(value: &str) -> String {
 }
 
 fn media_file(id: &str, preview: bool, animated: bool) -> PathBuf {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-        .unwrap_or_else(std::env::temp_dir);
+    let base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
     let suffix = if animated { "anim" } else if preview { "preview" } else { "full" };
     base.join("lineapp").join("media").join(format!("{id}.{suffix}"))
 }
@@ -4101,7 +4283,7 @@ fn prefer_mime(header: &str, bytes: &[u8]) -> String {
         return sniffed;
     }
     let mime = header.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
-    if mime.starts_with("image/") || mime.starts_with("video/") { mime } else { sniffed }
+    if mime.starts_with("image/") || mime.starts_with("video/") || mime.starts_with("audio/") { mime } else { sniffed }
 }
 
 fn sniff_media(bytes: &[u8]) -> String {
@@ -4118,6 +4300,10 @@ fn sniff_media(bytes: &[u8]) -> String {
         return "image/webp".into();
     }
     if bytes.len() > 12 && &bytes[4..8] == b"ftyp" {
+        let brand = &bytes[8..12];
+        if matches!(brand, b"M4A " | b"M4B " | b"M4P ") {
+            return "audio/mp4".into();
+        }
         return "video/mp4".into();
     }
     if bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) {
@@ -4694,6 +4880,14 @@ fn preview_choice(messages: &[BTreeMap<i16, Value>]) -> (Option<BTreeMap<i16, Va
     (preview, when)
 }
 
+fn message_duration(message: &BTreeMap<i16, Value>) -> i64 {
+    let raw = {
+        let heard = meta_value(message, "AUDLEN");
+        if heard.trim().is_empty() { meta_value(message, "DURATION") } else { heard }
+    };
+    raw.trim().parse::<i64>().ok().filter(|ms| *ms > 0).map(|ms| ms.clamp(1, 3_600_000)).unwrap_or(0)
+}
+
 fn content_kind(code: Option<i64>) -> &'static str {
     match code {
         Some(0) | None => "message",
@@ -4953,11 +5147,18 @@ fn message_preview(message: &BTreeMap<i16, Value>) -> (String, bool) {
     if !body.is_empty() {
         return (body, false);
     }
-    if matches!(kind, "file" | "audio") {
+    if kind == "file" {
         let name = meta_value(message, "FILE_NAME").trim().to_string();
         if !name.is_empty() {
             return (name, false);
         }
+    }
+    if kind == "audio" {
+        let name = meta_value(message, "FILE_NAME").trim().to_string();
+        if !name.is_empty() && !name.eq_ignore_ascii_case("voice.m4a") {
+            return (name, false);
+        }
+        return ("Voice message".into(), false);
     }
     if kind != "message" {
         let mut chars = kind.chars();
@@ -5203,6 +5404,60 @@ mod tests {
         assert_eq!(gif.sid, "emi");
         assert_eq!(classify_media("voice.m4a", "audio/mp4").code, 3);
         assert_eq!(classify_media("notes.pdf", "application/pdf").code, 14);
+        let mut voice = classify_media("voice.m4a", "audio/mp4");
+        voice.voice = true;
+        voice.duration_ms = 3200;
+        let voice_meta = plain_media_meta(&voice, 80);
+        assert_eq!(voice_meta.iter().find(|(key, _)| key == b"AUDLEN").map(|(_, value)| value.as_slice()), Some(b"3200".as_slice()));
+        assert!(voice_meta.iter().all(|(key, _)| key != b"FILE_NAME"));
+        assert_eq!(plain_obs_params(&voice, "9")["duration"], "3200");
+        let song = prepare_outgoing(classify_media("song.mp3", "audio/mpeg"), &[], 0, false);
+        assert!(!song.voice);
+        assert_eq!(song.duration_ms, 0);
+        let note = prepare_outgoing(classify_media("voice.m4a", "audio/mp4"), &[], 1800, true);
+        assert!(note.voice);
+        assert_eq!(note.label, "Voice message");
+        assert_eq!(note.duration_ms, 1800);
+        let wav = {
+            let mut bytes = b"RIFF".to_vec();
+            bytes.extend_from_slice(&36u32.to_le_bytes());
+            bytes.extend_from_slice(b"WAVEfmt ");
+            bytes.extend_from_slice(&16u32.to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&22_050u32.to_le_bytes());
+            bytes.extend_from_slice(&44_100u32.to_le_bytes());
+            bytes.extend_from_slice(&2u16.to_le_bytes());
+            bytes.extend_from_slice(&16u16.to_le_bytes());
+            bytes.extend_from_slice(b"data");
+            bytes.extend_from_slice(&(22_050u32 * 2).to_le_bytes());
+            bytes.extend(std::iter::repeat(0u8).take(22_050 * 2));
+            let size = (bytes.len() - 8) as u32;
+            bytes[4..8].copy_from_slice(&size.to_le_bytes());
+            bytes
+        };
+        assert_eq!(audio_duration_ms(&wav), 1000);
+        let mut moov = Vec::new();
+        let mut mvhd = vec![0u8, 0, 0, 0];
+        mvhd.extend_from_slice(&[0; 8]);
+        mvhd.extend_from_slice(&1000u32.to_be_bytes());
+        mvhd.extend_from_slice(&2500u32.to_be_bytes());
+        let mut mvhd_box = (8 + mvhd.len() as u32).to_be_bytes().to_vec();
+        mvhd_box.extend_from_slice(b"mvhd");
+        mvhd_box.extend(mvhd);
+        let mut moov_box = (8 + mvhd_box.len() as u32).to_be_bytes().to_vec();
+        moov_box.extend_from_slice(b"moov");
+        moov_box.extend(mvhd_box);
+        moov.extend_from_slice(&32u32.to_be_bytes());
+        moov.extend_from_slice(b"ftyp");
+        moov.extend_from_slice(b"M4A ");
+        moov.extend(std::iter::repeat(0u8).take(20));
+        moov.extend(moov_box);
+        assert_eq!(audio_duration_ms(&moov), 2500);
+        assert_eq!(sniff_media(&moov), "audio/mp4");
+        let mut heard = BTreeMap::new();
+        heard.insert(18, Value::Map(vec![(Value::Bytes(b"AUDLEN".to_vec()), Value::Bytes(b"1800".to_vec()))]));
+        assert_eq!(message_duration(&heard), 1800);
         let frame = thrift::write_call("sendMessage", &content_fields("uabc", photo.code, &plain_media_meta(&photo, 12), 4, false, false));
         let quiet = thrift::write_call("sendMessage", &send_fields("uabc", "Xo", 4, "", true));
         let quiet = thrift::read_message(&quiet).unwrap();

@@ -79,17 +79,19 @@ machine, `26.6.0.4004`.
 
 ## Requirements
 
-These packages are for 64-bit x86 Linux. The window needs a graphical session,
-X11 or Wayland. A release build needs a few gigabytes of free memory and
-several gigabytes free under `src-tauri/target`. The running app needs
-outbound HTTPS to `legy-jp.line-apps.com`. Older `mid:secret` tokens also
-open `gf.line.naver.jp`. The webview loads profile pictures and stickers from
-LINE.
+A release build needs a few gigabytes of free memory and several gigabytes free under `src-tauri/target`. The running app needs outbound HTTPS to `legy-jp.line-apps.com`. Older `mid:secret` tokens also open `gf.line.naver.jp`. The webview loads profile pictures and stickers from LINE.
 
-To compile:
+To compile on either system:
 
 - Rust 1.90 or newer. Tauri 2.12 requires that compiler. The `rust-version` field in `src-tauri/Cargo.toml` is still `1.77`.
 - Node.js 20 or newer, with npm. Vite 6 also accepts Node.js 18.
+
+### Linux
+
+These packages are for 64-bit x86 Linux. The window needs a graphical session, X11 or Wayland.
+
+To compile:
+
 - A C toolchain and `pkg-config`. On Debian or Ubuntu install `build-essential`, `pkg-config`, `libwebkit2gtk-4.1-dev`, `libdbus-1-dev`, and `libayatana-appindicator3-dev`. WebKitGTK 4.1 brings GTK 3 with it. The packager looks up `ayatana-appindicator3-0.1` through pkg-config. The runtime library `libayatana-appindicator3-1` does not ship that file; the `-dev` package does. SQLite is bundled, so there is no separate SQLite package.
 - An AppImage package also needs `file` and `patchelf` on the build machine. The first AppImage build downloads `linuxdeploy` and `appimagetool`.
 
@@ -99,6 +101,14 @@ To run a development build or the `.deb`:
 - `libayatana-appindicator3-1` or `libappindicator3-1` for the tray icon.
 
 The AppImage carries WebKitGTK 4.1, GTK 3, their modules and schemas, the WebKit helper processes, and the tray library. It still uses the host C library, libstdc++, the GPU libraries (`libGL`, `libEGL`, `libdrm`), X11 or Wayland, and fontconfig. AppImage leaves those out: a bundled GPU driver only works on the build machine, and the format cannot carry glibc. Mounting the image needs `libfuse2`. `APPIMAGE_EXTRACT_AND_RUN=1` skips FUSE and unpacks it instead. The image runs where glibc and libstdc++ are at least as new as on the machine that built it.
+
+### macOS
+
+The Mac build needs the Xcode command-line tools (`xcode-select --install`). There is no WebKit or GTK package: the window is the system WebKit. Voice typing records with CoreAudio and asks for the microphone. Voice notes are encoded with `/usr/bin/afconvert`. Transcription still needs `whisper-cli` on `PATH` or in the app's speech directory, the same as on Linux. Opening a link uses `open`.
+
+`src-tauri/tauri.macos.conf.json` selects the `app` and `dmg` packages and merges `Info.plist`, which carries the microphone and camera usage strings. The first time voice typing runs, macOS shows that prompt. A development binary embeds the same plist so the prompt is available from `tauri dev`.
+
+`src-tauri/.cargo/config.toml` forces `PKG_CONFIG_PATH` at this machine's Linux WebKit sysroot. Cargo reads that file on every operating system. The Mac build links the system frameworks and does not use those libraries. If a Mac build stops in `pkg-config` because a Homebrew package is missing, comment out that `[env]` table so the Linux path does not replace `PKG_CONFIG_PATH`.
 
 ## Desktop window
 
@@ -110,7 +120,7 @@ cd ~/dev/lineapp
 npm run tauri dev
 ```
 
-That starts Vite and opens the window against it. A production build compiles the frontend, then a release binary, then the Linux packages configured in `src-tauri/tauri.conf.json` (`deb` and `appimage`):
+That starts Vite and opens the window against it. A production build compiles the frontend, then a release binary, then the packages for the machine you are on. Linux uses `deb` and `appimage` from `src-tauri/tauri.conf.json`. macOS uses `app` and `dmg` from `src-tauri/tauri.macos.conf.json`.
 
 ```bash
 . "$HOME/.cargo/env"
@@ -118,17 +128,28 @@ cd ~/dev/lineapp
 npm run tauri build -- --bundles deb,appimage
 ```
 
-Pass one target to build only that package. The packages are written to:
+On macOS:
+
+```bash
+npm run tauri build -- --bundles app,dmg
+```
+
+`npm run tauri build` with no bundle list uses the config for the current system. Pass one target to build only that package. The packages are written to:
 
 - `src-tauri/target/release/bundle/deb/line_0.1.0_amd64.deb`
 - `src-tauri/target/release/bundle/appimage/LINE_0.1.0_amd64.AppImage`
+- `src-tauri/target/release/bundle/macos/LINE.app`
+- `src-tauri/target/release/bundle/dmg/LINE_0.1.0_aarch64.dmg` (or `x64` on an Intel Mac)
 
 `productName` is `LINE`, so the Debian package name is `line`. Installing it next to the official LINE package will collide. The first AppImage build downloads `linuxdeploy` and `appimagetool`. `linuxdeploy` copies the libraries the binary links, including WebKit and GTK, and its GTK plugin copies the modules and schemas. Mounting the finished image needs FUSE.
 
 The session is stored in `lineapp.local.json` (mode 0600) under the app config
-directory: `$XDG_CONFIG_HOME/dev.lineapp.desktop`, or
-`~/.config/dev.lineapp.desktop` when that variable is unset. The chat database
-and tray settings sit in the same directory. A debug build copies a session
+directory. On Linux that is `$XDG_CONFIG_HOME/dev.lineapp.desktop`, or
+`~/.config/dev.lineapp.desktop` when that variable is unset. On macOS it is
+`~/Library/Application Support/dev.lineapp.desktop`. The chat database
+and tray settings sit in the same directory. Photos and videos are cached under
+the system cache directory (`~/.cache/lineapp` on Linux,
+`~/Library/Caches/lineapp` on macOS). A debug build copies a session
 left at the repo root into that directory the first time the new file is
 missing. A release build does not look at the repo.
 

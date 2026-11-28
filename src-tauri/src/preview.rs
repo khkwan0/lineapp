@@ -29,25 +29,43 @@ static CACHE: Mutex<Vec<(String, Cached)>> = Mutex::new(Vec::new());
 
 pub fn open_in_browser(raw: &str) -> Result<(), String> {
     let url = parse_https(raw)?;
-    let hint = browser_hint();
-    focus_browser(&hint);
-    std::process::Command::new("xdg-open")
-        .arg(url.as_str())
+    #[cfg(target_os = "linux")]
+    {
+        let hint = browser_hint();
+        focus_browser(&hint);
+        launch("xdg-open", url.as_str())?;
+        if !hint.is_empty() {
+            let later = hint;
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(600));
+                focus_browser(&later);
+            });
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        launch("open", url.as_str())?;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = url;
+        return Err("could not open that link".into());
+    }
+    Ok(())
+}
+
+fn launch(program: &str, url: &str) -> Result<(), String> {
+    std::process::Command::new(program)
+        .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|err| format!("could not open that link: {err}"))?;
-    if !hint.is_empty() {
-        let later = hint;
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(600));
-            focus_browser(&later);
-        });
-    }
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn browser_hint() -> String {
     let Ok(output) = std::process::Command::new("xdg-mime").args(["query", "default", "x-scheme-handler/https"]).output() else {
         return String::new();
@@ -74,6 +92,7 @@ fn script_id(reply: &str) -> Option<u32> {
     inner.parse().ok()
 }
 
+#[cfg(target_os = "linux")]
 fn focus_browser(hint: &str) {
     if hint.is_empty() {
         return;
@@ -143,6 +162,7 @@ for (var i = stack.length - 1; i >= 0; i--) {{
     let _ = std::fs::remove_file(path);
 }
 
+#[cfg(target_os = "linux")]
 fn gdbus(args: &[&str]) -> Option<String> {
     let output = std::process::Command::new("gdbus").args(args).output().ok()?;
     if !output.status.success() {

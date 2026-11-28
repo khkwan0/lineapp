@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>LINE uses the microphone for voice typing.</string>
+  <key>NSCameraUsageDescription</key>
+  <string>LINE uses the camera when this Mac is asked for one.</string>
+</dict>
+</plist>

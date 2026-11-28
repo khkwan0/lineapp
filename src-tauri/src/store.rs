@@ -31,6 +31,12 @@ pub fn db_path() -> PathBuf {
     line::config_path().with_file_name("lineapp.db")
 }
 
+pub(crate) fn with_db<T>(f: impl FnOnce(&Connection) -> Result<T, String>) -> Result<T, String> {
+    let _guard = LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    let conn = connect(&db_path())?;
+    f(&conn)
+}
+
 pub fn clear() {
     let path = db_path();
     let _guard = LOCK.lock().unwrap_or_else(|err| err.into_inner());
