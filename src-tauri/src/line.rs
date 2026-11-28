@@ -743,53 +743,88 @@ impl Client {
         self.require_token()?;
         let page = self.message_page("getRecentMessagesV2", &[(2, bin(mid)), (3, Field::I32(HISTORY_PAGE))])?;
         let mut collected = take_messages(&[], &page);
-        if page.len() >= HISTORY_PAGE as usize {
+        let mut exhausted = page.len() < HISTORY_PAGE as usize;
+        if !exhausted {
             while collected.len() < HISTORY_TARGET {
                 let oldest = collected.iter().min_by_key(|message| message_time(message)).cloned();
-                let Some(oldest) = oldest else { break };
+                let Some(oldest) = oldest else {
+                    exhausted = true;
+                    break;
+                };
                 let ident = text_field(&oldest, 4);
-                if !ident.chars().all(|ch| ch.is_ascii_digit()) || ident.is_empty() {
+                if !message_id_ok(&ident) {
+                    exhausted = true;
                     break;
                 }
-                let older = self.message_page(
-                    "getPreviousMessagesV2WithRequest",
-                    &[(
-                        2,
-                        Field::Struct(vec![
-                            (1, bin(mid)),
-                            (2, Field::Struct(vec![
-                                (1, Field::I64(message_time(&oldest))),
-                                (2, Field::I64(ident.parse().unwrap_or(0))),
-                            ])),
-                            (3, Field::I32(HISTORY_PAGE)),
-                        ]),
-                    )],
-                )?;
+                let older = self.previous_page(mid, message_time(&oldest), ident.parse().unwrap_or(0))?;
                 let before = collected.len();
                 let older_len = older.len();
                 collected = take_messages(&collected, &older);
                 if collected.len() == before || older_len < HISTORY_PAGE as usize {
+                    exhausted = true;
                     break;
                 }
             }
         }
         collected.sort_by_key(message_time);
-        if collected.len() > HISTORY_TARGET {
-            collected = collected.split_off(collected.len() - HISTORY_TARGET);
+        let messages = self.present_messages(mid, &collected)?;
+        Ok(json!({
+            "type": "history",
+            "id": mid,
+            "lastMessageId": latest_message_id(&collected),
+            "messages": messages,
+            "older": !exhausted,
+        }))
+    }
+
+    /// One page of messages older than a saved LINE message id.
+    pub fn previous_messages(&mut self, mid: &str, before_time: i64, before_id: &str) -> Result<Json, LineError> {
+        self.require_token()?;
+        if !message_id_ok(before_id) {
+            return Err(line("that message has no earlier history"));
         }
+        let id = before_id.parse::<i64>().map_err(|_| line("that message has no earlier history"))?;
+        let page = self.previous_page(mid, before_time, id)?;
+        let exhausted = page.len() < HISTORY_PAGE as usize;
+        let mut collected = take_messages(&[], &page);
+        collected.sort_by_key(message_time);
+        let mut messages = self.present_messages(mid, &collected)?;
+        messages.retain(|message| message.get("id").and_then(|value| value.as_str()) != Some(before_id));
+        Ok(json!({"type": "history", "id": mid, "messages": messages, "end": exhausted}))
+    }
+
+    fn previous_page(&mut self, mid: &str, time: i64, id: i64) -> Result<Vec<BTreeMap<i16, Value>>, LineError> {
+        self.message_page(
+            "getPreviousMessagesV2WithRequest",
+            &[(
+                2,
+                Field::Struct(vec![
+                    (1, bin(mid)),
+                    (2, Field::Struct(vec![(1, Field::I64(time)), (2, Field::I64(id))])),
+                    (3, Field::I32(HISTORY_PAGE)),
+                ]),
+            )],
+        )
+    }
+
+    fn present_messages(&mut self, mid: &str, collected: &[BTreeMap<i16, Value>]) -> Result<Vec<Json>, LineError> {
         let mut senders: Vec<String> = collected
             .iter()
             .map(|message| text_field(message, 1))
             .filter(|sender| !sender.is_empty() && sender != &self.session.mid)
             .collect();
-        for message in &collected {
+        for message in collected {
             senders.extend(event_mids(message).into_iter().filter(|mid| mid != &self.session.mid));
+            let shared = contact_mid_meta(message);
+            if !shared.is_empty() && shared != self.session.mid {
+                senders.push(shared);
+            }
         }
         let cards = self.contact_cards(&senders);
         let me = self.session.mid.clone();
         let marks = self.read_marks(mid);
         let mut messages = Vec::new();
-        for message in &collected {
+        for message in collected {
             let (text, sealed) = self.visible_text(message, &cards);
             if text.is_empty() {
                 continue;
@@ -826,10 +861,11 @@ impl Client {
                 "duration": if kind == "audio" { heard } else { 0 },
                 "replyId": reply_target(message),
             });
+            self.decorate_contact(&mut item, message, &cards);
             attach_reaction(&mut item, message, &me);
             messages.push(item);
         }
-        Ok(json!({"type": "history", "id": mid, "lastMessageId": latest_message_id(&collected), "messages": messages}))
+        Ok(messages)
     }
 
     /// `TalkService.sendChatChecked`: the desktop call that moves the read cursor.
@@ -1177,12 +1213,37 @@ impl Client {
             return send_failure(to, &line("that sticker cannot be sent"));
         }
         let meta = sticker_meta(package_id, sticker_id, animated);
-        match self.send_content(to, 7, &meta, &[], true, false) {
+        match self.send_content(to, 7, &meta, &[], true, false, "") {
             Ok(sent) => self.finish_sticker(sent, package_id, sticker_id, animated),
             Err(err) if needs_seal(&err) => {
                 let raw = sticker_body(&meta);
-                match self.send_sealed_content(to, 7, &meta, &raw) {
+                match self.send_sealed_content(to, 7, &meta, &raw, "") {
                     Ok(sent) => self.finish_sticker(sent, package_id, sticker_id, animated),
+                    Err(sealed) => send_failure(to, &sealed),
+                }
+            }
+            Err(err) => send_failure(to, &err),
+        }
+    }
+
+    /// `contentType` 13. The contact's mid is metadata `mid`, and the name at
+    /// send time is `displayName` and the message text. A chat that rejects the
+    /// plain send with letter sealing encrypts that same metadata.
+    pub fn send_contact_for_window(&mut self, to: &str, mid: &str) -> Json {
+        if !user_mid_ok(mid) {
+            return send_failure(to, &line("that contact cannot be sent"));
+        }
+        let cards = self.people_cards(&[mid.to_string()]);
+        let card = cards.get(mid);
+        let name = contact_label(card.and_then(|item| item.get("name")).and_then(|value| value.as_str()).unwrap_or(""));
+        let picture = card.and_then(|item| item.get("picture")).and_then(|value| value.as_str()).unwrap_or("").to_string();
+        let meta = contact_meta(mid, &name);
+        match self.send_content(to, 13, &meta, &[], false, false, &name) {
+            Ok(sent) => self.finish_contact(sent, mid, &name, &picture),
+            Err(err) if needs_seal(&err) => {
+                let raw = sticker_body(&meta);
+                match self.send_sealed_content(to, 13, &meta, &raw, &name) {
+                    Ok(sent) => self.finish_contact(sent, mid, &name, &picture),
                     Err(sealed) => send_failure(to, &sealed),
                 }
             }
@@ -1910,6 +1971,10 @@ impl Client {
                 if id.starts_with('u') {
                     people.push(id.clone());
                 }
+                let shared = contact_mid_meta(message);
+                if !shared.is_empty() && shared != me {
+                    people.push(shared);
+                }
             }
         }
         let cards = self.contact_cards(&people);
@@ -2084,6 +2149,7 @@ impl Client {
                     "duration": if kind == "audio" { heard } else { 0 },
                     "replyId": reply_target(message),
                 });
+                self.decorate_contact(&mut thread, message, cards);
                 attach_reaction(&mut thread, message, &self.session.mid);
                 item["thread"] = thread;
             }
@@ -2442,7 +2508,7 @@ impl Client {
     fn send_plain_media(&mut self, to: &str, kind: &OutgoingMedia, bytes: &[u8], album: Option<&Album>, silent: bool) -> Result<Json, LineError> {
         let mut meta = plain_media_meta(kind, bytes.len());
         push_album(&mut meta, album);
-        let sent = self.send_content(to, kind.code, &meta, &[], false, silent)?;
+        let sent = self.send_content(to, kind.code, &meta, &[], false, silent, "")?;
         let id = sent.get("messageId").and_then(|value| value.as_str()).unwrap_or("").to_string();
         if let Err(err) = self.obs_post(&format!("/r/talk/m/{id}"), bytes, &plain_obs_params(kind, &id)) {
             // A reused request number comes back as an older photo. That photo is
@@ -2509,13 +2575,13 @@ impl Client {
             meta.push((b"MEDIA_CONTENT_INFO".to_vec(), info.to_string().into_bytes()));
         }
         push_album(&mut meta, album);
-        let sent = self.send_content(to, kind.code, &meta, &chunks, false, silent)?;
+        let sent = self.send_content(to, kind.code, &meta, &chunks, false, silent, "")?;
         let id = sent.get("messageId").and_then(|value| value.as_str()).unwrap_or("").to_string();
         cache_sent_media(&id, kind, bytes);
         Ok(media_sent(sent, kind, album))
     }
 
-    fn send_sealed_content(&mut self, to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], body: &[u8]) -> Result<Json, LineError> {
+    fn send_sealed_content(&mut self, to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], body: &[u8], text: &str) -> Result<Json, LineError> {
         let (private, sender_key, receiver_public, receiver_key, spec) = self.seal_material(to)?;
         let chunks = seal_raw(
             &private,
@@ -2531,16 +2597,16 @@ impl Client {
         .map_err(|err| line_code(err, Some(82), "E2EE_RETRY_ENCRYPT"))?;
         let mut full = e2ee_meta(spec, content_type);
         full.extend(meta.iter().cloned());
-        self.send_content(to, content_type, &full, &chunks, true, false)
+        self.send_content(to, content_type, &full, &chunks, true, false, text)
     }
 
-    fn send_content(&mut self, to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], chunks: &[Vec<u8>], has_content: bool, silent: bool) -> Result<Json, LineError> {
+    fn send_content(&mut self, to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], chunks: &[Vec<u8>], has_content: bool, silent: bool, body: &str) -> Result<Json, LineError> {
         self.require_token()?;
         let seq = self.next_seq();
         let call = if chunks.is_empty() {
-            content_fields(to, content_type, meta, seq, has_content, silent)
+            content_fields(to, content_type, meta, seq, has_content, silent, body)
         } else {
-            sealed_content_fields(to, content_type, meta, chunks, seq, has_content, silent)
+            sealed_content_fields(to, content_type, meta, chunks, seq, has_content, silent, body)
         };
         let success = self.talk("sendMessage", &call)?.ok_or_else(|| line("empty send response"))?;
         let fields = as_struct(&success)?;
@@ -2602,6 +2668,78 @@ impl Client {
             object.insert("stickerFallback".to_string(), json!(fallback));
         }
         sent
+    }
+
+    fn finish_contact(&self, sent: Json, mid: &str, name: &str, picture: &str) -> Json {
+        let label = if name.is_empty() { "Contact".to_string() } else { name.to_string() };
+        let mut sent = sent;
+        if let Some(object) = sent.as_object_mut() {
+            object.insert("text".to_string(), json!(label));
+            object.insert("kind".to_string(), json!("contact"));
+            object.insert("contactId".to_string(), json!(mid));
+            object.insert("contactName".to_string(), json!(label));
+            object.insert("contactPicture".to_string(), json!(picture));
+        }
+        sent
+    }
+
+    fn shared_contact(&mut self, message: &BTreeMap<i16, Value>) -> Option<(String, String)> {
+        if int_field(message, 15) != Some(13) || message_unsent(message) {
+            return None;
+        }
+        let mut mid = meta_text(message, &["mid", "MID", "contactMid"]);
+        let mut name = meta_text(message, &["displayName", "DISPLAY_NAME"]);
+        if !user_mid_ok(&mid) || name.is_empty() {
+            if let Some(payload) = self.sealed_payload(message) {
+                if !user_mid_ok(&mid) {
+                    mid = contact_json(&payload, &["mid", "MID", "contactMid"]);
+                }
+                if name.is_empty() {
+                    name = contact_json(&payload, &["displayName", "DISPLAY_NAME"]);
+                }
+            }
+        }
+        if name.is_empty() {
+            let body = text_field(message, 10);
+            let body = body.trim();
+            if !body.is_empty() && !body.eq_ignore_ascii_case("contact") {
+                name = body.to_string();
+            }
+        }
+        if !user_mid_ok(&mid) {
+            mid.clear();
+        }
+        if mid.is_empty() && name.is_empty() {
+            return None;
+        }
+        Some((mid, contact_label(&name)))
+    }
+
+    fn decorate_contact(&mut self, item: &mut Json, message: &BTreeMap<i16, Value>, cards: &HashMap<String, (String, String)>) {
+        let Some((mid, mut name)) = self.shared_contact(message) else { return };
+        let looked = if mid.is_empty() { None } else { cards.get(&mid) };
+        if name.is_empty() {
+            name = looked.map(|card| contact_label(&card.0)).unwrap_or_default();
+        }
+        let mut picture = looked.map(|card| card.1.clone()).unwrap_or_default();
+        if picture.is_empty() && user_mid_ok(&mid) && looked.is_none() {
+            let fetched = self.contact_cards(&[mid.clone()]);
+            if name.is_empty() {
+                name = fetched.get(&mid).map(|card| contact_label(&card.0)).unwrap_or_default();
+            }
+            picture = fetched.get(&mid).map(|card| card.1.clone()).unwrap_or_default();
+        }
+        if name.is_empty() {
+            name = "Contact".into();
+        }
+        let Some(object) = item.as_object_mut() else { return };
+        object.insert("contactId".to_string(), json!(mid));
+        object.insert("contactName".to_string(), json!(name));
+        object.insert("contactPicture".to_string(), json!(picture));
+        let text = object.get("text").and_then(|value| value.as_str()).unwrap_or("");
+        if text.is_empty() || text.eq_ignore_ascii_case("contact") || text.to_ascii_lowercase().starts_with("letter-sealed") {
+            object.insert("text".to_string(), json!(name));
+        }
     }
 
     fn obs_post(&self, path: &str, body: &[u8], params: &Json) -> Result<String, LineError> {
@@ -2768,6 +2906,12 @@ impl Client {
         if let Some(line) = event_sentence(message, cards, &me) {
             return (line, false);
         }
+        if int_field(message, 15) == Some(13) && !message_unsent(message) {
+            if let Some((_, name)) = self.shared_contact(message) {
+                let label = if name.is_empty() { "Contact".to_string() } else { name };
+                return (label, false);
+            }
+        }
         message_preview(message)
     }
 
@@ -2781,6 +2925,10 @@ impl Client {
         }
         if let Some(opened) = self.open_sealed_text(message) {
             return (opened, false);
+        }
+        if int_field(message, 15) == Some(13) && self.shared_contact(message).is_some() {
+            let (text, _) = chat_preview(message, sender_name);
+            return (text, false);
         }
         chat_preview(message, sender_name)
     }
@@ -3248,8 +3396,8 @@ impl Client {
 
     pub fn group_roster(&mut self, mid: &str) -> Result<Json, LineError> {
         self.require_token()?;
-        if !group_mid_ok(mid) {
-            return Err(line("that group cannot be opened"));
+        if !chat_mid_ok(mid) {
+            return Err(line("that chat cannot be opened"));
         }
         let chat = self.one_chat(mid, true, false)?;
         let facts = roster_facts(&chat)?;
@@ -3281,6 +3429,8 @@ impl Client {
             "picture": facts.picture,
             "autoJoin": facts.auto_join,
             "canRemove": can_remove,
+            "inviteUrl": invite_url(&facts.ticket),
+            "inviteEnabled": !facts.ticket_disabled,
             "members": members,
         }))
     }
@@ -3629,6 +3779,193 @@ impl Client {
             "name": name,
             "members": targets.len() as i64 + 1,
         }))
+    }
+
+    pub fn create_room(&mut self, targets: &[String]) -> Result<Json, LineError> {
+        self.require_token()?;
+        self.checked_targets(targets)?;
+        let seq = self.next_seq();
+        let members: Vec<Field> = targets.iter().map(bin).collect();
+        let created = match self.talk(
+            "createRoomV2",
+            &[(1, Field::I32(seq)), (2, Field::List(thrift::BINARY, members))],
+        ) {
+            Ok(Some(value)) => Some(value),
+            Ok(None) | Err(_) => {
+                let seq = self.next_seq();
+                let members: Vec<Field> = targets.iter().map(bin).collect();
+                self.talk(
+                    "createChat",
+                    &[(
+                        1,
+                        Field::Struct(vec![
+                            (1, Field::I32(seq)),
+                            (2, Field::I32(1)),
+                            (3, bin("")),
+                            (4, Field::Set(thrift::BINARY, members)),
+                        ]),
+                    )],
+                )
+                .map_err(|_| line("LINE could not create that room."))?
+            }
+        };
+        let id = created.as_ref().map(first_chat_mid).unwrap_or_default();
+        if !room_mid_ok(&id) && !group_mid_ok(&id) {
+            return Err(line("LINE created the room, but did not return the chat."));
+        }
+        Ok(json!({
+            "id": id,
+            "kind": chat_kind(&id),
+            "members": targets.len() as i64 + 1,
+        }))
+    }
+
+    pub fn leave_chat(&mut self, mid: &str) -> Result<(), LineError> {
+        self.require_token()?;
+        if !chat_mid_ok(mid) {
+            return Err(line("that chat cannot be left"));
+        }
+        let seq = self.next_seq();
+        if mid.starts_with('r') {
+            self.talk("leaveRoom", &[(1, Field::I32(seq)), (2, bin(mid))])?;
+            return Ok(());
+        }
+        self.talk(
+            "deleteSelfFromChat",
+            &[(
+                1,
+                Field::Struct(vec![(1, Field::I32(seq)), (2, bin(mid))]),
+            )],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_group_picture(&mut self, mid: &str, bytes: &[u8]) -> Result<Json, LineError> {
+        self.require_token()?;
+        if !group_mid_ok(mid) {
+            return Err(line("that group cannot be opened"));
+        }
+        let jpeg = profile_jpeg(bytes, false)?;
+        let oid = self.obs_post(
+            &format!("/r/talk/g/{mid}"),
+            &jpeg,
+            &json!({"name": "group.jpg", "ver": "2.0", "type": "image"}),
+        )?;
+        let path = group_picture_path(&oid);
+        if path.is_empty() {
+            return Err(line("LINE did not accept that photo"));
+        }
+        self.write_group_picture(mid, &path)?;
+        let mut roster = self.group_roster(mid)?;
+        if roster.get("picture").and_then(|value| value.as_str()).unwrap_or("").is_empty() {
+            roster["picture"] = json!(picture_url(&path));
+        }
+        Ok(roster)
+    }
+
+    pub fn clear_group_picture(&mut self, mid: &str) -> Result<Json, LineError> {
+        self.require_token()?;
+        if !group_mid_ok(mid) {
+            return Err(line("that group cannot be opened"));
+        }
+        self.write_group_picture(mid, "")?;
+        self.group_roster(mid)
+    }
+
+    pub fn reissue_group_ticket(&mut self, mid: &str) -> Result<Json, LineError> {
+        self.require_token()?;
+        if !group_mid_ok(mid) {
+            return Err(line("that group cannot be opened"));
+        }
+        let seq = self.next_seq();
+        let issued = self
+            .talk(
+                "reissueChatTicket",
+                &[(1, Field::Struct(vec![(1, Field::I32(seq)), (2, bin(mid))]))],
+            )
+            .map_err(|_| line("LINE could not reset that invite link."))?;
+        let ticket = issued.as_ref().map(first_ticket).unwrap_or_default();
+        let mut roster = self.group_roster(mid).unwrap_or_else(|_| json!({"id": mid}));
+        let url = invite_url(&ticket);
+        if !url.is_empty() {
+            if let Some(object) = roster.as_object_mut() {
+                object.insert("inviteUrl".into(), json!(url));
+                object.insert("inviteEnabled".into(), json!(true));
+            }
+        }
+        if roster.get("inviteUrl").and_then(|value| value.as_str()).unwrap_or("").is_empty() {
+            return Err(line("LINE could not reset that invite link."));
+        }
+        Ok(roster)
+    }
+
+    pub fn set_group_invite_link(&mut self, mid: &str, enabled: bool) -> Result<Json, LineError> {
+        self.require_token()?;
+        if !group_mid_ok(mid) {
+            return Err(line("that group cannot be opened"));
+        }
+        let seq = self.next_seq();
+        self.talk(
+            "updateChat",
+            &[(
+                1,
+                Field::Struct(vec![
+                    (1, Field::I32(seq)),
+                    (
+                        2,
+                        Field::Struct(vec![
+                            (1, Field::I32(0)),
+                            (2, bin(mid)),
+                            (
+                                8,
+                                Field::Struct(vec![(1, Field::Struct(vec![(7, Field::Bool(!enabled))]))]),
+                            ),
+                        ]),
+                    ),
+                    (3, Field::I32(16)),
+                ]),
+            )],
+        )
+        .map_err(|_| line("LINE could not update that invite link."))?;
+        let mut roster = self.group_roster(mid)?;
+        if let Some(object) = roster.as_object_mut() {
+            object.insert("inviteEnabled".into(), json!(enabled));
+        }
+        Ok(roster)
+    }
+
+    fn checked_targets(&self, targets: &[String]) -> Result<(), LineError> {
+        if targets.is_empty() {
+            return Err(line("Choose at least one friend."));
+        }
+        if targets.len() > 100 {
+            return Err(line("Choose fewer friends."));
+        }
+        let mine = self.session.mid.clone();
+        if targets.iter().any(|id| !user_mid_ok(id) || id == &mine) {
+            return Err(line("That person cannot be added."));
+        }
+        Ok(())
+    }
+
+    fn write_group_picture(&mut self, mid: &str, path: &str) -> Result<(), LineError> {
+        let seq = self.next_seq();
+        self.talk(
+            "updateChat",
+            &[(
+                1,
+                Field::Struct(vec![
+                    (1, Field::I32(seq)),
+                    (
+                        2,
+                        Field::Struct(vec![(1, Field::I32(0)), (2, bin(mid)), (7, bin(path))]),
+                    ),
+                    (3, Field::I32(2)),
+                ]),
+            )],
+        )
+        .map_err(|_| line("LINE did not accept that photo"))?;
+        Ok(())
     }
 
     fn recommendation_ids(&mut self) -> Result<Vec<String>, LineError> {
@@ -4304,6 +4641,48 @@ fn temp_object_id() -> String {
     format!("reqid-{hex}")
 }
 
+fn contact_label(name: &str) -> String {
+    name.trim().chars().take(80).collect()
+}
+
+fn contact_meta(mid: &str, name: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut meta = vec![(b"mid".to_vec(), mid.as_bytes().to_vec())];
+    let name = contact_label(name);
+    if !name.is_empty() {
+        meta.push((b"displayName".to_vec(), name.into_bytes()));
+    }
+    meta
+}
+
+fn meta_text(message: &BTreeMap<i16, Value>, names: &[&str]) -> String {
+    for name in names {
+        let value = meta_value(message, name).trim().to_string();
+        if !value.is_empty() {
+            return value;
+        }
+    }
+    String::new()
+}
+
+fn contact_json(value: &Json, names: &[&str]) -> String {
+    for name in names {
+        let Some(text) = value.get(*name).and_then(|item| item.as_str()) else { continue };
+        let text = text.trim();
+        if !text.is_empty() {
+            return text.to_string();
+        }
+    }
+    String::new()
+}
+
+fn contact_mid_meta(message: &BTreeMap<i16, Value>) -> String {
+    if int_field(message, 15) != Some(13) || message_unsent(message) {
+        return String::new();
+    }
+    let mid = meta_text(message, &["mid", "MID", "contactMid"]);
+    if user_mid_ok(&mid) { mid } else { String::new() }
+}
+
 fn sticker_id_ok(id: &str) -> bool {
     !id.is_empty() && id.len() <= 16 && id.chars().all(|ch| ch.is_ascii_digit())
 }
@@ -4782,12 +5161,12 @@ fn bool_or(fields: &BTreeMap<i16, Value>, id: i16, fallback: bool) -> bool {
     }
 }
 
-fn content_fields(to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], seq: i32, has_content: bool, silent: bool) -> Vec<(i16, Field)> {
+fn content_fields(to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], seq: i32, has_content: bool, silent: bool, body: &str) -> Vec<(i16, Field)> {
     let mut message = vec![
         (2, bin(to)),
         (5, Field::I64(0)),
         (6, Field::I64(0)),
-        (10, bin("")),
+        (10, bin(body)),
         (14, Field::Bool(has_content)),
         (15, Field::I32(content_type)),
         (18, Field::MapBin(meta_with_quiet(meta, silent))),
@@ -4799,12 +5178,12 @@ fn content_fields(to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], seq:
     vec![(1, Field::I32(seq)), (2, Field::Struct(message))]
 }
 
-fn sealed_content_fields(to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], chunks: &[Vec<u8>], seq: i32, has_content: bool, silent: bool) -> Vec<(i16, Field)> {
+fn sealed_content_fields(to: &str, content_type: i32, meta: &[(Vec<u8>, Vec<u8>)], chunks: &[Vec<u8>], seq: i32, has_content: bool, silent: bool, body: &str) -> Vec<(i16, Field)> {
     let mut message = vec![
         (2, bin(to)),
         (5, Field::I64(0)),
         (6, Field::I64(0)),
-        (10, bin("")),
+        (10, bin(body)),
         (14, Field::Bool(has_content)),
         (15, Field::I32(content_type)),
         (18, Field::MapBin(meta_with_quiet(meta, silent))),
@@ -5430,6 +5809,42 @@ fn group_mid_ok(mid: &str) -> bool {
     (2..=64).contains(&mid.len()) && mid.starts_with('c') && mid.chars().all(|ch| ch.is_ascii_alphanumeric())
 }
 
+fn room_mid_ok(mid: &str) -> bool {
+    (2..=64).contains(&mid.len()) && mid.starts_with('r') && mid.chars().all(|ch| ch.is_ascii_alphanumeric())
+}
+
+fn chat_mid_ok(mid: &str) -> bool {
+    group_mid_ok(mid) || room_mid_ok(mid)
+}
+
+fn group_picture_path(oid: &str) -> String {
+    let oid = oid.trim();
+    if oid.is_empty() || oid.len() > 180 || oid.chars().any(|ch| ch.is_control() || ch == '\\') {
+        return String::new();
+    }
+    if oid.starts_with('/') { oid.to_string() } else { format!("/{oid}") }
+}
+
+fn invite_url(ticket: &str) -> String {
+    let ticket = ticket.trim();
+    if ticket.is_empty() || ticket.len() > 200 || ticket.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
+        return String::new();
+    }
+    if let Some(rest) = ticket.strip_prefix("https://line.me/") {
+        if rest.starts_with("R/ti/g/") || rest.starts_with("ti/g/") {
+            return ticket.to_string();
+        }
+        return String::new();
+    }
+    if ticket.contains("://") {
+        return String::new();
+    }
+    if !ticket.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')) {
+        return String::new();
+    }
+    format!("https://line.me/R/ti/g/{ticket}")
+}
+
 fn user_mid_ok(mid: &str) -> bool {
     (2..=64).contains(&mid.len()) && mid.starts_with('u') && mid.chars().all(|ch| ch.is_ascii_alphanumeric())
 }
@@ -5438,6 +5853,8 @@ struct RosterFacts {
     name: String,
     picture: String,
     auto_join: bool,
+    ticket: String,
+    ticket_disabled: bool,
     members: Vec<(String, i64)>,
 }
 
@@ -5468,12 +5885,19 @@ fn group_people(group: &BTreeMap<i16, Value>, field: i16) -> Vec<(String, i64)> 
 
 fn roster_facts(chat: &BTreeMap<i16, Value>) -> Result<RosterFacts, LineError> {
     let raw = text_field(chat, 6);
-    let name = if raw.trim().is_empty() { "Unnamed group".into() } else { raw.trim().to_string() };
+    let mid = text_field(chat, 2);
+    let name = if raw.trim().is_empty() {
+        if mid.starts_with('r') { String::new() } else { "Unnamed group".into() }
+    } else {
+        raw.trim().to_string()
+    };
     let group = group_extra(chat).unwrap_or_default();
     Ok(RosterFacts {
         name,
         picture: picture_url(&text_field(chat, 7)),
         auto_join: !bool_field(&group, 2),
+        ticket: text_field(&group, 3),
+        ticket_disabled: bool_field(&group, 7),
         members: group_people(&group, 4),
     })
 }
@@ -5540,6 +5964,75 @@ fn friendly_search(err: LineError) -> LineError {
         return err;
     }
     line("Could not search for that person.")
+}
+
+fn first_chat_mid(value: &Value) -> String {
+    match value {
+        Value::Struct(fields) => {
+            for id in [2, 1] {
+                let mid = text_field(fields, id);
+                if chat_mid_ok(&mid) {
+                    return mid;
+                }
+            }
+            for child in fields.values() {
+                let found = first_chat_mid(child);
+                if !found.is_empty() {
+                    return found;
+                }
+            }
+        }
+        Value::List(items) => {
+            for item in items {
+                let found = first_chat_mid(item);
+                if !found.is_empty() {
+                    return found;
+                }
+            }
+        }
+        _ => {}
+    }
+    String::new()
+}
+
+fn looks_like_ticket(text: &str) -> bool {
+    let text = text.trim();
+    !invite_url(text).is_empty() && !chat_mid_ok(text) && !user_mid_ok(text) && text.len() >= 8
+}
+
+fn first_ticket(value: &Value) -> String {
+    match value {
+        Value::Struct(fields) => {
+            for id in [1, 3] {
+                let text = text_field(fields, id);
+                if looks_like_ticket(&text) {
+                    return text;
+                }
+            }
+            for child in fields.values() {
+                let found = first_ticket(child);
+                if !found.is_empty() {
+                    return found;
+                }
+            }
+        }
+        Value::List(items) => {
+            for item in items {
+                let found = first_ticket(item);
+                if !found.is_empty() {
+                    return found;
+                }
+            }
+        }
+        Value::Bytes(raw) => {
+            let text = String::from_utf8_lossy(raw).into_owned();
+            if looks_like_ticket(&text) {
+                return text;
+            }
+        }
+        _ => {}
+    }
+    String::new()
 }
 
 fn first_group_mid(value: &Value) -> String {
@@ -6411,7 +6904,16 @@ mod tests {
         let mut heard = BTreeMap::new();
         heard.insert(18, Value::Map(vec![(Value::Bytes(b"AUDLEN".to_vec()), Value::Bytes(b"1800".to_vec()))]));
         assert_eq!(message_duration(&heard), 1800);
-        let frame = thrift::write_call("sendMessage", &content_fields("uabc", photo.code, &plain_media_meta(&photo, 12), 4, false, false));
+        let frame = thrift::write_call("sendMessage", &content_fields("uabc", photo.code, &plain_media_meta(&photo, 12), 4, false, false, ""));
+        let shared = "u0123456789abcdef0123456789abcdef";
+        let contact = thrift::write_call("sendMessage", &content_fields(shared, 13, &contact_meta(shared, "Ada"), 4, false, false, "Ada"));
+        let contact = thrift::read_message(&contact).unwrap();
+        let Value::Struct(contact) = contact.fields.get(&2).unwrap() else { panic!("contact") };
+        assert_eq!(text_field(contact, 10), "Ada");
+        assert_eq!(int_field(contact, 15), Some(13));
+        assert_eq!(meta_value(contact, "mid"), shared);
+        assert_eq!(meta_value(contact, "displayName"), "Ada");
+        assert!(!bool_field(contact, 14));
         let quiet = thrift::write_call("sendMessage", &send_fields("uabc", "Xo", 4, "", true));
         let quiet = thrift::read_message(&quiet).unwrap();
         let Value::Struct(message) = quiet.fields.get(&2).unwrap() else { panic!("message") };
@@ -6816,6 +7318,35 @@ mod tests {
         assert_eq!(facts.name, "Weekend");
         assert_eq!(facts.picture, "https://profile.line-scdn.net/p");
         assert!(!facts.auto_join);
+        assert!(facts.ticket.is_empty());
+        assert!(!facts.ticket_disabled);
+        let mut linked_group = BTreeMap::new();
+        linked_group.insert(2, Value::Bool(true));
+        linked_group.insert(3, Value::Bytes(b"ticket-abc".to_vec()));
+        linked_group.insert(7, Value::Bool(true));
+        linked_group.insert(
+            4,
+            Value::Map(vec![
+                (Value::Bytes(b"uaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_vec()), Value::Int(20)),
+                (Value::Bytes(b"ubbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_vec()), Value::Int(10)),
+            ]),
+        );
+        let mut linked_extra = BTreeMap::new();
+        linked_extra.insert(1, Value::Struct(linked_group));
+        chat.insert(8, Value::Struct(linked_extra));
+        let linked = roster_facts(&chat).unwrap();
+        assert_eq!(invite_url(&linked.ticket), "https://line.me/R/ti/g/ticket-abc");
+        assert!(linked.ticket_disabled);
+        assert_eq!(invite_url("https://line.me/R/ti/g/ticket-abc"), "https://line.me/R/ti/g/ticket-abc");
+        assert!(invite_url("https://example.com/ticket-abc").is_empty());
+        assert_eq!(group_picture_path("0habc"), "/0habc");
+        assert_eq!(group_picture_path("/0habc"), "/0habc");
+        let mut room = BTreeMap::new();
+        room.insert(1, Value::Bytes(b"rroomroomroomroomroomroomroomro".to_vec()));
+        assert!(room_mid_ok(&first_chat_mid(&Value::Struct(room))));
+        let mut issued = BTreeMap::new();
+        issued.insert(1, Value::Bytes(b"ticket-abc".to_vec()));
+        assert_eq!(first_ticket(&Value::Struct(issued)), "ticket-abc");
         assert_eq!(
             facts.members,
             vec![

@@ -142,13 +142,64 @@ async fn load_history(app: AppHandle, id: String) -> Result<(), String> {
     match result {
         Ok(value) => {
             let _ = store::save_history(&value);
-            let payload = serde_json::to_vec(&value).map_err(|err| format!("could not read messages: {err}"))?;
+            let page = store::shown_history(&id, &value).unwrap_or(value);
+            let payload = serde_json::to_vec(&page).map_err(|err| format!("could not read messages: {err}"))?;
             deliver(&app, "__lineHistoryBuf", "__lineHistory", &payload);
             Ok(())
         }
         Err(_) if cached.is_some() => Ok(()),
         Err(err) => Err(err),
     }
+}
+
+#[tauri::command]
+async fn load_older(id: String, before_id: String) -> Result<serde_json::Value, String> {
+    chat_id(&id)?;
+    history_cursor(&before_id)?;
+    let chat = id.clone();
+    let before = before_id.clone();
+    tauri::async_runtime::spawn_blocking(move || load_older_sync(&chat, &before))
+        .await
+        .map_err(|err| format!("could not load earlier messages: {err}"))?
+}
+
+fn load_older_sync(chat: &str, before_id: &str) -> Result<serde_json::Value, String> {
+    let page = store::older_page(chat, before_id)?;
+    let more = page.get("more").and_then(|value| value.as_bool()).unwrap_or(false);
+    let local = page.get("messages").cloned().unwrap_or(serde_json::json!([]));
+    if more {
+        return Ok(serde_json::json!({"id": chat, "messages": local, "end": false}));
+    }
+    let Some((time, cursor)) = store::oldest_server_cursor(chat)? else {
+        return Ok(serde_json::json!({"id": chat, "messages": local, "end": true}));
+    };
+    match line::Client::new().previous_messages(chat, time, &cursor) {
+        Ok(fetched) => {
+            let novel = store::novel_count(chat, &fetched)?;
+            let _ = store::merge_messages(chat, &fetched);
+            let again = store::older_page(chat, before_id)?;
+            let end = fetched.get("end").and_then(|value| value.as_bool()).unwrap_or(true) || novel == 0;
+            Ok(serde_json::json!({
+                "id": chat,
+                "messages": again.get("messages").cloned().unwrap_or(serde_json::json!([])),
+                "end": end,
+            }))
+        }
+        Err(err) => {
+            let empty = local.as_array().map(|items| items.is_empty()).unwrap_or(true);
+            if empty {
+                return Err(err.to_string());
+            }
+            Ok(serde_json::json!({"id": chat, "messages": local, "end": false, "error": err.to_string()}))
+        }
+    }
+}
+
+fn history_cursor(id: &str) -> Result<(), String> {
+    if (1..=80).contains(&id.len()) && id.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-') {
+        return Ok(());
+    }
+    Err("that message cannot be loaded".to_string())
 }
 
 fn chat_id(id: &str) -> Result<(), String> {
@@ -170,6 +221,20 @@ fn group_mid(id: &str) -> Result<(), String> {
         return Ok(());
     }
     Err("that group cannot be opened".into())
+}
+
+fn room_mid(id: &str) -> Result<(), String> {
+    if (2..=64).contains(&id.len()) && id.starts_with('r') && id.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return Ok(());
+    }
+    Err("that room cannot be opened".into())
+}
+
+fn chat_mid(id: &str) -> Result<(), String> {
+    if group_mid(id).is_ok() || room_mid(id).is_ok() {
+        return Ok(());
+    }
+    Err("that chat cannot be opened".into())
 }
 
 fn profile_script(payload: &serde_json::Value) -> String {
@@ -350,17 +415,23 @@ async fn favorite_profile(id: String, favorite: bool) -> Result<(), String> {
         .map_err(|err| format!("could not update this friend: {err}"))?
 }
 
-fn sync_group(app: &AppHandle, id: &str, name: &str, members: Option<i64>) {
+fn sync_group(app: &AppHandle, id: &str, name: &str, members: Option<i64>, picture: Option<&str>) {
     let Some(window) = app.get_webview_window("main") else { return };
-    let _ = window.eval(profile_script_call(
-        "__patchChat",
-        &serde_json::json!({ "id": id, "name": name, "members": members }),
-    ));
+    let mut payload = serde_json::json!({ "id": id, "name": name, "members": members });
+    if let Some(picture) = picture {
+        payload["picture"] = serde_json::json!(picture);
+    }
+    let _ = window.eval(profile_script_call("__patchChat", &payload));
+}
+
+fn drop_chat(app: &AppHandle, id: &str) {
+    let Some(window) = app.get_webview_window("main") else { return };
+    let _ = window.eval(profile_script_call("__dropChat", &serde_json::json!({ "id": id })));
 }
 
 #[tauri::command]
 async fn open_members(app: AppHandle, id: String, name: String, picture: String) -> Result<(), String> {
-    group_mid(&id)?;
+    chat_mid(&id)?;
     let initial = serde_json::json!({
         "id": id,
         "name": name.trim(),
@@ -392,14 +463,14 @@ async fn open_members(app: AppHandle, id: String, name: String, picture: String)
 
 #[tauri::command]
 async fn group_roster(app: AppHandle, id: String) -> Result<serde_json::Value, String> {
-    group_mid(&id)?;
+    chat_mid(&id)?;
     let chat = id.clone();
     let roster = tauri::async_runtime::spawn_blocking(move || line::Client::new().group_roster(&chat).map_err(|err| err.to_string()))
         .await
         .map_err(|err| format!("could not load the members: {err}"))??;
     let name = roster.get("name").and_then(|value| value.as_str()).unwrap_or("");
     let members = roster.get("members").and_then(|value| value.as_array()).map(|items| items.len() as i64);
-    sync_group(&app, &id, name, members);
+    sync_group(&app, &id, name, members, roster.get("picture").and_then(|value| value.as_str()));
     Ok(roster)
 }
 
@@ -412,7 +483,7 @@ async fn rename_group(app: AppHandle, id: String, name: String) -> Result<(), St
     tauri::async_runtime::spawn_blocking(move || line::Client::new().rename_group(&chat, &label).map_err(|err| err.to_string()))
         .await
         .map_err(|err| format!("could not rename this group: {err}"))??;
-    sync_group(&app, &id, &trimmed, None);
+    sync_group(&app, &id, &trimmed, None, None);
     Ok(())
 }
 
@@ -478,6 +549,76 @@ async fn create_group(name: String, targets: Vec<String>) -> Result<serde_json::
     tauri::async_runtime::spawn_blocking(move || line::Client::new().create_group(&label, &targets).map_err(|err| err.to_string()))
         .await
         .map_err(|err| format!("could not create the group: {err}"))?
+}
+
+#[tauri::command]
+async fn create_room(targets: Vec<String>) -> Result<serde_json::Value, String> {
+    if targets.len() > 100 {
+        return Err("Choose fewer friends.".into());
+    }
+    for id in &targets {
+        user_mid(id)?;
+    }
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().create_room(&targets).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not create the room: {err}"))?
+}
+
+#[tauri::command]
+async fn leave_chat(app: AppHandle, id: String) -> Result<(), String> {
+    chat_mid(&id)?;
+    let chat = id.clone();
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().leave_chat(&chat).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not leave this chat: {err}"))??;
+    drop_chat(&app, &id);
+    if let Some(window) = app.get_webview_window("members") {
+        let _ = window.close();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_group_picture(app: AppHandle, id: String, data: String) -> Result<serde_json::Value, String> {
+    group_mid(&id)?;
+    let bytes = decode_photo(&data)?;
+    let chat = id.clone();
+    let roster = tauri::async_runtime::spawn_blocking(move || line::Client::new().update_group_picture(&chat, &bytes).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not update the group photo: {err}"))??;
+    let name = roster.get("name").and_then(|value| value.as_str()).unwrap_or("");
+    let members = roster.get("members").and_then(|value| value.as_array()).map(|items| items.len() as i64);
+    sync_group(&app, &id, name, members, roster.get("picture").and_then(|value| value.as_str()));
+    Ok(roster)
+}
+
+#[tauri::command]
+async fn clear_group_picture(app: AppHandle, id: String) -> Result<serde_json::Value, String> {
+    group_mid(&id)?;
+    let chat = id.clone();
+    let roster = tauri::async_runtime::spawn_blocking(move || line::Client::new().clear_group_picture(&chat).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not update the group photo: {err}"))??;
+    let name = roster.get("name").and_then(|value| value.as_str()).unwrap_or("");
+    let members = roster.get("members").and_then(|value| value.as_array()).map(|items| items.len() as i64);
+    sync_group(&app, &id, name, members, Some(""));
+    Ok(roster)
+}
+
+#[tauri::command]
+async fn reissue_group_ticket(id: String) -> Result<serde_json::Value, String> {
+    group_mid(&id)?;
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().reissue_group_ticket(&id).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not reset the invite link: {err}"))?
+}
+
+#[tauri::command]
+async fn set_group_invite_link(id: String, enabled: bool) -> Result<serde_json::Value, String> {
+    group_mid(&id)?;
+    tauri::async_runtime::spawn_blocking(move || line::Client::new().set_group_invite_link(&id, enabled).map_err(|err| err.to_string()))
+        .await
+        .map_err(|err| format!("could not update the invite link: {err}"))?
 }
 
 #[tauri::command]
@@ -753,6 +894,31 @@ async fn send_sticker(app: AppHandle, id: String, package_id: String, sticker_id
     let mut value = tauri::async_runtime::spawn_blocking(move || {
         let _send = line::TALK_SEND.lock().unwrap_or_else(|err| err.into_inner());
         line::Client::new().send_sticker_for_window(&id, &package_id, &sticker_id, animated)
+    })
+        .await
+        .map_err(|err| format!("could not send: {err}"))?;
+    if !local_id.is_empty() {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("localId".to_string(), serde_json::Value::String(local_id));
+        }
+    }
+    let _ = store::save_outgoing(&chat, &value);
+    let payload = serde_json::to_vec(&value).map_err(|err| format!("could not read the send result: {err}"))?;
+    deliver(&app, "__lineSentBuf", "__lineSent", &payload);
+    Ok(())
+}
+
+#[tauri::command]
+async fn send_contact(app: AppHandle, id: String, mid: String, local_id: Option<String>) -> Result<(), String> {
+    chat_id(&id)?;
+    if user_mid(&mid).is_err() {
+        return Err("that contact cannot be sent".to_string());
+    }
+    let local_id = local_send_id(local_id.unwrap_or_default().trim());
+    let chat = id.clone();
+    let mut value = tauri::async_runtime::spawn_blocking(move || {
+        let _send = line::TALK_SEND.lock().unwrap_or_else(|err| err.into_inner());
+        line::Client::new().send_contact_for_window(&id, &mid)
     })
         .await
         .map_err(|err| format!("could not send: {err}"))?;
@@ -1735,7 +1901,7 @@ pub fn run() {
             tauri::webview::PermissionKind::Microphone | tauri::webview::PermissionKind::Camera => tauri::webview::PermissionResponse::Allow,
             _ => tauri::webview::PermissionResponse::Default,
         })
-        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, mark_chat_read, load_media, save_download, read_dropped_file, send_message, send_media, send_sticker, list_stickers, suggest_stickers, sticker_pack, buy_sticker, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_always_on_top, set_focus_on_message, focus_for_message, attention_for_message, clear_attention, set_tray_badge, list_media_devices, speech::dictate_start, speech::dictate_stop, speech::dictate_cancel, speech::dictate_level, speech::mic_test_stop, speech::voice_start, speech::voice_stop, speech::voice_cancel, speech::voice_level, agent::get_agent_settings, agent::set_agent_settings, agent::set_reply_settings, agent::get_chat_llm, agent::set_chat_llm, agent::clear_chat_llm, agent::list_chat_llm, agent::agent_ask, agent::agent_probe, agent::agent_compose, agent::list_agent_tools, mcp::get_mcp_servers, mcp::set_mcp_servers, open_profile, block_profile, add_profile, open_fraud_help, open_link, link_preview, rename_profile, favorite_profile, open_friend_chat, open_members, group_roster, rename_group, set_group_auto_join, invite_into_group, remove_group_member, group_invite_candidates, list_friends, friend_recommendations, find_person, create_group, get_my_profile, set_my_profile, set_my_picture, clear_my_picture, set_my_cover])
+        .invoke_handler(tauri::generate_handler![start_login, load_chats, load_history, load_older, mark_chat_read, load_media, save_download, read_dropped_file, send_message, send_media, send_sticker, send_contact, list_stickers, suggest_stickers, sticker_pack, buy_sticker, unsend_message, report_message, send_reaction, logout, quit, get_settings, set_minimize_to_tray, set_always_on_top, set_focus_on_message, focus_for_message, attention_for_message, clear_attention, set_tray_badge, list_media_devices, speech::dictate_start, speech::dictate_stop, speech::dictate_cancel, speech::dictate_level, speech::mic_test_stop, speech::voice_start, speech::voice_stop, speech::voice_cancel, speech::voice_level, agent::get_agent_settings, agent::set_agent_settings, agent::set_reply_settings, agent::get_chat_llm, agent::set_chat_llm, agent::clear_chat_llm, agent::list_chat_llm, agent::agent_ask, agent::agent_probe, agent::agent_compose, agent::list_agent_tools, mcp::get_mcp_servers, mcp::set_mcp_servers, open_profile, block_profile, add_profile, open_fraud_help, open_link, link_preview, rename_profile, favorite_profile, open_friend_chat, open_members, group_roster, rename_group, set_group_auto_join, invite_into_group, remove_group_member, group_invite_candidates, list_friends, friend_recommendations, find_person, create_group, create_room, leave_chat, set_group_picture, clear_group_picture, reissue_group_ticket, set_group_invite_link, get_my_profile, set_my_profile, set_my_picture, clear_my_picture, set_my_cover])
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;

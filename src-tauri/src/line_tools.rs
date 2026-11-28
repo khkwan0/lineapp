@@ -131,6 +131,18 @@ pub(crate) fn offered() -> Vec<Offered> {
             }),
         ),
         tool(
+            "send_contact",
+            "Send a contact card for a person. mid is that person's id, starting with u. Call this only when the user asked to send that contact.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "chat": { "type": "string", "description": "Chat id to send the card into." },
+                    "mid": { "type": "string", "description": "User id of the person on the card, starting with u." }
+                },
+                "required": ["chat", "mid"]
+            }),
+        ),
+        tool(
             "unsend_message",
             "Unsend one of your own messages. Call this only when the user asked to unsend it.",
             json!({
@@ -213,6 +225,17 @@ pub(crate) fn offered() -> Vec<Offered> {
             }),
         ),
         tool(
+            "create_room",
+            "Create a room with friend ids. A room has no name and no invite link. Call this only when the user asked.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "members": { "type": "array", "items": { "type": "string" }, "description": "Friend ids, each starting with u." }
+                },
+                "required": ["members"]
+            }),
+        ),
+        tool(
             "create_group",
             "Create a group with a name and friend ids. Call this only when the user asked.",
             json!({
@@ -258,6 +281,40 @@ pub(crate) fn offered() -> Vec<Offered> {
                     "id": { "type": "string", "description": "Member id, starting with u." }
                 },
                 "required": ["group", "id"]
+            }),
+        ),
+        tool(
+            "leave_chat",
+            "Leave a group or a room. Call this only when the user asked.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "chat": { "type": "string", "description": "Group id starting with c, or room id starting with r." }
+                },
+                "required": ["chat"]
+            }),
+        ),
+        tool(
+            "reissue_invite_link",
+            "Create or reset a group's invite link. The previous link stops working. Call this only when the user asked.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "group": { "type": "string", "description": "Group id, starting with c." }
+                },
+                "required": ["group"]
+            }),
+        ),
+        tool(
+            "set_invite_link",
+            "Turn a group's invite link on or off. Call this only when the user asked.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "group": { "type": "string", "description": "Group id, starting with c." },
+                    "enabled": { "type": "boolean", "description": "True to allow joining with the link." }
+                },
+                "required": ["group", "enabled"]
             }),
         ),
         tool(
@@ -310,6 +367,7 @@ pub(crate) fn invoke(name: &str, arguments: &Json) -> Json {
         "fetch_chat" => fetch_chat(&args),
         "send_text" => send_text(&args),
         "send_sticker" => send_sticker(&args),
+        "send_contact" => send_contact(&args),
         "unsend_message" => unsend_message(&args),
         "react_to_message" => react_to_message(&args),
         "mark_chat_read" => mark_chat_read(&args),
@@ -318,6 +376,10 @@ pub(crate) fn invoke(name: &str, arguments: &Json) -> Json {
         "set_favorite" => set_favorite(&args),
         "rename_friend" => rename_friend(&args),
         "create_group" => create_group(&args),
+        "create_room" => create_room(&args),
+        "leave_chat" => leave_chat(&args),
+        "reissue_invite_link" => reissue_invite_link(&args),
+        "set_invite_link" => set_invite_link(&args),
         "rename_group" => rename_group(&args),
         "invite_to_group" => invite_to_group(&args),
         "remove_group_member" => remove_group_member(&args),
@@ -618,6 +680,28 @@ fn send_sticker(args: &Json) -> Json {
     sent
 }
 
+fn send_contact(args: &Json) -> Json {
+    let chat = text(args, "chat");
+    let mid = text(args, "mid");
+    if !chat_ok(&chat) {
+        return json!({ "error": "That chat cannot be opened." });
+    }
+    if !user_ok(&mid) {
+        return json!({ "error": "That contact cannot be sent." });
+    }
+    let Some(mut client) = account() else {
+        return signed_out();
+    };
+    let sent = {
+        let _send = line::TALK_SEND.lock().unwrap_or_else(|err| err.into_inner());
+        client.send_contact_for_window(&chat, &mid)
+    };
+    if sent.get("ok") == Some(&Json::Bool(true)) {
+        let _ = store::save_outgoing(&chat, &sent);
+    }
+    sent
+}
+
 fn unsend_message(args: &Json) -> Json {
     let message_id = text(args, "messageId");
     if !message_ok(&message_id) {
@@ -738,6 +822,67 @@ fn rename_friend(args: &Json) -> Json {
     };
     match client.update_contact_setting(&id, 2, &name) {
         Ok(()) => json!({ "ok": true, "id": id, "name": name }),
+        Err(err) => failed(err),
+    }
+}
+
+fn create_room(args: &Json) -> Json {
+    let Ok(members) = member_ids(args) else {
+        return json!({ "error": "Choose at least one friend." });
+    };
+    let Some(mut client) = account() else {
+        return signed_out();
+    };
+    match client.create_room(&members) {
+        Ok(made) => made,
+        Err(err) => failed(err),
+    }
+}
+
+fn leave_chat(args: &Json) -> Json {
+    let chat = text(args, "chat");
+    if !group_ok(&chat) && !((2..=64).contains(&chat.len()) && chat.starts_with('r') && chat.chars().all(|ch| ch.is_ascii_alphanumeric())) {
+        return json!({ "error": "That chat cannot be left." });
+    }
+    let Some(mut client) = account() else {
+        return signed_out();
+    };
+    match client.leave_chat(&chat) {
+        Ok(()) => json!({ "ok": true }),
+        Err(err) => failed(err),
+    }
+}
+
+fn reissue_invite_link(args: &Json) -> Json {
+    let group = text(args, "group");
+    if !group_ok(&group) {
+        return json!({ "error": "That group cannot be opened." });
+    }
+    let Some(mut client) = account() else {
+        return signed_out();
+    };
+    match client.reissue_group_ticket(&group) {
+        Ok(card) => json!({
+            "ok": true,
+            "inviteUrl": card.get("inviteUrl").and_then(|value| value.as_str()).unwrap_or(""),
+        }),
+        Err(err) => failed(err),
+    }
+}
+
+fn set_invite_link(args: &Json) -> Json {
+    let group = text(args, "group");
+    let Some(enabled) = args.get("enabled").and_then(|value| value.as_bool()) else {
+        return json!({ "error": "Pass enabled as true or false." });
+    };
+    if !group_ok(&group) {
+        return json!({ "error": "That group cannot be opened." });
+    }
+    let Some(mut client) = account() else {
+        return signed_out();
+    };
+    match client.set_group_invite_link(&group, enabled) {
+        Ok(_) => json!({ "ok": true, "enabled": enabled }),
         Err(err) => failed(err),
     }
 }
@@ -942,6 +1087,7 @@ mod tests {
         let mut names: Vec<_> = tools.iter().map(|tool| tool.name.as_str()).collect();
         assert!(names.contains(&"search_users"));
         assert!(names.contains(&"send_text"));
+        assert!(names.contains(&"send_contact"));
         assert!(names.contains(&"list_group_members"));
         names.sort_unstable();
         let mut unique = names.clone();
@@ -970,6 +1116,10 @@ mod tests {
         assert_eq!(invoke("set_blocked", &json!({ "id": "uAbcdef", "blocked": "yes" }))["error"], "Pass blocked as true or false.");
         assert_eq!(invoke("report_message", &json!({ "chat": "uAbc", "sender": "uAbc", "messageId": "12", "reason": "spam" }))["error"], "Choose a report reason.");
         assert_eq!(invoke("send_text", &json!({ "chat": "uAbc", "text": "" }))["error"], "Enter a message first.");
+        assert_eq!(invoke("send_contact", &json!({ "chat": "uAbc", "mid": "group" }))["error"], "That contact cannot be sent.");
         assert_eq!(invoke("create_group", &json!({ "name": "Picnic", "members": [] }))["error"], "Choose at least one friend.");
+        assert_eq!(invoke("create_room", &json!({ "members": [] }))["error"], "Choose at least one friend.");
+        assert_eq!(invoke("leave_chat", &json!({ "chat": "nope" }))["error"], "That chat cannot be left.");
+        assert_eq!(invoke("set_invite_link", &json!({ "group": "cAbc", "enabled": "yes" }))["error"], "Pass enabled as true or false.");
     }
 }

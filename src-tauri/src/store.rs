@@ -73,6 +73,48 @@ pub fn save_history(payload: &Json) -> Result<(), String> {
     save_history_locked(&db_path(), &account_mid(), payload)
 }
 
+pub fn shown_history(chat: &str, fetched: &Json) -> Result<Json, String> {
+    let _guard = LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    shown_history_locked(&db_path(), &account_mid(), chat, fetched)
+}
+
+pub fn older_page(chat: &str, before_id: &str) -> Result<Json, String> {
+    let _guard = LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    older_page_locked(&db_path(), &account_mid(), chat, before_id)
+}
+
+pub fn merge_messages(chat: &str, payload: &Json) -> Result<(), String> {
+    let _guard = LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    merge_messages_locked(&db_path(), &account_mid(), chat, payload)
+}
+
+pub fn oldest_server_cursor(chat: &str) -> Result<Option<(i64, String)>, String> {
+    let _guard = LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    let path = db_path();
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let conn = connect(&path)?;
+    if !claim(&conn, &account_mid())? {
+        return Ok(None);
+    }
+    oldest_server_cursor_locked(&conn, chat)
+}
+
+pub fn novel_count(chat: &str, payload: &Json) -> Result<usize, String> {
+    let _guard = LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    let path = db_path();
+    if !path.is_file() {
+        let messages = payload.get("messages").and_then(|value| value.as_array()).map(|items| items.len()).unwrap_or(0);
+        return Ok(messages);
+    }
+    let conn = connect(&path)?;
+    if !claim(&conn, &account_mid())? {
+        return Ok(0);
+    }
+    novel_count_locked(&conn, chat, payload)
+}
+
 pub fn save_outgoing(chat: &str, sent: &Json) -> Result<(), String> {
     let _guard = LOCK.lock().unwrap_or_else(|err| err.into_inner());
     save_outgoing_locked(&db_path(), &account_mid(), chat, sent)
@@ -169,8 +211,13 @@ fn connect(path: &Path) -> Result<Connection, String> {
             animated INTEGER NOT NULL,
             sender TEXT NOT NULL DEFAULT '',
             reply_id TEXT NOT NULL DEFAULT '',
+            duration INTEGER NOT NULL DEFAULT 0,
+            reaction TEXT NOT NULL DEFAULT '',
+            reaction_image TEXT NOT NULL DEFAULT '',
+            reaction_mine INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (chat_id, msg_id)
          );
+         CREATE INDEX IF NOT EXISTS messages_chat_time ON messages (chat_id, time, msg_id);
          CREATE TABLE IF NOT EXISTS llm_settings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             saved_at INTEGER NOT NULL,
@@ -196,6 +243,7 @@ fn connect(path: &Path) -> Result<Connection, String> {
     .map_err(|err| err.to_string())?;
     ensure_sender_column(&conn)?;
     ensure_reply_column(&conn)?;
+    ensure_message_columns(&conn)?;
     ensure_llm_history_column(&conn)?;
     let _ = fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600));
     Ok(conn)
@@ -228,6 +276,29 @@ fn ensure_llm_history_column(conn: &Connection) -> Result<(), String> {
     }
     conn.execute("ALTER TABLE llm_settings ADD COLUMN history INTEGER NOT NULL DEFAULT 20", [])
         .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn ensure_message_columns(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn.prepare("PRAGMA table_info(messages)").map_err(|err| err.to_string())?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|err| err.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    drop(stmt);
+    let missing = [
+        ("duration", "ALTER TABLE messages ADD COLUMN duration INTEGER NOT NULL DEFAULT 0"),
+        ("reaction", "ALTER TABLE messages ADD COLUMN reaction TEXT NOT NULL DEFAULT ''"),
+        ("reaction_image", "ALTER TABLE messages ADD COLUMN reaction_image TEXT NOT NULL DEFAULT ''"),
+        ("reaction_mine", "ALTER TABLE messages ADD COLUMN reaction_mine INTEGER NOT NULL DEFAULT 0"),
+    ];
+    for (name, sql) in missing {
+        if names.iter().any(|item| item == name) {
+            continue;
+        }
+        conn.execute(sql, []).map_err(|err| err.to_string())?;
+    }
     Ok(())
 }
 
@@ -568,7 +639,6 @@ fn apply_locked(path: &Path, mid: &str, payload: &Json) -> Result<(), String> {
         let key = message_key(message, 0);
         if !key.is_empty() {
             upsert_message(&tx, chat, &key, message)?;
-            prune_messages(&tx, chat)?;
         }
     }
     for message_id in &unsents {
@@ -635,8 +705,35 @@ fn chat_json(id: &str, chat: &StoredChat) -> Json {
     })
 }
 
-const HISTORY_KEEP: usize = 80;
 const HISTORY_SHOW: usize = 40;
+const MESSAGE_COLUMNS: &str = "msg_id, mine, name, picture, body, sealed, time, status, readers, sticker, sticker_fallback, kind, gid, seq, media_id, animated, sender, reply_id, duration, reaction, reaction_image, reaction_mine";
+
+fn map_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Json> {
+    Ok(json!({
+        "id": row.get::<_, String>(0)?,
+        "mine": row.get::<_, i64>(1)? != 0,
+        "name": row.get::<_, String>(2)?,
+        "picture": row.get::<_, String>(3)?,
+        "text": row.get::<_, String>(4)?,
+        "sealed": row.get::<_, i64>(5)? != 0,
+        "time": row.get::<_, i64>(6)?,
+        "status": row.get::<_, String>(7)?,
+        "readers": row.get::<_, i64>(8)?,
+        "sticker": row.get::<_, String>(9)?,
+        "stickerFallback": row.get::<_, String>(10)?,
+        "kind": row.get::<_, String>(11)?,
+        "gid": row.get::<_, String>(12)?,
+        "seq": row.get::<_, i64>(13)?,
+        "mediaId": row.get::<_, String>(14)?,
+        "animated": row.get::<_, i64>(15)? != 0,
+        "sender": row.get::<_, String>(16)?,
+        "replyId": row.get::<_, String>(17)?,
+        "duration": row.get::<_, i64>(18)?,
+        "reaction": row.get::<_, String>(19)?,
+        "reactionImage": row.get::<_, String>(20)?,
+        "reactionMine": row.get::<_, i64>(21)? != 0,
+    }))
+}
 
 fn history_locked(path: &Path, mid: &str, chat: &str) -> Result<Option<Json>, String> {
     if chat.is_empty() || !path.is_file() {
@@ -646,47 +743,164 @@ fn history_locked(path: &Path, mid: &str, chat: &str) -> Result<Option<Json>, St
     if !claim(&conn, mid)? {
         return Ok(None);
     }
-    let mut stmt = conn
-        .prepare(
-            "SELECT msg_id, mine, name, picture, body, sealed, time, status, readers, sticker, sticker_fallback, kind, gid, seq, media_id, animated, sender, reply_id
-             FROM messages WHERE chat_id = ?1 ORDER BY time ASC",
+    let (messages, older) = messages_latest(&conn, chat, HISTORY_SHOW)?;
+    if messages.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(json!({"type": "history", "id": chat, "messages": messages, "older": older})))
+}
+
+fn shown_history_locked(path: &Path, mid: &str, chat: &str, fetched: &Json) -> Result<Json, String> {
+    let server_older = fetched.get("older").and_then(|value| value.as_bool()).unwrap_or(false);
+    let mut messages = fetched.get("messages").and_then(|value| value.as_array()).cloned().unwrap_or_default();
+    if messages.len() > HISTORY_SHOW {
+        messages = messages.split_off(messages.len() - HISTORY_SHOW);
+    }
+    let mut older = server_older;
+    if !older {
+        if let Some(cursor) = messages.first() {
+            let time = cursor.get("time").and_then(|value| value.as_i64()).unwrap_or(0);
+            let id = cursor.get("id").and_then(|value| value.as_str()).unwrap_or("");
+            if !id.is_empty() && path.is_file() {
+                let conn = connect(path)?;
+                if claim(&conn, mid)? {
+                    older = exists_before(&conn, chat, time, id)?;
+                }
+            }
+        }
+    }
+    let mut page = fetched.clone();
+    page["messages"] = Json::Array(messages);
+    page["older"] = json!(older);
+    Ok(page)
+}
+
+fn older_page_locked(path: &Path, mid: &str, chat: &str, before_id: &str) -> Result<Json, String> {
+    if chat.is_empty() || before_id.is_empty() || !path.is_file() {
+        return Ok(json!({"messages": [], "more": false}));
+    }
+    let conn = connect(path)?;
+    if !claim(&conn, mid)? {
+        return Ok(json!({"messages": [], "more": false}));
+    }
+    let cursor: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT time, msg_id FROM messages WHERE chat_id = ?1 AND msg_id = ?2",
+            params![chat, before_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
+        .optional()
         .map_err(|err| err.to_string())?;
-    let mapped = stmt
-        .query_map(params![chat], |row| {
-            Ok(json!({
-                "id": row.get::<_, String>(0)?,
-                "mine": row.get::<_, i64>(1)? != 0,
-                "name": row.get::<_, String>(2)?,
-                "picture": row.get::<_, String>(3)?,
-                "text": row.get::<_, String>(4)?,
-                "sealed": row.get::<_, i64>(5)? != 0,
-                "time": row.get::<_, i64>(6)?,
-                "status": row.get::<_, String>(7)?,
-                "readers": row.get::<_, i64>(8)?,
-                "sticker": row.get::<_, String>(9)?,
-                "stickerFallback": row.get::<_, String>(10)?,
-                "kind": row.get::<_, String>(11)?,
-                "gid": row.get::<_, String>(12)?,
-                "seq": row.get::<_, i64>(13)?,
-                "mediaId": row.get::<_, String>(14)?,
-                "animated": row.get::<_, i64>(15)? != 0,
-                "sender": row.get::<_, String>(16)?,
-                "replyId": row.get::<_, String>(17)?,
-            }))
-        })
+    let Some((time, id)) = cursor else {
+        return Err("that message is not saved".to_string());
+    };
+    let (messages, more) = messages_before(&conn, chat, time, &id, HISTORY_SHOW)?;
+    Ok(json!({"messages": messages, "more": more}))
+}
+
+fn merge_messages_locked(path: &Path, mid: &str, chat: &str, payload: &Json) -> Result<(), String> {
+    let Some(messages) = payload.get("messages").and_then(|value| value.as_array()) else {
+        return Ok(());
+    };
+    if chat.is_empty() || messages.is_empty() {
+        return Ok(());
+    }
+    let conn = connect(path)?;
+    if !claim(&conn, mid)? {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction().map_err(|err| err.to_string())?;
+    for (index, message) in messages.iter().enumerate() {
+        let key = message_key(message, index);
+        upsert_message(&tx, chat, &key, message)?;
+    }
+    set_mid(&tx, mid)?;
+    tx.commit().map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn oldest_server_cursor_locked(conn: &Connection, chat: &str) -> Result<Option<(i64, String)>, String> {
+    conn.query_row(
+        "SELECT time, msg_id FROM messages
+         WHERE chat_id = ?1 AND length(msg_id) BETWEEN 1 AND 24 AND msg_id GLOB '[0-9]*' AND msg_id NOT GLOB '*[^0-9]*'
+         ORDER BY time ASC, msg_id ASC LIMIT 1",
+        params![chat],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(|err| err.to_string())
+}
+
+fn novel_count_locked(conn: &Connection, chat: &str, payload: &Json) -> Result<usize, String> {
+    let Some(messages) = payload.get("messages").and_then(|value| value.as_array()) else {
+        return Ok(0);
+    };
+    let mut count = 0;
+    for message in messages {
+        let id = message.get("id").and_then(|value| value.as_str()).unwrap_or("").trim();
+        if id.is_empty() {
+            continue;
+        }
+        let known = conn
+            .query_row("SELECT 1 FROM messages WHERE chat_id = ?1 AND msg_id = ?2", params![chat, id], |_| Ok(()))
+            .optional()
+            .map_err(|err| err.to_string())?;
+        if known.is_none() {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn messages_latest(conn: &Connection, chat: &str, limit: usize) -> Result<(Vec<Json>, bool), String> {
+    let mut stmt = conn
+        .prepare(&format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE chat_id = ?1 ORDER BY time DESC, msg_id DESC LIMIT ?2"))
         .map_err(|err| err.to_string())?;
+    let mut messages = read_messages(&mut stmt, params![chat, (limit + 1) as i64])?;
+    let older = messages.len() > limit;
+    if older {
+        messages.pop();
+    }
+    messages.reverse();
+    Ok((messages, older))
+}
+
+fn messages_before(conn: &Connection, chat: &str, time: i64, id: &str, limit: usize) -> Result<(Vec<Json>, bool), String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages
+             WHERE chat_id = ?1 AND (time < ?2 OR (time = ?2 AND msg_id < ?3))
+             ORDER BY time DESC, msg_id DESC LIMIT ?4"
+        ))
+        .map_err(|err| err.to_string())?;
+    let mut messages = read_messages(&mut stmt, params![chat, time, id, (limit + 1) as i64])?;
+    let more = messages.len() > limit;
+    if more {
+        messages.pop();
+    }
+    messages.reverse();
+    Ok((messages, more))
+}
+
+fn exists_before(conn: &Connection, chat: &str, time: i64, id: &str) -> Result<bool, String> {
+    let found = conn
+        .query_row(
+            "SELECT 1 FROM messages WHERE chat_id = ?1 AND (time < ?2 OR (time = ?2 AND msg_id < ?3)) LIMIT 1",
+            params![chat, time, id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|err| err.to_string())?;
+    Ok(found.is_some())
+}
+
+fn read_messages(stmt: &mut rusqlite::Statement<'_>, params: impl rusqlite::Params) -> Result<Vec<Json>, String> {
+    let mapped = stmt.query_map(params, map_message).map_err(|err| err.to_string())?;
     let mut messages = Vec::new();
     for item in mapped {
         messages.push(item.map_err(|err| err.to_string())?);
     }
-    if messages.len() > HISTORY_SHOW {
-        messages = messages.split_off(messages.len() - HISTORY_SHOW);
-    }
-    if messages.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(json!({"type": "history", "id": chat, "messages": messages})))
+    Ok(messages)
 }
 
 fn save_history_locked(path: &Path, mid: &str, payload: &Json) -> Result<(), String> {
@@ -714,10 +928,10 @@ fn save_history_locked(path: &Path, mid: &str, payload: &Json) -> Result<(), Str
     if !keys.is_empty() {
         let keep: std::collections::HashSet<&str> = keys.iter().map(String::as_str).collect();
         let mut stmt = tx
-            .prepare("SELECT msg_id, time FROM messages WHERE chat_id = ?1")
+            .prepare("SELECT msg_id, time FROM messages WHERE chat_id = ?1 AND time >= ?2")
             .map_err(|err| err.to_string())?;
         let stored: Vec<(String, i64)> = stmt
-            .query_map(params![chat], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_map(params![chat, oldest], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(|err| err.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|err| err.to_string())?;
@@ -729,7 +943,6 @@ fn save_history_locked(path: &Path, mid: &str, payload: &Json) -> Result<(), Str
             }
         }
     }
-    prune_messages(&tx, chat)?;
     set_mid(&tx, mid)?;
     tx.commit().map_err(|err| err.to_string())?;
     Ok(())
@@ -766,7 +979,6 @@ fn save_outgoing_locked(path: &Path, mid: &str, chat: &str, sent: &Json) -> Resu
     });
     let tx = conn.unchecked_transaction().map_err(|err| err.to_string())?;
     upsert_message(&tx, chat, key, &message)?;
-    prune_messages(&tx, chat)?;
     set_mid(&tx, mid)?;
     tx.commit().map_err(|err| err.to_string())?;
     Ok(())
@@ -785,8 +997,8 @@ fn upsert_message(conn: &Connection, chat: &str, key: &str, message: &Json) -> R
     let text = message.get("text").and_then(|value| value.as_str()).unwrap_or("");
     conn.execute(
         "INSERT INTO messages (
-            chat_id, msg_id, mine, name, picture, body, sealed, time, status, readers, sticker, sticker_fallback, kind, gid, seq, media_id, animated, sender, reply_id
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+            chat_id, msg_id, mine, name, picture, body, sealed, time, status, readers, sticker, sticker_fallback, kind, gid, seq, media_id, animated, sender, reply_id, duration, reaction, reaction_image, reaction_mine
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
          ON CONFLICT(chat_id, msg_id) DO UPDATE SET
             mine = excluded.mine,
             sender = CASE WHEN excluded.sender != '' THEN excluded.sender ELSE messages.sender END,
@@ -804,7 +1016,11 @@ fn upsert_message(conn: &Connection, chat: &str, key: &str, message: &Json) -> R
             seq = CASE WHEN excluded.seq != 0 THEN excluded.seq ELSE messages.seq END,
             media_id = CASE WHEN excluded.media_id != '' THEN excluded.media_id ELSE messages.media_id END,
             animated = excluded.animated,
-            reply_id = CASE WHEN excluded.reply_id != '' THEN excluded.reply_id ELSE messages.reply_id END",
+            reply_id = CASE WHEN excluded.reply_id != '' THEN excluded.reply_id ELSE messages.reply_id END,
+            duration = excluded.duration,
+            reaction = excluded.reaction,
+            reaction_image = excluded.reaction_image,
+            reaction_mine = excluded.reaction_mine",
         params![
             chat,
             key,
@@ -825,6 +1041,10 @@ fn upsert_message(conn: &Connection, chat: &str, key: &str, message: &Json) -> R
             if message.get("animated").and_then(|value| value.as_bool()).unwrap_or(false) { 1 } else { 0 },
             message.get("sender").and_then(|value| value.as_str()).unwrap_or(""),
             message.get("replyId").and_then(|value| value.as_str()).unwrap_or(""),
+            message.get("duration").and_then(|value| value.as_i64()).unwrap_or(0),
+            message.get("reaction").and_then(|value| value.as_str()).unwrap_or(""),
+            message.get("reactionImage").and_then(|value| value.as_str()).unwrap_or(""),
+            if message.get("reactionMine").and_then(|value| value.as_bool()).unwrap_or(false) { 1 } else { 0 },
         ],
     )
     .map_err(|err| err.to_string())?;
@@ -872,23 +1092,6 @@ fn mark_unsent_tx(conn: &Connection, message_id: &str) -> Result<(), String> {
             params![sentence, chat],
         )
         .map_err(|err| err.to_string())?;
-    }
-    Ok(())
-}
-
-fn prune_messages(conn: &Connection, chat: &str) -> Result<(), String> {
-    let mut stmt = conn
-        .prepare("SELECT msg_id FROM messages WHERE chat_id = ?1 ORDER BY time DESC")
-        .map_err(|err| err.to_string())?;
-    let ids: Vec<String> = stmt
-        .query_map(params![chat], |row| row.get(0))
-        .map_err(|err| err.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| err.to_string())?;
-    drop(stmt);
-    for key in ids.into_iter().skip(HISTORY_KEEP) {
-        conn.execute("DELETE FROM messages WHERE chat_id = ?1 AND msg_id = ?2", params![chat, key])
-            .map_err(|err| err.to_string())?;
     }
     Ok(())
 }
@@ -1039,6 +1242,45 @@ mod tests {
         let rows = rows_locked(&path, "uMe").unwrap();
         assert_eq!(rows.get("u1").unwrap().last_message, "You unsent a message.");
         assert!(history_locked(&path, "uOther", "u1").unwrap().is_none());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn history_keeps_every_message_and_pages_backward() {
+        let path = scratch();
+        let messages: Vec<Json> = (1..=100)
+            .map(|index| json!({"id": index.to_string(), "mine": false, "name": "Ada", "text": index.to_string(), "time": index, "duration": if index == 100 { 1500 } else { 0 }, "reaction": if index == 100 { "👍" } else { "" }, "reactionMine": index == 100}))
+            .collect();
+        save_history_locked(&path, "uMe", &json!({"id": "u1", "messages": messages})).unwrap();
+        let loaded = history_locked(&path, "uMe", "u1").unwrap().unwrap();
+        let shown = loaded["messages"].as_array().unwrap();
+        assert_eq!(shown.len(), 40);
+        assert_eq!(shown[0]["text"], "61");
+        assert_eq!(shown[39]["text"], "100");
+        assert_eq!(shown[39]["duration"], 1500);
+        assert_eq!(shown[39]["reaction"], "👍");
+        assert_eq!(shown[39]["reactionMine"], true);
+        assert_eq!(loaded["older"], true);
+        let page = older_page_locked(&path, "uMe", "u1", "61").unwrap();
+        let older = page["messages"].as_array().unwrap();
+        assert_eq!(older.len(), 40);
+        assert_eq!(older[0]["text"], "21");
+        assert_eq!(older[39]["text"], "60");
+        assert_eq!(page["more"], true);
+        let rest = older_page_locked(&path, "uMe", "u1", "21").unwrap();
+        let earliest = rest["messages"].as_array().unwrap();
+        assert_eq!(earliest[0]["text"], "1");
+        assert_eq!(earliest.len(), 20);
+        assert_eq!(rest["more"], false);
+        save_history_locked(&path, "uMe", &json!({
+            "id": "u1",
+            "messages": (61..=100).map(|index| json!({"id": index.to_string(), "mine": false, "name": "Ada", "text": index.to_string(), "time": index})).collect::<Vec<_>>()
+        })).unwrap();
+        let kept = older_page_locked(&path, "uMe", "u1", "61").unwrap();
+        assert_eq!(kept["messages"].as_array().unwrap()[0]["text"], "21");
+        let conn = connect(&path).unwrap();
+        let cursor = oldest_server_cursor_locked(&conn, "u1").unwrap().unwrap();
+        assert_eq!(cursor, (1, "1".to_string()));
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 }

@@ -16,12 +16,17 @@ type MembersCard = {
   picture: string;
   autoJoin: boolean;
   canRemove?: boolean;
+  inviteUrl?: string;
+  inviteEnabled?: boolean;
   members: Member[];
 };
 
 type Friend = { id: string; name: string; picture: string };
 
 const photo = document.querySelector<HTMLElement>("#members-photo")!;
+const camera = document.querySelector<HTMLButtonElement>("#members-camera")!;
+const photoFile = document.querySelector<HTMLInputElement>("#members-file")!;
+const clearPhoto = document.querySelector<HTMLButtonElement>("#members-clear-photo")!;
 const nameEl = document.querySelector<HTMLElement>("#members-name")!;
 const nameInput = document.querySelector<HTMLInputElement>("#members-name-input")!;
 const rename = document.querySelector<HTMLButtonElement>("#members-rename")!;
@@ -44,8 +49,25 @@ const removeText = document.querySelector<HTMLElement>("#remove-text")!;
 const removeError = document.querySelector<HTMLElement>("#remove-error")!;
 const removeCancel = document.querySelector<HTMLButtonElement>("#remove-cancel")!;
 const removeYes = document.querySelector<HTMLButtonElement>("#remove-yes")!;
+const linkBox = document.querySelector<HTMLElement>("#link-box")!;
+const linkAllow = document.querySelector<HTMLButtonElement>("#link-allow")!;
+const linkUrl = document.querySelector<HTMLElement>("#link-url")!;
+const linkHint = document.querySelector<HTMLElement>("#link-hint")!;
+const linkCopy = document.querySelector<HTMLButtonElement>("#link-copy")!;
+const linkReset = document.querySelector<HTMLButtonElement>("#link-reset")!;
+const linkCreate = document.querySelector<HTMLButtonElement>("#link-create")!;
+const leaveChat = document.querySelector<HTMLButtonElement>("#leave-chat")!;
+const leaveConfirm = document.querySelector<HTMLElement>("#leave-confirm")!;
+const leaveText = document.querySelector<HTMLElement>("#leave-text")!;
+const leaveError = document.querySelector<HTMLElement>("#leave-error")!;
+const leaveCancel = document.querySelector<HTMLButtonElement>("#leave-cancel")!;
+const leaveYes = document.querySelector<HTMLButtonElement>("#leave-yes")!;
+const linkConfirm = document.querySelector<HTMLElement>("#link-confirm")!;
+const linkError = document.querySelector<HTMLElement>("#link-error")!;
+const linkCancel = document.querySelector<HTMLButtonElement>("#link-cancel")!;
+const linkYes = document.querySelector<HTMLButtonElement>("#link-yes")!;
 
-let card: MembersCard = { id: "", name: "", picture: "", autoJoin: true, canRemove: false, members: [] };
+let card: MembersCard = { id: "", name: "", picture: "", autoJoin: true, canRemove: false, inviteUrl: "", inviteEnabled: true, members: [] };
 let pendingRemoval: Member | null = null;
 let loaded = false;
 let collapsed = false;
@@ -200,16 +222,51 @@ function closeRemove(): void {
   removeConfirm.hidden = true;
 }
 
+function isGroup(): boolean {
+  return card.id.startsWith("c");
+}
+
+function adopt(next: MembersCard, id: string): void {
+  card = {
+    id: next.id || id,
+    name: next.name || card.name,
+    picture: next.picture ?? card.picture,
+    autoJoin: Boolean(next.autoJoin),
+    canRemove: Boolean(next.canRemove),
+    inviteUrl: next.inviteUrl || "",
+    inviteEnabled: next.inviteEnabled !== false,
+    members: Array.isArray(next.members) ? next.members : card.members,
+  };
+  loaded = true;
+}
+
 function paint(): void {
-  paintFace(photo, card.name || t("group"), card.picture, document.querySelector("#members-camera"));
+  const group = isGroup();
+  paintFace(photo, card.name || t(group ? "group" : "room"), card.picture, camera);
+  camera.hidden = !group;
+  clearPhoto.hidden = !group || !card.picture;
+  rename.hidden = editing || !group;
+  inviteOpen.hidden = !group;
+  document.querySelector<HTMLElement>("#auto-row")!.hidden = !group;
+  document.querySelector<HTMLElement>("#auto-copy")!.hidden = !group;
+  linkBox.hidden = !group;
   if (!editing) {
     nameEl.hidden = false;
-    rename.hidden = false;
     nameInput.hidden = true;
-    nameEl.textContent = card.name || t("group");
+    nameEl.textContent = card.name || t(group ? "group" : "room");
   }
   foot.hidden = !loaded;
   autoJoin.setAttribute("aria-checked", card.autoJoin ? "true" : "false");
+  const linkOn = card.inviteEnabled !== false;
+  linkAllow.setAttribute("aria-checked", linkOn ? "true" : "false");
+  const url = linkOn ? card.inviteUrl || "" : "";
+  linkUrl.hidden = !url;
+  linkUrl.textContent = url;
+  linkHint.textContent = !linkOn ? t("inviteLinkOff") : url ? t("inviteLinkHint") : t("noInviteLink");
+  linkCopy.hidden = !url;
+  linkReset.hidden = !card.inviteUrl;
+  linkCreate.hidden = Boolean(card.inviteUrl);
+  leaveChat.textContent = t(group ? "leaveGroup" : "leaveRoom");
   if (!loaded) {
     list.hidden = false;
     sayKey("loadingMembers");
@@ -233,6 +290,8 @@ function applyMembers(next: MembersCard): void {
     picture: next.picture || "",
     autoJoin: Boolean(next.autoJoin),
     canRemove: Boolean(next.canRemove),
+    inviteUrl: next.inviteUrl || "",
+    inviteEnabled: next.inviteEnabled !== false,
     members: Array.isArray(next.members) ? next.members : [],
   };
   loaded = false;
@@ -256,15 +315,7 @@ function applyMembers(next: MembersCard): void {
       if (token !== loadToken) {
         return;
       }
-      card = {
-        id: roster.id || id,
-        name: roster.name || card.name,
-        picture: roster.picture || card.picture,
-        autoJoin: Boolean(roster.autoJoin),
-        canRemove: Boolean(roster.canRemove),
-        members: Array.isArray(roster.members) ? roster.members : [],
-      };
-      loaded = true;
+      adopt(roster, id);
       say("");
       paint();
     })
@@ -484,15 +535,7 @@ inviteSend.addEventListener("click", () => {
         if (token !== loadToken) {
           return;
         }
-        card = {
-          id: roster.id || id,
-          name: roster.name || card.name,
-          picture: roster.picture || card.picture,
-          autoJoin: Boolean(roster.autoJoin),
-          canRemove: Boolean(roster.canRemove),
-          members: Array.isArray(roster.members) ? roster.members : [],
-        };
-        loaded = true;
+        adopt(roster, id);
         paint();
       });
     })
@@ -516,9 +559,213 @@ removeConfirm.addEventListener("click", (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !removeConfirm.hidden && !busy) {
-    closeRemove();
+  if (event.key !== "Escape" || busy) {
+    return;
   }
+  if (!removeConfirm.hidden) {
+    closeRemove();
+  } else if (!leaveConfirm.hidden) {
+    leaveConfirm.hidden = true;
+  } else if (!linkConfirm.hidden) {
+    linkConfirm.hidden = true;
+  }
+});
+
+function fileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const raw = String(reader.result || "");
+      const comma = raw.indexOf(",");
+      resolve(comma >= 0 ? raw.slice(comma + 1) : raw);
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("that photo could not be read"));
+    reader.readAsDataURL(file);
+  });
+}
+
+camera.addEventListener("click", () => {
+  if (!busy && isGroup()) {
+    photoFile.click();
+  }
+});
+
+photoFile.addEventListener("change", () => {
+  const file = photoFile.files?.[0];
+  photoFile.value = "";
+  if (!file || busy || !isGroup()) {
+    return;
+  }
+  busy = true;
+  void fileAsBase64(file)
+    .then((data) => invoke<MembersCard>("set_group_picture", { id: card.id, data }))
+    .then((roster) => {
+      adopt(roster, card.id);
+      say("");
+      paint();
+    })
+    .catch((error: unknown) => say(message(error)))
+    .finally(() => {
+      busy = false;
+    });
+});
+
+clearPhoto.addEventListener("click", () => {
+  if (busy || !isGroup() || !card.picture) {
+    return;
+  }
+  busy = true;
+  void invoke<MembersCard>("clear_group_picture", { id: card.id })
+    .then((roster) => {
+      adopt({ ...roster, picture: roster.picture || "" }, card.id);
+      say("");
+      paint();
+    })
+    .catch((error: unknown) => say(message(error)))
+    .finally(() => {
+      busy = false;
+    });
+});
+
+linkAllow.addEventListener("click", () => {
+  if (busy || !loaded || !isGroup()) {
+    return;
+  }
+  const next = card.inviteEnabled === false;
+  busy = true;
+  const command = next && !card.inviteUrl ? "reissue_group_ticket" : "set_group_invite_link";
+  const args = command === "reissue_group_ticket" ? { id: card.id } : { id: card.id, enabled: next };
+  void invoke<MembersCard>(command, args)
+    .then((roster) => {
+      adopt(roster, card.id);
+      if (command === "set_group_invite_link") {
+        card.inviteEnabled = next;
+      }
+      say("");
+      paint();
+    })
+    .catch((error: unknown) => say(message(error)))
+    .finally(() => {
+      busy = false;
+    });
+});
+
+linkCopy.addEventListener("click", () => {
+  const url = card.inviteUrl || "";
+  if (!url || card.inviteEnabled === false) {
+    return;
+  }
+  const done = () => sayKey("linkCopied");
+  if (navigator.clipboard?.writeText) {
+    void navigator.clipboard.writeText(url).then(done).catch(() => say(url, true));
+    return;
+  }
+  say(url, true);
+});
+
+linkCreate.addEventListener("click", () => {
+  if (busy || !isGroup()) {
+    return;
+  }
+  busy = true;
+  void invoke<MembersCard>("reissue_group_ticket", { id: card.id })
+    .then((roster) => {
+      adopt(roster, card.id);
+      say("");
+      paint();
+    })
+    .catch((error: unknown) => say(message(error)))
+    .finally(() => {
+      busy = false;
+    });
+});
+
+linkReset.addEventListener("click", () => {
+  if (busy || !card.inviteUrl) {
+    return;
+  }
+  linkError.hidden = true;
+  linkError.textContent = "";
+  linkYes.disabled = false;
+  linkConfirm.hidden = false;
+  linkCancel.focus();
+});
+
+linkCancel.addEventListener("click", () => {
+  if (!busy) {
+    linkConfirm.hidden = true;
+  }
+});
+
+linkConfirm.addEventListener("click", (event) => {
+  if (event.target === linkConfirm && !busy) {
+    linkConfirm.hidden = true;
+  }
+});
+
+linkYes.addEventListener("click", () => {
+  if (busy || !isGroup()) {
+    return;
+  }
+  busy = true;
+  linkYes.disabled = true;
+  linkError.hidden = true;
+  void invoke<MembersCard>("reissue_group_ticket", { id: card.id })
+    .then((roster) => {
+      adopt(roster, card.id);
+      linkConfirm.hidden = true;
+      say("");
+      paint();
+    })
+    .catch((error: unknown) => {
+      linkError.hidden = false;
+      linkError.textContent = message(error);
+    })
+    .finally(() => {
+      busy = false;
+      linkYes.disabled = false;
+    });
+});
+
+leaveChat.addEventListener("click", () => {
+  if (busy || !card.id) {
+    return;
+  }
+  const group = isGroup();
+  leaveText.textContent = t(group ? "leaveGroupAsk" : "leaveRoomAsk");
+  leaveYes.textContent = t(group ? "leaveGroup" : "leaveRoom");
+  leaveError.hidden = true;
+  leaveError.textContent = "";
+  leaveYes.disabled = false;
+  leaveConfirm.hidden = false;
+  leaveCancel.focus();
+});
+
+leaveCancel.addEventListener("click", () => {
+  if (!busy) {
+    leaveConfirm.hidden = true;
+  }
+});
+
+leaveConfirm.addEventListener("click", (event) => {
+  if (event.target === leaveConfirm && !busy) {
+    leaveConfirm.hidden = true;
+  }
+});
+
+leaveYes.addEventListener("click", () => {
+  if (busy || !card.id) {
+    return;
+  }
+  busy = true;
+  leaveYes.disabled = true;
+  leaveError.hidden = true;
+  void invoke("leave_chat", { id: card.id }).catch((error: unknown) => {
+    leaveError.hidden = false;
+    leaveError.textContent = message(error);
+    busy = false;
+    leaveYes.disabled = false;
+  });
 });
 
 removeYes.addEventListener("click", () => {
@@ -541,15 +788,7 @@ removeYes.addEventListener("click", () => {
           if (token !== loadToken) {
             return;
           }
-          card = {
-            id: roster.id || id,
-            name: roster.name || card.name,
-            picture: roster.picture || card.picture,
-            autoJoin: Boolean(roster.autoJoin),
-            canRemove: Boolean(roster.canRemove),
-            members: Array.isArray(roster.members) ? roster.members : [],
-          };
-          loaded = true;
+          adopt(roster, id);
           paint();
         })
         .catch(() => undefined);
@@ -573,6 +812,10 @@ function refreshLocale(): void {
   }
   if (pendingRemoval) {
     askRemove(pendingRemoval);
+  }
+  if (!leaveConfirm.hidden) {
+    leaveText.textContent = t(isGroup() ? "leaveGroupAsk" : "leaveRoomAsk");
+    leaveYes.textContent = t(isGroup() ? "leaveGroup" : "leaveRoom");
   }
   const kind = note.dataset.kind || "";
   if (kind && !note.hidden && kind !== "noMembersNamed" && kind !== "loadingMembers") {

@@ -102,7 +102,7 @@ struct Step {
     assistant: Json,
 }
 
-const SYSTEM: &str = "You are the assistant inside a LINE desktop app. Use the tools to look up saved chats and messages, and to use the signed-in LINE account. When the user asks for the latest or recent messages in a chat, call latest_messages once with that chat's name, then answer. The database keeps only recent messages for each chat. search_users finds a person by LINE ID or phone number and also matches saved friends by name. Reading tools include get_profile, get_my_profile, list_friends, friend_recommendations, list_group_members, list_invite_candidates, and fetch_chat. send_text, send_sticker, unsend_message, react_to_message, mark_chat_read, add_friend, set_blocked, set_favorite, rename_friend, create_group, rename_group, invite_to_group, remove_group_member, set_group_auto_join, and report_message change the account. Call one of those only when the user asked for that action. chat_llm lists, reads, saves, or deletes the model settings stored for one chat. Save or delete those settings only when the user asked. Do not invent messages, names, ids, or times. If a tool returns nothing, say that. Reply in the same language as the user's question.";
+const SYSTEM: &str = "You are the assistant inside a LINE desktop app. Use the tools to look up saved chats and messages, and to use the signed-in LINE account. When the user asks for the latest or recent messages in a chat, call latest_messages once with that chat's name, then answer. The database keeps only recent messages for each chat. search_users finds a person by LINE ID or phone number and also matches saved friends by name. Reading tools include get_profile, get_my_profile, list_friends, friend_recommendations, list_group_members, list_invite_candidates, and fetch_chat. send_text, send_sticker, send_contact, unsend_message, react_to_message, mark_chat_read, add_friend, set_blocked, set_favorite, rename_friend, create_group, create_room, rename_group, invite_to_group, remove_group_member, leave_chat, reissue_invite_link, set_invite_link, set_group_auto_join, and report_message change the account. Call one of those only when the user asked for that action. chat_llm lists, reads, saves, or deletes the model settings stored for one chat. Save or delete those settings only when the user asked. Do not invent messages, names, ids, or times. If a tool returns nothing, say that. Reply in the same language as the user's question.";
 
 const ANSWER_NOW: &str = "Answer the user's last question now from the tool results above. Do not call tools.";
 
@@ -1109,7 +1109,7 @@ fn publish_line_action(app: &tauri::AppHandle, name: &str, result: &str) {
     let Ok(value) = serde_json::from_str::<Json>(result) else {
         return;
     };
-    if (name == "send_text" || name == "send_sticker") && value.get("ok") == Some(&Json::Bool(true)) {
+    if (name == "send_text" || name == "send_sticker" || name == "send_contact") && value.get("ok") == Some(&Json::Bool(true)) {
         let _ = app.emit("line-sent", &value);
     }
     if name == "chat_llm" && value.get("changed") == Some(&Json::Bool(true)) {

@@ -22,8 +22,8 @@
     <header id="members-head">
       <div id="members-photo">
         <span class="avatar-fallback" aria-hidden="true">?</span>
-        <span id="members-camera" aria-hidden="true">
-          <svg viewBox="0 0 24 24">
+        <button id="members-camera" type="button" data-i18n-aria="changeGroupPhoto" aria-label="Change group photo">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
             <path
               fill="none"
               stroke="currentColor"
@@ -32,8 +32,9 @@
             />
             <circle cx="12" cy="12.4" r="2.2" fill="none" stroke="currentColor" stroke-width="1.8" />
           </svg>
-        </span>
+        </button>
       </div>
+      <input id="members-file" type="file" accept="image/*" hidden />
       <div id="members-name-row">
         <h1 id="members-name"></h1>
         <button id="members-rename" type="button" data-i18n-aria="editGroupName" aria-label="Edit group name">
@@ -48,6 +49,7 @@
           </svg>
         </button>
         <input id="members-name-input" type="text" maxlength="50" hidden />
+        <button id="members-clear-photo" type="button" data-i18n="removeGroupPhoto" hidden>Remove group photo</button>
       </div>
     </header>
     <div id="members-main">
@@ -98,6 +100,24 @@
       <p id="auto-copy" data-i18n="membersJoinAutoHint">
         Members join the group as soon as they're invited. Disable this setting to always require members to accept an invite before joining.
       </p>
+      <div id="link-box">
+        <div id="link-row">
+          <strong data-i18n="inviteLink">Invite link</strong>
+          <button id="link-allow" type="button" role="checkbox" aria-checked="true" data-i18n-aria="allowInviteLink" aria-label="Allow joining with a link">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path fill="currentColor" d="M6.2 11.4 2.9 8.1l1.2-1.2 2.1 2.1 5.2-5.2 1.2 1.2z" />
+            </svg>
+          </button>
+        </div>
+        <p id="link-url"></p>
+        <p id="link-hint" data-i18n="inviteLinkHint">Anyone with this link can join the group.</p>
+        <div id="link-actions">
+          <button id="link-copy" type="button" data-i18n="copyLink">Copy link</button>
+          <button id="link-reset" type="button" data-i18n="resetLink">Reset link</button>
+          <button id="link-create" type="button" data-i18n="createLink" hidden>Create link</button>
+        </div>
+      </div>
+      <button id="leave-chat" type="button" data-i18n="leaveGroup">Leave group</button>
     </footer>
     <section id="invite-view" hidden>
       <div id="invite-bar">
@@ -122,6 +142,26 @@
         <div>
           <button id="remove-cancel" type="button" data-i18n="cancel">Cancel</button>
           <button id="remove-yes" type="button" data-i18n="remove">Remove</button>
+        </div>
+      </div>
+    </div>
+    <div id="leave-confirm" hidden>
+      <div id="leave-card" role="dialog" aria-modal="true" aria-labelledby="leave-text">
+        <p id="leave-text"></p>
+        <p id="leave-error" hidden></p>
+        <div>
+          <button id="leave-cancel" type="button" data-i18n="cancel">Cancel</button>
+          <button id="leave-yes" type="button" data-i18n="leaveGroup">Leave group</button>
+        </div>
+      </div>
+    </div>
+    <div id="link-confirm" hidden>
+      <div id="link-card" role="dialog" aria-modal="true" aria-labelledby="link-text">
+        <p id="link-text" data-i18n="resetLinkAsk">Reset the invite link? The current link will stop working.</p>
+        <p id="link-error" hidden></p>
+        <div>
+          <button id="link-cancel" type="button" data-i18n="cancel">Cancel</button>
+          <button id="link-yes" type="button" data-i18n="resetLink">Reset link</button>
         </div>
       </div>
     </div>

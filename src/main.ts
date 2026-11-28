@@ -55,6 +55,9 @@ type HistoryMessage = {
   replyThumb?: string;
   replyMediaId?: string;
   duration?: number;
+  contactId?: string;
+  contactName?: string;
+  contactPicture?: string;
 };
 
 type MediaSlot = { id: string; seq: number; animated?: boolean };
@@ -78,6 +81,9 @@ type SendResult = {
   animated?: boolean;
   sticker?: string;
   stickerFallback?: string;
+  contactId?: string;
+  contactName?: string;
+  contactPicture?: string;
   fileName?: string;
   gid?: string;
   seq?: number;
@@ -90,6 +96,9 @@ type HistoryPayload = {
   id: string;
   lastMessageId?: string;
   messages: HistoryMessage[];
+  older?: boolean;
+  end?: boolean;
+  error?: string;
 };
 
 type ChatPayload = {
@@ -120,6 +129,11 @@ const composerInput = document.querySelector<HTMLTextAreaElement>("#composer-inp
 const autoReplyButton = document.querySelector<HTMLButtonElement>("#auto-reply")!;
 const attachFile = document.querySelector<HTMLButtonElement>("#attach-file")!;
 const stickerOpen = document.querySelector<HTMLButtonElement>("#sticker-open")!;
+const contactOpen = document.querySelector<HTMLButtonElement>("#contact-open")!;
+const contactPanel = document.querySelector<HTMLElement>("#contact-panel")!;
+const contactSearch = document.querySelector<HTMLInputElement>("#contact-search")!;
+const contactList = document.querySelector<HTMLElement>("#contact-list")!;
+const contactNote = document.querySelector<HTMLElement>("#contact-note")!;
 const dictateButton = document.querySelector<HTMLButtonElement>("#dictate-message")!;
 const voiceButton = document.querySelector<HTMLButtonElement>("#voice-message")!;
 const voiceHold = document.querySelector<HTMLElement>("#voice-hold")!;
@@ -314,6 +328,12 @@ let openLastId = "";
 let historyToken = 0;
 let paintedHistory = "";
 let openHistory: HistoryPayload | null = null;
+let historyOlder = false;
+let historyOlderBusy = false;
+let olderHold = false;
+let olderStickToEnd = false;
+let pendingJump = "";
+let pendingJumpPages = 0;
 let paintedIds = "";
 let openUnread = 0;
 let unreadFocus = "";
@@ -362,6 +382,7 @@ type Outgoing = {
   albumUrls?: string[];
   file?: { name: string; mime: string; data: string; groupId?: string; groupSeq?: number; groupCount?: number };
   stickerSend?: { packageId: string; stickerId: string; animated: boolean };
+  contactSend?: { id: string; name: string; picture: string };
   silent?: boolean;
   duration?: number;
   peaks?: number[];
@@ -385,6 +406,7 @@ let attachmentEpoch = 0;
 let sendBusy = false;
 let msgMenuRow: HTMLElement | null = null;
 let shareText = "";
+let shareContact: { id: string; name: string; picture: string } | null = null;
 const outgoing: Outgoing[] = [];
 let outgoingSeq = 0;
 let menuOpenedAt = 0;
@@ -677,7 +699,7 @@ function paintThreadHead(chat: ChatRow): void {
   threadHead.replaceChildren();
   const count = chat.members === null ? "" : ` (${chat.members})`;
   const label = `${displayName(chat.name)}${count}`;
-  if (chat.kind === "group") {
+  if (chat.kind === "group" || chat.kind === "room") {
     const title = document.createElement("button");
     title.type = "button";
     title.className = "thread-title";
@@ -714,7 +736,7 @@ function paintThreadHead(chat: ChatRow): void {
   document.body.dataset.sound = muted ? "off" : "on";
 }
 
-function patchChat(detail: { id?: string; name?: string; members?: number | null }): void {
+function patchChat(detail: { id?: string; name?: string; members?: number | null; picture?: string }): void {
   const chat = rows.find((row) => row.id === detail.id);
   if (!chat) {
     return;
@@ -722,16 +744,35 @@ function patchChat(detail: { id?: string; name?: string; members?: number | null
   const name = detail.name?.trim() || "";
   const nameChanged = Boolean(name && name !== chat.name);
   const membersChanged = typeof detail.members === "number" && detail.members !== chat.members;
+  const pictureChanged = typeof detail.picture === "string" && detail.picture !== chat.picture;
   if (nameChanged) {
     chat.name = name;
+  }
+  if (pictureChanged && typeof detail.picture === "string") {
+    chat.picture = detail.picture;
+  }
+  if (nameChanged || pictureChanged) {
     renderList();
   }
   if (membersChanged && typeof detail.members === "number") {
     chat.members = detail.members;
   }
-  if ((nameChanged || membersChanged) && chat.id === openId) {
+  if ((nameChanged || membersChanged || pictureChanged) && chat.id === openId) {
     paintThreadHead(chat);
   }
+}
+
+function dropChat(id: string): void {
+  const index = rows.findIndex((row) => row.id === id);
+  if (index < 0) {
+    return;
+  }
+  const open = openId === id;
+  rows.splice(index, 1);
+  if (open) {
+    showThread(undefined);
+  }
+  renderList();
 }
 
 let audioCtx: AudioContext | undefined;
@@ -1134,11 +1175,13 @@ function showThread(chat: ChatRow | undefined): void {
     closeReactionPicker();
     composerInput.disabled = true;
     closeStickerPanel();
+    closeContactPanel();
     abandonDictation();
     void abandonVoice();
     stopVoicePlayback();
     attachFile.disabled = true;
     stickerOpen.disabled = true;
+    contactOpen.disabled = true;
     discardAttachment();
     sendError.hidden = true;
     sendNote.hidden = true;
@@ -1153,6 +1196,7 @@ function showThread(chat: ChatRow | undefined): void {
   composerInput.disabled = false;
   attachFile.disabled = false;
   stickerOpen.disabled = false;
+  contactOpen.disabled = false;
   paintDictate();
   if (chat.id !== openId) {
     abandonDictation();
@@ -1162,8 +1206,15 @@ function showThread(chat: ChatRow | undefined): void {
     stickerWatch?.disconnect();
     stickerWatch = null;
     closeStickerPanel();
+    closeContactPanel();
     openId = chat.id;
     openLastId = "";
+    historyOlder = false;
+    historyOlderBusy = false;
+    olderHold = false;
+    olderStickToEnd = false;
+    pendingJump = "";
+    pendingJumpPages = 0;
     paintedHistory = "";
     paintedIds = "";
     openUnread = chat.unread && chat.unread > 0 ? chat.unread : 0;
@@ -1211,14 +1262,195 @@ function showThread(chat: ChatRow | undefined): void {
 
 function historyStamp(payload: HistoryPayload): string {
   return payload.messages
-    .map((message) => [message.id || "", message.sender || "", message.text, message.status || "", message.kind || "", message.mediaId || "", message.gid || "", String(message.seq || 0), message.sticker || "", message.replyId || "", String(message.readers || 0), String(message.time), String(message.duration || 0)].join("\u001f"))
+    .map((message) => [message.id || "", message.sender || "", message.text, message.status || "", message.kind || "", message.mediaId || "", message.gid || "", String(message.seq || 0), message.sticker || "", message.replyId || "", String(message.readers || 0), String(message.time), String(message.duration || 0), message.contactId || "", message.contactName || ""].join("\u001f"))
     .join("\u001e");
+}
+
+function messageIsBefore(message: HistoryMessage, cursor: HistoryMessage): boolean {
+  if ((message.time || 0) < (cursor.time || 0)) {
+    return true;
+  }
+  if ((message.time || 0) > (cursor.time || 0)) {
+    return false;
+  }
+  return (message.id || "") < (cursor.id || "");
+}
+
+function keptPrefix(current: HistoryPayload | null, incoming: HistoryPayload): HistoryMessage[] {
+  if (!current || current.id !== incoming.id || incoming.messages.length === 0) {
+    return [];
+  }
+  const ids = new Set(incoming.messages.map((message) => message.id).filter((id): id is string => Boolean(id)));
+  const cursor = incoming.messages[0];
+  return current.messages.filter((message) => {
+    const id = message.id || "";
+    return Boolean(id) && !ids.has(id) && messageIsBefore(message, cursor);
+  });
+}
+
+function oldestHistoryId(): string {
+  for (const message of openHistory?.messages || []) {
+    if (message.id) {
+      return message.id;
+    }
+  }
+  return "";
+}
+
+function threadAnchor(): { id: string; top: number } | null {
+  const row = threadBody.querySelector<HTMLElement>("[data-id]");
+  const id = row?.dataset.id || "";
+  if (!row || !id) {
+    return null;
+  }
+  return { id, top: row.getBoundingClientRect().top };
+}
+
+function paintMessages(messages: HistoryMessage[]): boolean {
+  threadBody.replaceChildren();
+  if (messages.length === 0 && !outgoing.some((item) => item.chatId === openId)) {
+    const note = document.createElement("p");
+    note.className = "thread-note";
+    note.dataset.kind = "empty";
+    note.textContent = t("noMessages");
+    threadBody.append(note);
+    return false;
+  }
+  groupMessages(hydrateReplies(messages)).forEach((message) => threadBody.append(messageBubble(message)));
+  return placeOutgoing(openId);
+}
+
+function holdAnchor(anchor: { id: string; top: number }): void {
+  const token = ++placeToken;
+  const pin = (): void => {
+    if (token !== placeToken) {
+      return;
+    }
+    const next = quotedMessageRow(anchor.id);
+    if (!next) {
+      return;
+    }
+    const delta = next.getBoundingClientRect().top - anchor.top;
+    if (Math.abs(delta) > 1) {
+      assignThreadScroll(threadBody.scrollTop + delta);
+    }
+  };
+  watchThreadLayout(token, "anchor", pin);
+  pin();
+  requestAnimationFrame(pin);
+}
+
+function maybeLoadOlder(): void {
+  if (!historyOlder || historyOlderBusy || olderHold || pendingJump || !openId || placingThread) {
+    return;
+  }
+  if (threadBody.scrollTop >= 48) {
+    return;
+  }
+  const short = threadBody.scrollHeight <= threadBody.clientHeight + 48;
+  olderStickToEnd = short && !userMoved;
+  void loadOlder();
+}
+
+async function loadOlder(): Promise<void> {
+  if (!historyOlder || historyOlderBusy || !openId) {
+    return;
+  }
+  if (olderHold && !pendingJump) {
+    return;
+  }
+  const beforeId = oldestHistoryId();
+  if (!beforeId) {
+    historyOlder = false;
+    return;
+  }
+  historyOlderBusy = true;
+  const epoch = historyToken;
+  const chat = openId;
+  try {
+    const payload = await invoke<HistoryPayload>("load_older", { id: chat, beforeId });
+    if (epoch !== historyToken || chat !== openId) {
+      return;
+    }
+    prependHistory(payload);
+  } catch {
+    if (epoch === historyToken && chat === openId) {
+      historyOlderBusy = false;
+      if (threadBody.scrollHeight > threadBody.clientHeight + 48) {
+        olderHold = true;
+      } else {
+        historyOlder = false;
+      }
+    }
+  }
+}
+
+function prependHistory(payload: HistoryPayload): void {
+  historyOlderBusy = false;
+  if (payload.id !== openId || !openHistory || openHistory.id !== payload.id) {
+    return;
+  }
+  if (payload.error) {
+    const canScroll = threadBody.scrollHeight > threadBody.clientHeight + 48;
+    olderHold = canScroll;
+    if (!canScroll) {
+      payload = { ...payload, end: true };
+    }
+  }
+  const known = new Set(openHistory.messages.map((message) => message.id).filter((id): id is string => Boolean(id)));
+  const fresh = payload.messages.filter((message) => message.id && !known.has(message.id));
+  historyOlder = payload.end !== true;
+  if (fresh.length === 0) {
+    olderStickToEnd = false;
+    if (payload.end) {
+      historyOlder = false;
+    }
+    pendingJump = "";
+    return;
+  }
+  const anchor = olderStickToEnd ? null : threadAnchor();
+  olderStickToEnd = false;
+  openHistory = { ...openHistory, messages: [...fresh, ...openHistory.messages] };
+  placingThread = true;
+  closeReactionPicker();
+  closeMsgMenu();
+  paintMessages(openHistory.messages);
+  paintedHistory = historyStamp(openHistory);
+  paintedIds = openHistory.messages.map((message) => message.id || "").join("\u001f");
+  document.body.dataset.history = String(openHistory.messages.length);
+  replaceAutoThread(payload.id, openHistory.messages);
+  if (anchor) {
+    holdAnchor(anchor);
+  } else if (!userMoved) {
+    scrollThreadToEnd();
+  }
+  if (pendingJump) {
+    pendingJumpPages += 1;
+    if (quotedMessageRow(pendingJump)) {
+      const id = pendingJump;
+      pendingJump = "";
+      revealQuotedMessage(id);
+    } else if (!historyOlder || pendingJumpPages >= 30) {
+      pendingJump = "";
+    } else {
+      void loadOlder();
+    }
+  }
+  requestAnimationFrame(() => {
+    placingThread = false;
+    maybeLoadOlder();
+  });
 }
 
 function renderHistory(payload: HistoryPayload): void {
   if (payload.id !== openId) {
     return;
   }
+  const prefix = keptPrefix(openHistory, payload);
+  if (prefix.length > 0) {
+    payload = { ...payload, messages: [...prefix, ...payload.messages] };
+  }
+  historyOlder = prefix.length > 0 ? historyOlder : payload.older === true;
   openHistory = payload;
   replaceAutoThread(payload.id, payload.messages);
   const candidate = payload.lastMessageId || newestMessageId(payload.messages.map((message) => message.id || ""));
@@ -1243,13 +1475,8 @@ function renderHistory(payload: HistoryPayload): void {
   closeReactionPicker();
   closeMsgMenu();
   placingThread = true;
-  threadBody.replaceChildren();
+  const placed = paintMessages(payload.messages);
   if (payload.messages.length === 0 && !outgoing.some((item) => item.chatId === payload.id)) {
-    const note = document.createElement("p");
-    note.className = "thread-note";
-    note.dataset.kind = "empty";
-    note.textContent = t("noMessages");
-    threadBody.append(note);
     document.body.dataset.history = "0";
     unreadFocus = "";
     stopLayoutWatch();
@@ -1257,8 +1484,6 @@ function renderHistory(payload: HistoryPayload): void {
     markOpenRead(payload.id);
     return;
   }
-  groupMessages(hydrateReplies(payload.messages)).forEach((message) => threadBody.append(messageBubble(message)));
-  const placed = placeOutgoing(payload.id);
   settleThread(payload.messages, previousIds, firstPaint, savedTop);
   if (placed && !userMoved) {
     scrollThreadToEnd();
@@ -1271,6 +1496,7 @@ function renderHistory(payload: HistoryPayload): void {
   document.body.dataset.history = String(payload.messages.length);
   markOpenRead(payload.id);
   paintAutoReply();
+  requestAnimationFrame(() => maybeLoadOlder());
 }
 
 function incomingId(message: HistoryMessage): string {
@@ -1819,6 +2045,57 @@ function fileIcon(): SVGSVGElement {
   path.setAttribute("d", "M6 2.5h7.2L19.5 8.8V20a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 20V4A1.5 1.5 0 0 1 6 2.5zm6.8 1.6V9h4.9l-4.9-4.9zM11 13.2v4.1l-1.4-1.4-1.1 1.1 3 3 3-3-1.1-1.1-1.4 1.4v-4.1H11z");
   svg.append(path);
   return svg;
+}
+
+function contactCard(message: { contactId?: string; contactName?: string; contactPicture?: string; text?: string }): HTMLButtonElement {
+  const name = (message.contactName || message.text || t("contact")).trim() || t("contact");
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "contact-card";
+  const picture = message.contactPicture || "";
+  if (picture) {
+    const photo = document.createElement("img");
+    photo.className = "avatar";
+    photo.alt = "";
+    photo.src = picture;
+    photo.addEventListener("error", () => {
+      photo.replaceWith(fallback(name));
+    });
+    button.append(photo);
+  } else {
+    button.append(fallback(name));
+  }
+  const copy = document.createElement("span");
+  copy.className = "contact-copy";
+  const title = document.createElement("strong");
+  title.className = "contact-name";
+  title.textContent = name;
+  const kind = document.createElement("small");
+  kind.textContent = t("contact");
+  copy.append(title, kind);
+  button.append(copy);
+  const id = message.contactId || "";
+  if (!id) {
+    button.disabled = true;
+  }
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (!id) {
+      return;
+    }
+    const friend = rows.some((row) => row.id === id && row.kind === "friend");
+    void invoke("open_profile", {
+      id,
+      name,
+      picture,
+      mine: id === myMid,
+      friend,
+    }).catch((error: unknown) => {
+      sendError.hidden = false;
+      sendError.textContent = error instanceof Error ? error.message : String(error);
+    });
+  });
+  return button;
 }
 
 function fileCard(label: string, onClick: (button: HTMLButtonElement) => void): HTMLButtonElement {
@@ -2818,8 +3095,16 @@ function quotedMessageRow(id: string): HTMLElement | null {
 function revealQuotedMessage(id: string): void {
   const row = quotedMessageRow(id);
   if (!row) {
+    if (!historyOlder || !id) {
+      return;
+    }
+    pendingJump = id;
+    pendingJumpPages = 0;
+    olderHold = false;
+    void loadOlder();
     return;
   }
+  pendingJump = "";
   const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   row.scrollIntoView({ block: "center", behavior: reduce ? "auto" : "smooth" });
   threadBody.querySelectorAll(".jump-target").forEach((item) => item.classList.remove("jump-target"));
@@ -2851,6 +3136,10 @@ function quoteText(row: HTMLElement): string {
   const text = row.querySelector(".msg-text")?.textContent?.trim() || "";
   if (text && !mediaLabel(text)) {
     return text;
+  }
+  const contact = row.querySelector(".contact-name")?.textContent?.trim() || "";
+  if (contact) {
+    return contact;
   }
   if (row.querySelector(".sticker")) {
     return t("sticker");
@@ -3118,7 +3407,18 @@ function showReport(row: HTMLElement): void {
 }
 
 function showShare(text: string): void {
+  shareContact = null;
   shareText = text;
+  openShareSheet();
+}
+
+function showShareContact(person: { id: string; name: string; picture: string }): void {
+  shareText = "";
+  shareContact = person;
+  openShareSheet();
+}
+
+function openShareSheet(): void {
   sheetTitle.textContent = t("share");
   sheetBody.hidden = true;
   sheetSettings.hidden = true;
@@ -3141,6 +3441,11 @@ function showShare(text: string): void {
       button.textContent = chat.name;
       button.addEventListener("click", () => {
         sheet.hidden = true;
+        const person = shareContact;
+        if (person) {
+          startContactSend(chat.id, person);
+          return;
+        }
         startSend(chat.id, shareText, null);
       });
       sheetList.append(button);
@@ -3184,6 +3489,9 @@ function messageBubble(message: BubbleMessage): HTMLElement {
   if (message.kind === "chat update" || message.kind === "unsent") {
     const note = document.createElement("div");
     note.className = "chat-update";
+    if (message.id) {
+      note.dataset.id = message.id;
+    }
     note.textContent = message.text;
     const label = clock(message.time);
     if (label) {
@@ -3223,6 +3531,8 @@ function messageBubble(message: BubbleMessage): HTMLElement {
     }, message.id || ""));
   } else if (message.kind === "audio" && (message.mediaId || message.id)) {
     bubble.append(voiceCard(message.mediaId || message.id || "", message.duration || 0, "", message.text));
+  } else if (message.kind === "contact" && message.contactId) {
+    bubble.append(contactCard(message));
   } else if (message.kind === "file" && message.id) {
     const name = message.text;
     const id = message.id;
@@ -3244,6 +3554,15 @@ function messageBubble(message: BubbleMessage): HTMLElement {
   }
   if (message.sender) {
     row.dataset.sender = message.sender;
+  }
+  if (message.contactId) {
+    row.dataset.contactId = message.contactId;
+  }
+  if (message.contactName) {
+    row.dataset.contactName = message.contactName;
+  }
+  if (message.contactPicture) {
+    row.dataset.contactPicture = message.contactPicture;
   }
   if (ids.length > 0) {
     row.dataset.ids = ids.join(",");
@@ -3934,6 +4253,9 @@ function directoryError(error: unknown): string {
   if (message.includes("Could not search") || message.includes("could not search")) {
     return t("couldNotSearch");
   }
+  if (message.includes("room")) {
+    return t("couldNotCreateRoom");
+  }
   if (message.includes("could not create") || message.includes("LINE could not create")) {
     return t("couldNotCreateGroup");
   }
@@ -4215,15 +4537,23 @@ async function loadRecommendations(): Promise<void> {
   }
 }
 
-function showAddScreen(screen: "home" | "search" | "group"): void {
+let makingRoom = false;
+
+function showAddScreen(screen: "home" | "search" | "group" | "room"): void {
   addHome.hidden = screen !== "home";
   addSearchView.hidden = screen !== "search";
-  addGroupView.hidden = screen !== "group";
+  addGroupView.hidden = screen !== "group" && screen !== "room";
   if (screen === "search") {
     addSearchNote.hidden = true;
     addSearchQuery.focus();
   }
-  if (screen === "group") {
+  if (screen === "group" || screen === "room") {
+    makingRoom = screen === "room";
+    addGroupView.classList.toggle("is-room", makingRoom);
+    const hint = document.querySelector<HTMLElement>("#add-group-hint");
+    if (hint) {
+      hint.textContent = t(makingRoom ? "roomFriends" : "chooseFriends");
+    }
     addGroupNote.hidden = true;
     paintGroupPicks();
     void loadPeople();
@@ -4919,6 +5249,7 @@ addRecsToggle.addEventListener("click", () => {
 });
 document.querySelector<HTMLButtonElement>("#add-search")!.addEventListener("click", () => showAddScreen("search"));
 document.querySelector<HTMLButtonElement>("#add-group")!.addEventListener("click", () => showAddScreen("group"));
+document.querySelector<HTMLButtonElement>("#add-room")!.addEventListener("click", () => showAddScreen("room"));
 document.querySelector<HTMLButtonElement>("#add-search-back")!.addEventListener("click", () => showAddScreen("home"));
 document.querySelector<HTMLButtonElement>("#add-group-back")!.addEventListener("click", () => showAddScreen("home"));
 addGroupQuery.addEventListener("input", paintGroupPicks);
@@ -4951,25 +5282,29 @@ addGroupCreate.addEventListener("click", () => {
     return;
   }
   const typed = addGroupInput.value.trim();
+  const room = makingRoom;
   const targets = [...groupPicked];
   const names = directoryPeople.filter((person) => groupPicked.has(person.id)).map((person) => person.name);
   addGroupCreate.disabled = true;
   addGroupNote.hidden = false;
   addGroupNote.textContent = t("create");
-  void invoke<{ id: string; name: string; members: number }>("create_group", { name: typed, targets })
+  const created = room
+    ? invoke<{ id: string; name?: string; members: number; kind?: string }>("create_room", { targets })
+    : invoke<{ id: string; name?: string; members: number; kind?: string }>("create_group", { name: typed, targets });
+  void created
     .then((made) => {
       groupPicked.clear();
       addGroupInput.value = "";
       const chat: ChatRow = {
         id: made.id,
-        name: made.name || typed || names.join(", ") || t("group"),
+        name: made.name || typed || names.join(", ") || t(room ? "room" : "group"),
         lastMessage: "",
         sealed: false,
         time: Date.now(),
         members: made.members,
         picture: "",
         muted: false,
-        kind: "group",
+        kind: made.kind === "room" || room ? "room" : "group",
         unread: null,
       };
       rememberChat(chat);
@@ -5036,6 +5371,15 @@ msgMenu.addEventListener("click", (event) => {
   } else if (action === "copy") {
     void copyMessage(row);
   } else if (action === "share") {
+    const contactId = row.dataset.contactId || "";
+    if (contactId) {
+      showShareContact({
+        id: contactId,
+        name: row.dataset.contactName || row.querySelector(".contact-name")?.textContent?.trim() || t("contact"),
+        picture: row.dataset.contactPicture || "",
+      });
+      return;
+    }
     const text = copyableText(row);
     if (!text) {
       sendError.hidden = false;
@@ -5176,6 +5520,10 @@ function outgoingBubble(item: Outgoing): HTMLElement {
     time: item.time,
     sticker: item.sticker,
     stickerFallback: item.stickerFallback,
+    kind: item.kind,
+    contactId: item.contactSend?.id,
+    contactName: item.contactSend?.name,
+    contactPicture: item.contactSend?.picture,
     replyId: item.reply?.id || "",
     replyText: item.reply?.text || "",
     replyName: item.reply?.name || "",
@@ -5408,6 +5756,9 @@ function finishOutgoing(localId: string, payload: SendResult): void {
     sticker,
     stickerFallback,
     kind: payload.kind || item?.kind || "",
+    contactId: payload.contactId || item?.contactSend?.id || "",
+    contactName: payload.contactName || item?.contactSend?.name || "",
+    contactPicture: payload.contactPicture || item?.contactSend?.picture || "",
     mediaId: payload.mediaId || payload.messageId || "",
     duration: payload.duration || item?.duration || 0,
     gid: payload.gid || "",
@@ -5443,6 +5794,9 @@ function rememberSent(payload: SendResult, item: Outgoing | undefined, sticker: 
     sticker,
     stickerFallback,
     kind: payload.kind || item?.kind || "",
+    contactId: payload.contactId || item?.contactSend?.id || "",
+    contactName: payload.contactName || item?.contactSend?.name || "",
+    contactPicture: payload.contactPicture || item?.contactSend?.picture || "",
     mediaId: payload.mediaId || "",
     duration: payload.duration || item?.duration || 0,
     animated: Boolean(payload.animated),
@@ -5496,6 +5850,13 @@ function dispatchSend(item: Outgoing): Promise<void> {
       silent: item.silent === true,
       durationMs: item.duration || 0,
       voice: item.voice === true,
+    }).then(() => undefined, fail);
+  }
+  if (item.contactSend) {
+    return invoke("send_contact", {
+      id: item.chatId,
+      mid: item.contactSend.id,
+      localId: item.localId,
     }).then(() => undefined, fail);
   }
   if (item.stickerSend) {
@@ -5885,6 +6246,34 @@ async function runAutoReply(chatId: string): Promise<void> {
   }
 }
 
+function startContactSend(chatId: string, person: { id: string; name: string; picture: string }): void {
+  if (!chatId || !person.id) {
+    return;
+  }
+  const name = person.name.trim() || t("contact");
+  const item: Outgoing = {
+    localId: `local-${Date.now()}-${outgoingSeq += 1}`,
+    chatId,
+    text: name,
+    reply: null,
+    time: Date.now(),
+    state: "sending",
+    error: "",
+    knownIds: chatId === openId ? paintedIds : "",
+    kind: "contact",
+    contactSend: { id: person.id, name, picture: person.picture },
+  };
+  outgoing.push(item);
+  bumpChat(chatId, name, item.time);
+  if (chatId === openId) {
+    threadBody.querySelector(".thread-note")?.remove();
+    threadBody.append(outgoingBubble(item));
+    unreadFocus = "";
+    scrollThreadToEnd();
+  }
+  dispatchSend(item);
+}
+
 function startSend(chatId: string, text: string, reply: ReplyDraft | null, silent = false): void {
   const body = text.trim();
   if (!body || !chatId) {
@@ -5931,6 +6320,7 @@ function onSent(payload: SendResult): void {
   composerInput.disabled = !openId;
   attachFile.disabled = !openId;
   stickerOpen.disabled = !openId;
+  contactOpen.disabled = !openId;
   refreshSendButton();
   finishOutgoing(payload.localId || "", payload);
 }
@@ -6001,6 +6391,61 @@ function closeStickerPanel(): void {
   stickerPanel.hidden = true;
   stickerOpen.setAttribute("aria-expanded", "false");
   scheduleStickerSuggest();
+}
+
+function closeContactPanel(): void {
+  contactPanel.hidden = true;
+  contactOpen.setAttribute("aria-expanded", "false");
+}
+
+function contactChoices(query: string): DirectoryPerson[] {
+  const needle = query.trim().toLowerCase();
+  const mine: DirectoryPerson[] = myMid
+    ? [{ id: myMid, name: myName || t("you"), picture: myPicture }]
+    : [];
+  const friends = directoryPeople.filter((person) => person.id && person.id !== myMid);
+  return [...mine, ...friends].filter((person) => !needle || person.name.toLowerCase().includes(needle));
+}
+
+function paintContactPanel(): void {
+  contactList.replaceChildren();
+  const choices = contactChoices(contactSearch.value);
+  contactNote.hidden = choices.length > 0;
+  if (choices.length === 0) {
+    const needle = contactSearch.value.trim();
+    contactNote.textContent = !peopleReady ? t("loadingFriends") : needle ? t("noFriendsNamed") : t("noFriendsYet");
+  }
+  for (const person of choices) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.append(personFace(person.name, person.picture));
+    const name = document.createElement("span");
+    name.textContent = person.name;
+    button.append(name);
+    button.addEventListener("click", () => {
+      if (!openId) {
+        return;
+      }
+      closeContactPanel();
+      startContactSend(openId, person);
+    });
+    contactList.append(button);
+  }
+}
+
+function openContactPanel(): void {
+  closeStickerPanel();
+  contactPanel.hidden = false;
+  contactOpen.setAttribute("aria-expanded", "true");
+  paintContactPanel();
+  if (!peopleReady) {
+    void loadPeople().then(() => {
+      if (!contactPanel.hidden) {
+        paintContactPanel();
+      }
+    });
+  }
+  contactSearch.focus();
 }
 
 function stickerList(): StickerPack[] {
@@ -7160,6 +7605,7 @@ attachFile.addEventListener("click", () => {
     return;
   }
   closeStickerPanel();
+  closeContactPanel();
   fileInput.click();
 });
 
@@ -7290,6 +7736,7 @@ window.addEventListener("drop", (event) => {
     return;
   }
   closeStickerPanel();
+  closeContactPanel();
   void stageDroppedFile(event);
 }, true);
 
@@ -7309,7 +7756,25 @@ void listen<DragPlace>("tauri://drag-drop", (event) => {
     return;
   }
   closeStickerPanel();
+  closeContactPanel();
   void stageDroppedPaths(paths);
+});
+
+contactOpen.addEventListener("click", () => {
+  if (!openId || composerInput.disabled) {
+    return;
+  }
+  if (!contactPanel.hidden) {
+    closeContactPanel();
+    return;
+  }
+  openContactPanel();
+});
+
+contactSearch.addEventListener("input", () => {
+  if (!contactPanel.hidden) {
+    paintContactPanel();
+  }
 });
 
 stickerOpen.addEventListener("click", () => {
@@ -7321,6 +7786,7 @@ stickerOpen.addEventListener("click", () => {
     return;
   }
   hideStickerSuggest();
+  closeContactPanel();
   stickerPanel.hidden = false;
   stickerOpen.setAttribute("aria-expanded", "true");
   void loadStickerShelf();
@@ -7546,8 +8012,17 @@ function showLanguage(): void {
 
 function refreshLocale(): void {
   applyI18n();
+  if (!addGroupView.hidden) {
+    const hint = document.querySelector<HTMLElement>("#add-group-hint");
+    if (hint) {
+      hint.textContent = t(makingRoom ? "roomFriends" : "chooseFriends");
+    }
+  }
   if (!stickerPanel.hidden) {
     paintStickerPanel();
+  }
+  if (!contactPanel.hidden) {
+    paintContactPanel();
   }
   paintDictate();
   if (voiceLive) {
@@ -8506,6 +8981,10 @@ document.addEventListener("keydown", (event) => {
     closeMsgMenu();
     return;
   }
+  if (event.key === "Escape" && !contactPanel.hidden) {
+    closeContactPanel();
+    return;
+  }
   if (event.key === "Escape" && reactionPicker && lightbox.hidden) {
     closeReactionPicker();
     return;
@@ -8752,6 +9231,15 @@ function placeThread(): void {
   pin();
   requestAnimationFrame(pin);
 }
+
+threadBody.addEventListener("scroll", () => {
+  if (threadBody.scrollTop > 96) {
+    olderHold = false;
+  }
+  if (!placingThread) {
+    maybeLoadOlder();
+  }
+});
 
 threadBody.addEventListener("scroll", () => {
   closeReactionPicker();
@@ -9049,8 +9537,14 @@ async function logout(): Promise<void> {
   patchChat(detail);
 };
 
-(window as unknown as { __patchChat?: (detail: { id?: string; name?: string; members?: number | null }) => void }).__patchChat = (detail) => {
+(window as unknown as { __patchChat?: (detail: { id?: string; name?: string; members?: number | null; picture?: string }) => void }).__patchChat = (detail) => {
   patchChat(detail);
+};
+
+(window as unknown as { __dropChat?: (detail: { id?: string }) => void }).__dropChat = (detail) => {
+  if (detail.id) {
+    dropChat(detail.id);
+  }
 };
 
 refresh.addEventListener("click", () => {
